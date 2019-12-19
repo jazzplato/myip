@@ -4,7 +4,6 @@ version = "0.0.1"
 authors = ["Ricthofen <jazzplato@gmail.com>"]
 edition = "2018"
 license = "MIT"
-license-file = "LICENSE"
 readme = "README.md"
 homepage = "https://github.com/jazzplato/myip"
 repository = "https://github.com/jazzplato/myip"
