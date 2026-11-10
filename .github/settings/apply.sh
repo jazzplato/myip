@@ -150,6 +150,16 @@ step_json "environment release: required reviewer $ME_LOGIN" PUT "repos/$REPO/en
 upsert_ruleset master-protection "$SETTINGS_DIR/ruleset-master.json"
 upsert_ruleset release-tags "$SETTINGS_DIR/ruleset-tags.json"
 
+# dependency-review fails without the dependency graph, which the Dependabot alerts step should enable.
+if ! gh api "repos/$REPO/dependency-graph/sbom" --silent >/dev/null 2>&1; then
+  if ((DRY_RUN)); then
+    echo "note: the dependency graph is currently disabled; dependency-review fails until it is on" >&2
+  else
+    echo "warning: the dependency graph is still disabled (it can take a minute); if it stays off," >&2
+    echo "         enable it in Settings -> Advanced Security, or dependency-review keeps failing" >&2
+  fi
+fi
+
 echo
 echo "== Summary for $REPO =="
 printf '%s' "$RESULTS"
