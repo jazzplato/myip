@@ -1,0 +1,8 @@
+# Changes to these paths request review from the maintainer.
+# Ownership alone does not block merges; the human merge is the gate (see docs/process.md).
+/.github/            @jazzplato
+/deny.toml           @jazzplato
+/rust-toolchain.toml @jazzplato
+/AGENTS.md           @jazzplato
+/docs/adr/           @jazzplato
+/Cargo.toml          @jazzplato

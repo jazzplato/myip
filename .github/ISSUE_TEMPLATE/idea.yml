@@ -1,0 +1,31 @@
+name: Idea
+description: Brainstorm. Cheap, unrefined, may be wrong. Not yet something to implement.
+title: "Idea: "
+labels: ["stage:idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are not work items. Anyone may turn one into a spec; only the maintainer marks a spec `stage:ready`.
+        See [docs/process.md](https://github.com/jazzplato/myip/blob/master/docs/process.md).
+  - type: textarea
+    id: idea
+    attributes:
+      label: Idea
+      description: What would change, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now / evidence
+      description: What did you observe (a failure, a measurement, a user complaint) that motivates this?
+    validations:
+      required: true
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: What is unknown or could prove this idea wrong?
+    validations:
+      required: false
