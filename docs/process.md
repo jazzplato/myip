@@ -10,11 +10,11 @@ idea -> spec -> ready -> PR -> CI gates -> human merge -> weekly health report -
 | Step | Who | Gate |
 |---|---|---|
 | `stage:idea` | anyone, agents included | none; an idea is not work |
-| `stage:spec` | maintainer promotes | the Spec form is complete, with a falsifiable Verification table |
-| `stage:ready` | maintainer only | spec reviewed and approved; acceptance criteria are testable |
+| `stage:spec` | anyone may file a spec | the Spec form is complete, with a falsifiable Verification table |
+| `stage:ready` | maintainer only (the only maintainer-only stage transition) | spec reviewed and approved; acceptance criteria are testable |
 | PR | human or agent | one `stage:ready` issue, PR template filled with evidence |
-| CI gates | automated | required check `ci-gate` (fmt, clippy, test, deny, build, ...) must be green |
-| Merge | maintainer only | squash merge by a human, after reading the diff and the evidence |
+| CI gates | automated | required check `ci-gate` (fmt, clippy, test, deny, build, ...) must be green, and the PR branch must be up to date with `master` (use "Update branch" when it is not) |
+| Merge | maintainer only | squash merge by a human, after reading the diff and the evidence; blocked until the PR is up to date with `master` and `ci-gate` has passed on that state |
 | Health report | scheduled (planned, #7) | weekly issue with advisories, drift, MSRV and test-quality signals; feeds new `stage:idea` issues |
 
 `stage:blocked` marks an issue waiting on a decision or dependency.

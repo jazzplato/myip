@@ -23,7 +23,7 @@ docker run --rm -v "$PWD":/src -w /src -e CARGO_TARGET_DIR=/tmp/target rust:"$V"
 Run the other commands the same way (`rustup component add rustfmt clippy` first; `cargo install cargo-deny --locked` for deny). The container target dir keeps `target/` out of your tree.
 
 ## Definition of done
-- All commands above pass and `ci-gate` is green on the PR.
+- All commands above pass and `ci-gate` is green on the PR, which must be up to date with `master` (use "Update branch" when it is not).
 - Every acceptance criterion in the issue has evidence (command + output) in the PR body.
 - Bug fixes include a test that fails on the base commit and passes with the fix.
 - The PR states its assumptions, tradeoffs, risks and rollback.

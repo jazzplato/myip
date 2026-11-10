@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Ideas are not work items. A maintainer promotes one to `stage:spec` when it is worth specifying.
+        Ideas are not work items. Anyone may turn one into a spec; only the maintainer marks a spec `stage:ready`.
         See [docs/process.md](https://github.com/jazzplato/myip/blob/master/docs/process.md).
   - type: textarea
     id: idea

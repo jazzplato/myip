@@ -7,12 +7,14 @@
 #   --dry-run  Print every mutating `gh api` command instead of running it. Read-only
 #              GET requests still run so the plan shows create vs update.
 #   --force    Apply even if `ci-gate` is not defined on the default branch yet.
+#              DANGEROUS: the required check can never report, so no PR can merge.
 #   REPO=owner/name overrides the repository detected by `gh repo view`.
 #
 # Needs an authenticated `gh` with admin rights on the repository.
 # Idempotent: every step declares a state (PUT/PATCH, rulesets upserted by name),
 # so re-running changes nothing. Run it only after the CI workflow that defines
 # `ci-gate` is on the default branch: a required check that never reports blocks every merge.
+# Exit status is non-zero if any step failed; the summary lists each step's result.
 set -euo pipefail
 
 DRY_RUN=0
@@ -51,6 +53,14 @@ record() {
   RESULTS+="$(printf '%-8s %s' "$1" "$2")"$'\n'
 }
 
+# fail_step <description> <reason>: record a failure without aborting the run.
+fail_step() {
+  echo "FAILED: $1" >&2
+  printf '%s\n' "$2" | sed 's/^/    /' >&2
+  record FAILED "$1"
+  FAILED=1
+}
+
 # step <description> <gh api args...>: the only place that mutates the repository.
 step() {
   local desc=$1
@@ -78,10 +88,7 @@ step() {
     echo "ok: $desc"
     record OK "$desc"
   else
-    echo "FAILED: $desc" >&2
-    printf '%s\n' "$out" | sed 's/^/    /' >&2
-    record FAILED "$desc"
-    FAILED=1
+    fail_step "$desc" "$out"
   fi
 }
 
@@ -94,12 +101,24 @@ step_json() {
 }
 
 # upsert_ruleset <name> <file>: create the ruleset, or update it in place by name.
+# If the existing ruleset cannot be looked up reliably, the step fails and is skipped:
+# creating blind could duplicate a ruleset that already exists.
 upsert_ruleset() {
   local name=$1 file=$2 id
-  grep -q "\"name\": \"$name\"" "$file" || die "$file does not declare ruleset \"$name\""
-  id=$(gh api "repos/$REPO/rulesets" --paginate \
-    --jq ".[] | select(.name == \"$name\" and (.source_type // \"Repository\") == \"Repository\") | .id")
-  [[ $id != *$'\n'* ]] || die "several rulesets named \"$name\"; delete the duplicates first"
+  if ! grep -q "\"name\": \"$name\"" "$file"; then
+    fail_step "ruleset $name: skipped" "$file does not declare ruleset \"$name\""
+    return 0
+  fi
+  if ! id=$(gh api "repos/$REPO/rulesets" --paginate \
+    --jq ".[] | select(.name == \"$name\" and (.source_type // \"Repository\") == \"Repository\") | .id" \
+    2>"$TMP/lookup.err"); then
+    fail_step "ruleset $name: lookup failed, skipped" "$(cat "$TMP/lookup.err")"
+    return 0
+  fi
+  if [[ $id == *$'\n'* ]]; then
+    fail_step "ruleset $name: several rulesets with this name, skipped" "delete the duplicates, then re-run"
+    return 0
+  fi
   if [[ -n $id ]]; then
     step "ruleset $name: update (id $id)" --method PUT "repos/$REPO/rulesets/$id" --input "$file"
   else
@@ -123,7 +142,13 @@ CI_YML=$(gh api -H 'Accept: application/vnd.github.raw+json' \
   "repos/$REPO/contents/.github/workflows/ci.yml?ref=$DEFAULT_BRANCH" 2>/dev/null || true)
 if [[ $CI_YML != *ci-gate* ]]; then
   msg="ci-gate is not defined in .github/workflows/ci.yml on $DEFAULT_BRANCH; the master ruleset would block every merge"
-  if ((FORCE || DRY_RUN)); then
+  if ((FORCE)); then
+    {
+      echo "!!! WARNING: --force given but $msg."
+      echo "!!! Continuing can LOCK YOU OUT: no PR, including the one that adds ci-gate, can merge"
+      echo "!!! until you edit or delete the ruleset in Settings -> Rules."
+    } >&2
+  elif ((DRY_RUN)); then
     echo "warning: $msg" >&2
   else
     die "$msg (merge the CI change first, or pass --force)"
@@ -146,7 +171,8 @@ step_json "security: secret scanning and push protection on" PATCH "repos/$REPO"
 step_json "environment release: required reviewer $ME_LOGIN" PUT "repos/$REPO/environments/release" \
   "{\"prevent_self_review\":false,\"reviewers\":[{\"type\":\"User\",\"id\":$ME_ID}]}"
 
-# Rulesets last, so a failure above can never leave a half-protected repo that is also locked.
+# A failed step does not stop later ones, so partial application is possible. The summary and
+# the non-zero exit status report it; fix the cause and re-run (every step is idempotent).
 upsert_ruleset master-protection "$SETTINGS_DIR/ruleset-master.json"
 upsert_ruleset release-tags "$SETTINGS_DIR/ruleset-tags.json"
 
@@ -170,7 +196,8 @@ elif ((FAILED)); then
 else
   echo
   echo "Active rulesets:"
-  gh api "repos/$REPO/rulesets" --jq '.[] | "  \(.name)\t\(.target)\t\(.enforcement)\tid=\(.id)"'
+  gh api "repos/$REPO/rulesets" --jq '.[] | "  \(.name)\t\(.target)\t\(.enforcement)\tid=\(.id)"' ||
+    echo "warning: could not list rulesets to confirm them" >&2
   echo "There are no bypass actors: an emergency change means consciously editing the ruleset."
 fi
 exit "$FAILED"

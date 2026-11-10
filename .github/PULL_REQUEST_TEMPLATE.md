@@ -31,7 +31,7 @@ Closes #N
 
 ## Checklist
 - [ ] Linked issue is `stage:ready` (or this is a `type:process` change approved by the maintainer)
-- [ ] fmt, clippy, test, deny, release build pass (`ci-gate` is green)
+- [ ] fmt, clippy, test, deny, release build pass (`ci-gate` is green) and the branch is up to date with `master`
 - [ ] Protected path touched (`.github/**`, `deny.toml`, `rust-toolchain.toml`, `AGENTS.md`, `docs/adr/**`)? Only allowed under a `type:process` issue
 - [ ] New dependency? Justified here and passes `cargo deny check`
 - [ ] No real network in unit tests
