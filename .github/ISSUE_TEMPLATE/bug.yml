@@ -1,0 +1,51 @@
+name: Bug
+description: Something behaves incorrectly. A maintainer turns it into a spec with a failing test.
+title: "Bug: "
+labels: ["type:bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste tokens or secrets. For security problems use a private advisory, see SECURITY.md.
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact command line and any relevant environment variables (for example `HTTPS_PROXY`).
+      placeholder: "$ myip ip"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Output, exit code (`echo $?`), and whether it was on stdout or stderr.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: myip version or commit
+      description: "For example the output of `cargo install --list | grep myip`, or a git commit SHA."
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15 arm64
+    validations:
+      required: true
+  - type: textarea
+    id: provider
+    attributes:
+      label: ipinfo / provider involved
+      description: Which service answered (for example ipinfo.io) and the raw response or HTTP status if you have it. Redact your IP if you prefer.
+    validations:
+      required: true

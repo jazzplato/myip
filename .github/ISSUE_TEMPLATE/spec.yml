@@ -1,0 +1,92 @@
+name: Spec
+description: A reviewable design with falsifiable acceptance criteria. Becomes implementable when labeled stage:ready.
+title: "Spec: "
+labels: ["stage:spec"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One spec -> one small PR. If it needs more than one PR, make it an epic and split it.
+        Only a maintainer moves a spec to `stage:ready`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing today? Include a measurement or reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: goals
+    attributes:
+      label: Goals
+      description: Numbered, observable outcomes.
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: What this deliberately does not do.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Design
+      description: The approach, concretely enough to review. Name the files, interfaces and user-visible behavior affected.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / tradeoffs
+      description: What else was considered and why it lost.
+      value: |
+        | Option | For | Against |
+        |---|---|---|
+        |  |  |  |
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks
+      description: What could go wrong and the mitigation. `risk:high` specs also need a threat model (see docs/process.md).
+    validations:
+      required: true
+  - type: dropdown
+    id: risk-level
+    attributes:
+      label: Proposed risk level
+      description: The maintainer applies the matching `risk:*` label.
+      options:
+        - low (easy to revert, no user-visible change)
+        - medium (user-visible or hard-ish to revert)
+        - high (changes a contract, security posture or the release process)
+    validations:
+      required: true
+  - type: textarea
+    id: integration
+    attributes:
+      label: Integration
+      description: How this fits with existing code, CI, dependencies, other specs, and what it depends on or blocks.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Each row must be falsifiable. "Would prove us wrong" is the concrete observation that fails the check.
+      value: |
+        | # | Check (command) | Pass criterion | Would prove us wrong |
+        |---|---|---|---|
+        | 1 |  |  |  |
+    validations:
+      required: true
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback
+      description: The exact steps to undo this change and what state is left behind.
+    validations:
+      required: true
