@@ -1,0 +1,55 @@
+name: Drift
+
+# Early warning, never a PR gate: does the project still pass on newer
+# toolchains, and has a new advisory landed against the locked dependencies?
+# (ci.yml also checks advisories on PRs; this catches new ones while no PR is
+# open.)
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  newer-toolchains:
+    name: ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install ${{ matrix.toolchain }}
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustfmt --component clippy --no-self-update
+      - name: Check with ${{ matrix.toolchain }}
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          cargo "+$TOOLCHAIN" fmt --all -- --check
+          cargo "+$TOOLCHAIN" clippy --all-targets --locked -- -D warnings
+          cargo "+$TOOLCHAIN" test --locked
+
+  advisories:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories
+          arguments: --locked
