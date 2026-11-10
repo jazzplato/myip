@@ -2,6 +2,8 @@ name: Drift
 
 # Early warning, never a PR gate: does the project still pass on newer
 # toolchains, and has a new advisory landed against the locked dependencies?
+# (ci.yml also checks advisories on PRs; this catches new ones while no PR is
+# open.)
 on:
   schedule:
     - cron: "17 5 * * 1"

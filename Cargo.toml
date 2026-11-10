@@ -15,4 +15,4 @@ categories = ["command-line-utilities", "network-programming"]
 exclude = [".github/", "deny.toml", "rust-toolchain.toml"]
 
 [dependencies]
-ureq = "3"
+ureq = { version = "3", features = ["platform-verifier"] }
