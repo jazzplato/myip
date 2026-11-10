@@ -2,13 +2,17 @@
 name = "myip"
 version = "0.0.1"
 authors = ["Richthofen <jazzplato@gmail.com>"]
-edition = "2018"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/jazzplato/myip"
 repository = "https://github.com/jazzplato/myip"
 documentation = "https://github.com/jazzplato/myip"
 description = "A simple command line tool to get the ip related information for your host."
+keywords = ["ip", "cli", "network"]
+categories = ["command-line-utilities", "network-programming"]
+exclude = [".github/", "deny.toml", "rust-toolchain.toml"]
 
 [dependencies]
-reqwest = "0.9.24"
+ureq = "3"

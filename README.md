@@ -40,3 +40,19 @@ myip
   "readme": "https://ipinfo.io/missingauth"
 }
 ```
+
+## Development
+The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it automatically. The minimum supported Rust version is declared as `rust-version` in `Cargo.toml`.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+cargo deny check        # https://github.com/EmbarkStudios/cargo-deny
+```
+
+No local C toolchain? Run the same commands in a container:
+
+```bash
+docker run --rm -v "$PWD":/src -w /src -e CARGO_TARGET_DIR=/tmp/target rust:1.99.1 cargo test --locked
+```

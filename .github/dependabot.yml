@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    labels: [type:chore, area:deps, risk:low]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: [type:chore, area:ci, risk:low]
+    commit-message:
+      prefix: "chore(ci)"
+
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [type:chore, area:deps, risk:low]
+    commit-message:
+      prefix: "chore(toolchain)"
