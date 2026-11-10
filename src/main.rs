@@ -41,6 +41,8 @@ fn run(query: &str) -> Result<(), ureq::Error> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .user_agent(USER_AGENT)
+        // reqwest 0.9 ignored HTTP(S)_PROXY unless `use_sys_proxy()` was called.
+        .proxy(None)
         .timeout_global(Some(TIMEOUT))
         .tls_config(
             TlsConfig::builder()
