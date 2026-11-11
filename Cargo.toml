@@ -15,4 +15,5 @@ categories = ["command-line-utilities", "network-programming"]
 exclude = [".github/", "deny.toml", "rust-toolchain.toml"]
 
 [dependencies]
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 ureq = { version = "3", features = ["platform-verifier"] }
