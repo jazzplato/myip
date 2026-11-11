@@ -564,10 +564,7 @@ mod tests {
             ("/a/./b", Some("https://ipinfo.io/a/b")),
             ("/a/b/..", Some("https://ipinfo.io/a/")),
             ("/../city", Some("https://ipinfo.io/city")),
-            (
-                "/a/../../city?q=1#f",
-                Some("https://ipinfo.io/city?q=1#f"),
-            ),
+            ("/a/../../city?q=1#f", Some("https://ipinfo.io/city?q=1#f")),
             // Dots in the query or fragment are data, not path segments.
             ("/a?q=../b", Some("https://ipinfo.io/a?q=../b")),
             ("/a#../b", Some("https://ipinfo.io/a#../b")),
@@ -592,7 +589,7 @@ mod tests {
 
     #[test]
     fn a_redirect_is_requested_with_dot_segments_removed() {
-        for location in ["/a/../city", "http://BASE/a/./b/../city"] {
+        for location in ["/a/../city", "http://BASE/a/./b/../../city"] {
             let (base, request_lines) = serve_recording(|base| {
                 let location = location.replace("http://BASE", base);
                 vec![
