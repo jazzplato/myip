@@ -1360,6 +1360,200 @@ mod tests {
         );
     }
 
+    fn kubepods_cgroup() -> String {
+        format!(
+            "0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod1c2f.slice/cri-containerd-{}.scope\n",
+            id64()
+        )
+    }
+
+    /// A pod with `dnsPolicy: Default`, no service links and no ServiceAccount mount: the
+    /// only Kubernetes evidence is the cgroup path.
+    fn default_dns_pod() -> FakeEnv {
+        FakeEnv::new()
+            .file(CGROUP, &kubepods_cgroup())
+            .file(RESOLV, "search example.com\nnameserver 192.168.1.1\n")
+            .var("POD_NAME", "web-7d9f")
+            .var("POD_NAMESPACE", "prod")
+            .var("POD_IP", "10.1.2.3")
+            .var("NODE_NAME", "node-a")
+    }
+
+    #[test]
+    fn a_kubepods_cgroup_makes_this_a_pod_even_without_service_env_or_mount() {
+        let location = detect(&default_dns_pod());
+        assert_eq!(location.environment, Environment::Kubernetes);
+        assert!(location.kubernetes.detected);
+        assert!(location.container.detected);
+        assert_eq!(
+            text(&location.container.runtime).as_deref(),
+            Some("containerd")
+        );
+        let k = &location.kubernetes;
+        assert_eq!(text(&k.pod_name).as_deref(), Some("web-7d9f"));
+        assert_eq!(source(&k.pod_name), Some("env:POD_NAME"));
+        assert_eq!(basis(&k.pod_name), Some(Basis::Declared));
+        assert_eq!(text(&k.pod_ip).as_deref(), Some("10.1.2.3"));
+        assert_eq!(text(&k.node_name).as_deref(), Some("node-a"));
+        assert_eq!(text(&k.namespace).as_deref(), Some("prod"));
+        assert!(
+            !k.evidence.iter().any(|line| line.contains("ignored")),
+            "{:?}",
+            k.evidence
+        );
+    }
+
+    #[test]
+    fn the_kubepods_evidence_says_observed_and_names_its_source() {
+        let k = detect(&default_dns_pod()).kubernetes;
+        let line = k
+            .evidence
+            .iter()
+            .find(|line| line.contains("kubepods"))
+            .unwrap_or_else(|| panic!("no kubepods evidence in {:?}", k.evidence));
+        assert!(line.contains("observed"), "{line}");
+        assert!(line.contains(CGROUP), "{line}");
+    }
+
+    #[test]
+    fn a_kubepods_cgroup_alone_is_a_pod_with_nothing_declared() {
+        let env = FakeEnv::new().file(CGROUP, &kubepods_cgroup());
+        let location = detect(&env);
+        assert_eq!(location.environment, Environment::Kubernetes);
+        assert!(location.kubernetes.detected);
+        assert!(location.kubernetes.pod_name.is_none());
+        assert!(location.kubernetes.namespace.is_none());
+    }
+
+    #[test]
+    fn a_kubepods_cgroup_without_a_container_id_is_still_a_pod() {
+        let env = FakeEnv::new().file(CGROUP, "0::/kubepods/besteffort/pod1c2f\n");
+        let location = detect(&env);
+        assert_eq!(location.environment, Environment::Kubernetes);
+        assert!(location.kubernetes.detected);
+    }
+
+    #[test]
+    fn a_plain_container_cgroup_does_not_make_pod_variables_count() {
+        let env = FakeEnv::new()
+            .file(CGROUP, &cgroup_v1(&format!("/docker/{}", id64())))
+            .var("POD_NAME", "web");
+        let location = detect(&env);
+        assert_eq!(location.environment, Environment::Container);
+        assert!(!location.kubernetes.detected);
+        assert!(location.kubernetes.pod_name.is_none());
+        assert!(
+            location
+                .kubernetes
+                .evidence
+                .iter()
+                .any(|line| line.contains("no other Kubernetes signal")),
+            "{:?}",
+            location.kubernetes.evidence
+        );
+    }
+
+    #[test]
+    fn the_cluster_domain_is_declared_by_the_resolv_conf() {
+        let location = detect(&FakeEnv::new().file(RESOLV, KUBE_RESOLV));
+        let domain = location.kubernetes.cluster_domain.as_ref().unwrap();
+        assert_eq!(domain.basis, Basis::Declared);
+        assert_eq!(domain.source, "file:/etc/resolv.conf");
+    }
+
+    #[test]
+    fn a_search_domain_that_is_not_a_plain_dns_name_is_not_a_cluster_signal() {
+        let hostile = [
+            "\u{1b}[2J",
+            "\u{1b}[31mx",
+            "a\u{0}b",
+            "a\u{202e}b",
+            "a..b",
+            "a_b",
+            "-x",
+            "x-",
+            "UPPER.case",
+        ];
+        for bad in hostile {
+            let resolv = format!("search prod.svc.{bad} svc.{bad}\nnameserver 10.96.0.10\n");
+            let alone = detect(&FakeEnv::new().file(RESOLV, &resolv));
+            assert!(!alone.kubernetes.detected, "{bad:?} was accepted");
+            let with_service = detect(
+                &FakeEnv::new()
+                    .var("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+                    .file(RESOLV, &resolv),
+            );
+            let k = with_service.kubernetes;
+            assert!(k.cluster_domain.is_none(), "{bad:?}");
+            assert!(k.cluster_dns.is_none(), "{bad:?}");
+            assert!(k.namespace.is_none(), "{bad:?}");
+            let everything = format!("{:?}", k.evidence);
+            assert!(!everything.contains(bad), "{bad:?} reached {everything}");
+        }
+    }
+
+    #[test]
+    fn an_over_long_search_domain_is_not_a_cluster_signal() {
+        let label = "a".repeat(63);
+        let domain = [label.as_str(); 4].join(".");
+        assert!(domain.len() > 253);
+        let resolv = format!("search prod.svc.{domain} svc.{domain}\n");
+        assert!(
+            !detect(&FakeEnv::new().file(RESOLV, &resolv))
+                .kubernetes
+                .detected
+        );
+    }
+
+    #[test]
+    fn a_label_is_a_lowercase_dns_1123_label() {
+        let longest = "a".repeat(63);
+        for good in ["prod", "kube-system", "a", "0abc", "a-1", longest.as_str()] {
+            assert!(valid_label(good), "{good:?} should be valid");
+        }
+        let too_long = "a".repeat(64);
+        for bad in [
+            "",
+            "Prod",
+            "PROD",
+            "pr.od",
+            "pr od",
+            "pr_od",
+            "-prod",
+            "prod-",
+            "pr\u{1b}[2Jod",
+            "pr\nod",
+            "pr\0od",
+            "prodé",
+            too_long.as_str(),
+        ] {
+            assert!(!valid_label(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn every_namespace_source_requires_a_valid_label() {
+        let bad = ["Prod", "pr.od", "pr\u{1b}[2Jod", "pr_od", "-prod"];
+        for ns in bad {
+            let from_env = detect(
+                &FakeEnv::new()
+                    .var("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+                    .var("POD_NAMESPACE", ns),
+            );
+            assert!(from_env.kubernetes.namespace.is_none(), "env {ns:?}");
+            let from_file = detect(&FakeEnv::new().file(NAMESPACE_FILE, &format!("{ns}\n")));
+            assert!(from_file.kubernetes.detected);
+            assert!(from_file.kubernetes.namespace.is_none(), "file {ns:?}");
+            let resolv = format!("search {ns}.svc.cluster.local svc.cluster.local\n");
+            let from_dns = detect(&FakeEnv::new().file(RESOLV, &resolv));
+            assert!(!from_dns.kubernetes.detected, "resolv {ns:?}");
+        }
+        let env = FakeEnv::new()
+            .var("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+            .var("POD_NAMESPACE", &"a".repeat(64));
+        assert!(detect(&env).kubernetes.namespace.is_none());
+    }
+
     #[test]
     fn the_service_account_token_and_ca_are_never_touched() {
         let fake = pod_env();

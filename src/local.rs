@@ -687,6 +687,139 @@ mod tests {
         assert_eq!(json_at(&r.to_json(), "egress.ipv4.gateway"), &Json::Null);
     }
 
+    /// One `/proc/net/ipv6_route` line for a default route; `source` is the source-specific
+    /// constraint (prefix, length), `None` for an unconditional default.
+    fn v6_default(
+        source: Option<(&str, u8)>,
+        gateway: &str,
+        metric: u32,
+        interface: &str,
+    ) -> String {
+        let bits = |text: &str| text.parse::<std::net::Ipv6Addr>().unwrap().to_bits();
+        let (source, length) = source.map_or((0, 0), |(prefix, length)| (bits(prefix), length));
+        format!(
+            "{:032x} 00 {source:032x} {length:02x} {:032x} {metric:08x} 00000001 00000000 00450003 {interface}\n",
+            0u128,
+            bits(gateway),
+        )
+    }
+
+    fn v6_egress_from(table: &str, address: &str) -> (Report, Option<String>) {
+        let env = FakeEnv::new().file(ROUTES_V6, table);
+        let ifaces =
+            FakeInterfaces::with(vec![iface("eth0", 2, &[(address, 64), ("fe80::5", 64)])]);
+        let probe = FakeProbe::new().route(PROBE_V6, address);
+        let r = report(&env, &ifaces, &probe, Family::V6);
+        let gateway = r
+            .ipv6
+            .as_ref()
+            .and_then(|e| e.gateway.as_ref())
+            .map(|g| g.address.to_string());
+        (r, gateway)
+    }
+
+    #[test]
+    fn a_source_specific_ipv6_default_is_matched_against_the_egress_address() {
+        let table = [
+            v6_default(Some(("2001:db8:1::", 64)), "fe80::1", 100, "eth0"),
+            v6_default(Some(("2001:db8:2::", 64)), "fe80::2", 100, "eth0"),
+        ]
+        .concat();
+        let (_, gateway) = v6_egress_from(&table, "2001:db8:2::5");
+        assert_eq!(gateway.as_deref(), Some("fe80::2"));
+        let (_, gateway) = v6_egress_from(&table, "2001:db8:1::5");
+        assert_eq!(gateway.as_deref(), Some("fe80::1"));
+    }
+
+    #[test]
+    fn no_applicable_source_specific_route_means_a_null_gateway_never_a_guess() {
+        let table = v6_default(Some(("2001:db8:1::", 64)), "fe80::1", 100, "eth0");
+        let (r, gateway) = v6_egress_from(&table, "2001:db8:2::5");
+        assert_eq!(gateway, None);
+        assert_eq!(json_at(&r.to_json(), "egress.ipv6.gateway"), &Json::Null);
+        assert!(r.render_text().contains("gateway unknown"));
+        assert!(
+            r.notes.iter().any(|n| n.contains("ipv6_route")),
+            "{:?}",
+            r.notes
+        );
+        assert_eq!(r.exit_code(), 0);
+    }
+
+    #[test]
+    fn a_source_specific_default_beats_an_unconditional_one_with_a_lower_metric() {
+        let table = [
+            v6_default(None, "fe80::a", 50, "eth0"),
+            v6_default(Some(("2001:db8:2::", 64)), "fe80::2", 100, "eth0"),
+        ]
+        .concat();
+        let (_, specific) = v6_egress_from(&table, "2001:db8:2::5");
+        assert_eq!(specific.as_deref(), Some("fe80::2"));
+        let (_, other) = v6_egress_from(&table, "2001:db8:3::5");
+        assert_eq!(other.as_deref(), Some("fe80::a"));
+    }
+
+    #[test]
+    fn equally_good_defaults_with_different_gateways_are_ambiguous_so_null() {
+        let table = [
+            v6_default(None, "fe80::a", 100, "eth0"),
+            v6_default(None, "fe80::b", 100, "eth0"),
+        ]
+        .concat();
+        let (_, gateway) = v6_egress_from(&table, "2001:db8:2::5");
+        assert_eq!(gateway, None);
+        let same = [
+            v6_default(None, "fe80::a", 100, "eth0"),
+            v6_default(None, "fe80::a", 100, "eth0"),
+        ]
+        .concat();
+        let (_, gateway) = v6_egress_from(&same, "2001:db8:2::5");
+        assert_eq!(gateway.as_deref(), Some("fe80::a"));
+    }
+
+    #[test]
+    fn a_missing_egress_result_is_unknown_not_no_route() {
+        let text = report(&FakeEnv::new(), &mac(), &mac_probe(), Family::Any).render_text();
+        let line = text
+            .lines()
+            .find(|l| l.contains("IPv6  "))
+            .unwrap_or_else(|| panic!("no IPv6 row in:\n{text}"));
+        assert_eq!(
+            line.trim(),
+            "IPv6  unknown (the egress probe found no address; -v shows why)"
+        );
+        assert!(!text.contains("no route"), "{text}");
+    }
+
+    #[test]
+    fn an_interface_without_a_name_is_shown_as_unnamed() {
+        let ifaces = FakeInterfaces::with(vec![iface("", 3, &[("10.0.0.1", 8)])]);
+        let probe = FakeProbe::new().route(PROBE_V4, "10.0.0.1");
+        let r = report(&FakeEnv::new(), &ifaces, &probe, Family::V4);
+        let text = r.render_text();
+        assert!(text.contains("(unnamed)"), "{text}");
+        assert!(
+            text.lines()
+                .any(|l| l.trim().starts_with("IPv4  10.0.0.1") && l.contains("on (unnamed)")),
+            "{text}"
+        );
+        assert_eq!(str_at(&r.to_json(), "interfaces.0.name"), "");
+    }
+
+    #[test]
+    fn hostile_interface_names_are_shown_visibly_in_text_and_stay_json_escaped() {
+        let name = "eth\u{1b}[2J0";
+        let ifaces = FakeInterfaces::with(vec![iface(name, 2, &[("10.0.0.1", 8)])]);
+        let probe = FakeProbe::new().route(PROBE_V4, "10.0.0.1");
+        let r = report(&FakeEnv::new(), &ifaces, &probe, Family::V4);
+        let text = r.render_text();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("eth\\x1b[2J0"), "{text}");
+        let json = r.to_json().render(false);
+        assert!(!json.contains('\u{1b}'), "{json:?}");
+        assert!(json.contains("eth\\u001b[2J0"), "{json}");
+    }
+
     #[test]
     fn a_default_route_on_another_interface_is_not_this_egress_gateway() {
         let env = FakeEnv::new().file(
@@ -860,7 +993,10 @@ mod tests {
             line("IPv4  192").trim(),
             "IPv4  192.168.1.20 (private) on en0 via 192.168.1.1"
         );
-        assert_eq!(line("IPv6  ").trim(), "IPv6  none (no route)");
+        assert_eq!(
+            line("IPv6  ").trim(),
+            "IPv6  unknown (the egress probe found no address; -v shows why)"
+        );
         assert!(text.contains("observed"), "{text}");
     }
 

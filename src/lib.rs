@@ -1004,6 +1004,211 @@ mod tests {
     }
 
     #[test]
+    fn all_passes_the_family_to_the_local_section_through_run() {
+        let local_section = |out: &str| {
+            out.split("\"local\":")
+                .nth(1)
+                .and_then(|rest| rest.split(",\"where\":").next())
+                .unwrap_or_else(|| panic!("no local section in {out}"))
+                .to_owned()
+        };
+        for (flag, kept, dropped, target, answer) in [
+            ("-4", "ipv4", "ipv6", PROBE_V4, PUBLIC_IP),
+            ("-6", "ipv6", "ipv4", egress::PROBE_V6, PUBLIC_IPV6),
+        ] {
+            let machine = Machine::laptop();
+            let fetch = everyone_says(answer);
+            let (code, out, err) = run_on(&machine.host(), &fetch, &["--json", flag, "all"]);
+            assert_eq!((code, err.as_str()), (0, ""), "{flag}");
+            let local = local_section(&out);
+            assert!(
+                local.contains(&format!("\"egress\":{{\"{kept}\":")),
+                "{flag}: {local}"
+            );
+            assert!(
+                !local.contains(&format!("\"{dropped}\":")),
+                "{flag}: {local}"
+            );
+            assert_eq!(machine.probe.asked(), [target], "{flag}");
+        }
+    }
+
+    /// Everything that can be put into a variable, a file or an interface name and must
+    /// never reach a terminal as itself.
+    const HOSTILE: [&str; 6] = ["\u{1b}[2J", "\n", "\r", "\0", "\u{85}", "\u{202e}"];
+
+    const SERVICE_ACCOUNT_NAMESPACE: &str =
+        "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+
+    /// Every place `local`, `where` and `all` take free text from.
+    const SOURCES: [&str; 24] = [
+        "env KUBERNETES_SERVICE_HOST",
+        "env KUBERNETES_SERVICE_PORT",
+        "env POD_NAME",
+        "env POD_NAMESPACE",
+        "env POD_IP",
+        "env POD_IPS",
+        "env NODE_NAME",
+        "env HOST_IP",
+        "serviceaccount namespace file",
+        "resolv.conf search domain",
+        "resolv.conf namespace",
+        "resolv.conf nameserver",
+        "cgroup docker id",
+        "cgroup kubepods id",
+        "cgroup lxc name",
+        "mountinfo container id",
+        "containerenv id",
+        "systemd container name",
+        "dockerenv with hostile cgroup",
+        "interface name",
+        "route table interface",
+        "route table gateway",
+        "ipv6 route table interface",
+        "ipv6 route table gateway",
+    ];
+
+    fn machine_with(source: &str, payload: &str) -> Machine {
+        let pod = || FakeEnv::new().var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
+        let mut machine = Machine::laptop();
+        machine.probe = FakeProbe::new()
+            .route(PROBE_V4, "192.168.1.23")
+            .route(egress::PROBE_V6, "2001:db8::5");
+        machine.interfaces = FakeInterfaces::with(vec![
+            iface("lo", 1, &[("127.0.0.1", 8)]),
+            iface("en0", 2, &[("192.168.1.23", 24), ("2001:db8::5", 64)]),
+        ]);
+        let env = match source {
+            "env KUBERNETES_SERVICE_HOST" => FakeEnv::new().var("KUBERNETES_SERVICE_HOST", payload),
+            "serviceaccount namespace file" => {
+                FakeEnv::new().file(SERVICE_ACCOUNT_NAMESPACE, payload)
+            }
+            "resolv.conf search domain" => FakeEnv::new().file(
+                "/etc/resolv.conf",
+                &format!("search prod.svc.{payload} svc.{payload}\nnameserver 10.96.0.10\n"),
+            ),
+            "resolv.conf namespace" => FakeEnv::new().file(
+                "/etc/resolv.conf",
+                &format!("search {payload}.svc.cluster.local svc.cluster.local cluster.local\n"),
+            ),
+            "resolv.conf nameserver" => FakeEnv::new().file(
+                "/etc/resolv.conf",
+                &format!(
+                    "search prod.svc.cluster.local svc.cluster.local\nnameserver {payload}\n"
+                ),
+            ),
+            "cgroup docker id" => FakeEnv::new().file("/proc/self/cgroup", &format!("0::/docker/{payload}\n")),
+            "cgroup kubepods id" => FakeEnv::new().file(
+                "/proc/self/cgroup",
+                &format!("0::/kubepods/besteffort/pod1/cri-containerd-{payload}.scope\n"),
+            ),
+            "cgroup lxc name" => FakeEnv::new().file("/proc/self/cgroup", &format!("0::/lxc/{payload}\n")),
+            "mountinfo container id" => FakeEnv::new().file(
+                "/proc/self/mountinfo",
+                &format!("1 2 0:3 /var/lib/docker/containers/{payload}/hostname /etc/hostname rw - ext4 /dev/sda rw\n"),
+            ),
+            "containerenv id" => FakeEnv::new().file("/run/.containerenv", &format!("id=\"{payload}\"\n")),
+            "systemd container name" => FakeEnv::new().file("/run/systemd/container", payload),
+            "dockerenv with hostile cgroup" => FakeEnv::new()
+                .file("/.dockerenv", "")
+                .file("/proc/self/cgroup", &format!("0::/{payload}/kubepods\n")),
+            "route table interface" => FakeEnv::new().file(
+                "/proc/net/route",
+                &format!("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n{payload}\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"),
+            ),
+            "route table gateway" => FakeEnv::new().file(
+                "/proc/net/route",
+                &format!("Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\nen0\t00000000\t{payload}\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"),
+            ),
+            "ipv6 route table interface" => FakeEnv::new().file(
+                "/proc/net/ipv6_route",
+                &format!("00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000a0027fffe7d0e5b 00000064 00000001 00000000 00450003 {payload}\n"),
+            ),
+            "ipv6 route table gateway" => FakeEnv::new().file(
+                "/proc/net/ipv6_route",
+                &format!("00000000000000000000000000000000 00 00000000000000000000000000000000 00 {payload} 00000064 00000001 00000000 00450003 en0\n"),
+            ),
+            "interface name" => FakeEnv::new(),
+            other => other
+                .strip_prefix("env ")
+                .map_or_else(FakeEnv::new, |var| pod().var(var, payload)),
+        };
+        machine.env = env;
+        if source == "interface name" {
+            machine.interfaces = FakeInterfaces::with(vec![
+                iface("lo", 1, &[("127.0.0.1", 8)]),
+                iface(
+                    &format!("en{payload}"),
+                    2,
+                    &[("192.168.1.23", 24), ("2001:db8::5", 64)],
+                ),
+            ]);
+        }
+        machine
+    }
+
+    #[test]
+    fn no_free_text_reaches_a_terminal_unescaped_in_any_mode() {
+        let commands: [&[&str]; 4] = [&["local"], &["where"], &["all"], &["all", "--verify"]];
+        for source in SOURCES {
+            for bad in HOSTILE {
+                let payload = format!("a{bad}INJECT");
+                for json in [false, true] {
+                    for command in commands {
+                        let machine = machine_with(source, &payload);
+                        let mut args = vec!["-v"];
+                        if json {
+                            args.push("--json");
+                        }
+                        args.extend_from_slice(command);
+                        let (_, out, err) =
+                            run_on(&machine.host(), &everyone_says(PUBLIC_IP), &args);
+                        let label = format!("{source} / {bad:?} / {args:?}");
+                        for forbidden in ['\u{1b}', '\r', '\0', '\u{85}', '\u{202e}'] {
+                            assert!(
+                                !out.contains(forbidden) && !err.contains(forbidden),
+                                "{label}: {forbidden:?} reached the terminal\nstdout: {out:?}\nstderr: {err:?}"
+                            );
+                        }
+                        for line in out.lines().chain(err.lines()) {
+                            assert!(
+                                !line.trim_start().starts_with("INJECT"),
+                                "{label}: the payload started a line of its own: {line:?}"
+                            );
+                        }
+                        for line in err.lines() {
+                            assert!(
+                                line.starts_with("myip: "),
+                                "{label}: stray stderr line {line:?}"
+                            );
+                        }
+                        if json {
+                            assert_eq!(out.matches('\n').count(), 1, "{label}: {out:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_hostile_interface_name_is_still_recognisable_in_text() {
+        let machine = machine_with("interface name", "\u{1b}[2J0");
+        let (code, out, err) = exec_on(&machine, &["local"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.contains("en\\x1b[2J0"), "{out:?}");
+        assert!(out.contains("on en\\x1b[2J0"), "{out:?}");
+        assert!(!out.contains('\u{1b}'), "{out:?}");
+    }
+
+    #[test]
+    fn verbose_diagnostics_are_escaped_too() {
+        let machine = machine_with("interface name", "\u{1b}[2J0");
+        let (_, _, err) = exec_on(&machine, &["-v", "all"]);
+        assert!(!err.contains('\u{1b}'), "{err:?}");
+    }
+
+    #[test]
     fn verbose_all_logs_each_provider_attempt() {
         let fetch = providers([None, Some(PUBLIC_IP), None, None, None, None]);
         let (code, _, err) = run_on(&Machine::laptop().host(), &fetch, &["-v", "all"]);
