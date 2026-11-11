@@ -78,6 +78,8 @@ impl Fetch for UreqFetch {
         };
         let mut builder = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .user_agent(USER_AGENT)
             .timeout_global(Some(opts.timeout))
             .ip_family(match opts.family {
@@ -95,11 +97,31 @@ impl Fetch for UreqFetch {
         }
         let agent: ureq::Agent = builder.build().into();
 
-        let mut response = agent
-            .get(url)
-            .header("Accept", opts.accept)
-            .call()
-            .map_err(map_error)?;
+        let mut current = url.to_owned();
+        let mut hops = 0;
+        let mut response = loop {
+            let response = agent
+                .get(&current)
+                .header("Accept", opts.accept)
+                .call()
+                .map_err(map_error)?;
+            let location = match response.status().as_u16() {
+                301 | 302 | 303 | 307 | 308 => response
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                _ => None,
+            };
+            let Some(location) = location else {
+                break response;
+            };
+            hops += 1;
+            if hops > MAX_REDIRECTS {
+                return Err(FetchError::Transport("too many redirects".to_owned()));
+            }
+            current = same_origin_target(&current, &location)?;
+        };
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -131,6 +153,115 @@ fn map_error(e: ureq::Error) -> FetchError {
         ureq::Error::Timeout(_) => FetchError::Timeout(e.to_string()),
         other => FetchError::Transport(other.to_string()),
     }
+}
+
+const MAX_REDIRECTS: usize = 5;
+
+/// Resolves a `Location` against `base`, accepting only a target on the same scheme
+/// and authority (ADR 0001: no cross-host redirects, no downgrade to http). Relative
+/// references are resolved per RFC 3986 section 5; the origin of the result is always
+/// `base`'s, so a path can never change the host. The target is deliberately not
+/// echoed in the error: it is server-controlled and may carry credentials.
+fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> {
+    let refused = || FetchError::Transport("refused a redirect to a different host".to_owned());
+    let base: ureq::http::Uri = base.parse().map_err(|_| refused())?;
+    let (scheme, authority) = match (base.scheme_str(), base.authority()) {
+        (Some(s), Some(a)) => (s, a),
+        _ => return Err(refused()),
+    };
+    if location.starts_with("//") || location.is_empty() {
+        return Err(refused());
+    }
+    if location.starts_with('/') {
+        return Ok(format!(
+            "{scheme}://{authority}{}",
+            normalize_path(location)
+        ));
+    }
+    if !has_scheme(location) {
+        return Ok(format!(
+            "{scheme}://{authority}{}",
+            resolve_relative(&base, location)
+        ));
+    }
+    let target: ureq::http::Uri = location.parse().map_err(|_| refused())?;
+    let same = target.scheme_str() == Some(scheme)
+        && target
+            .authority()
+            .is_some_and(|a| a.as_str().eq_ignore_ascii_case(authority.as_str()));
+    if !same {
+        return Err(refused());
+    }
+    // `scheme://authority` is kept as received; only what follows is normalized.
+    let head_len = location.find("://").map_or(0, |i| i + 3) + authority.as_str().len();
+    Ok(format!(
+        "{}{}",
+        &location[..head_len],
+        normalize_path(&location[head_len..])
+    ))
+}
+
+/// Removes dot segments from the path of `path_and_tail` (a path optionally followed
+/// by `?query` and `#fragment`, which are data and stay untouched).
+fn normalize_path(path_and_tail: &str) -> String {
+    let cut = path_and_tail
+        .find(['?', '#'])
+        .unwrap_or(path_and_tail.len());
+    let (path, tail) = path_and_tail.split_at(cut);
+    if path.is_empty() {
+        return path_and_tail.to_owned();
+    }
+    format!("{}{tail}", remove_dot_segments(path))
+}
+
+/// Whether `s` starts with `scheme:` (RFC 3986 section 3.1).
+fn has_scheme(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))) == Some(':')
+}
+
+/// The path and query of a scheme-less, authority-less reference resolved against `base`.
+fn resolve_relative(base: &ureq::http::Uri, reference: &str) -> String {
+    let cut = reference.find(['?', '#']).unwrap_or(reference.len());
+    let (path_ref, tail) = reference.split_at(cut);
+    let base_path = base.path();
+    let path = if path_ref.is_empty() {
+        base_path.to_owned()
+    } else {
+        let dir_end = base_path.rfind('/').map_or(0, |i| i + 1);
+        remove_dot_segments(&format!("{}{path_ref}", &base_path[..dir_end]))
+    };
+    // A fragment-only reference keeps the base query; anything else replaces it.
+    let query = match base.query() {
+        Some(q) if path_ref.is_empty() && !tail.starts_with('?') => format!("?{q}"),
+        _ => String::new(),
+    };
+    format!("{path}{query}{tail}")
+}
+
+/// RFC 3986 section 5.2.4 for a path that starts with `/`.
+fn remove_dot_segments(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut out: Vec<&str> = Vec::new();
+    for (i, segment) in segments.iter().enumerate().skip(1) {
+        let last = i == segments.len() - 1;
+        match *segment {
+            "." => {
+                if last {
+                    out.push("");
+                }
+            }
+            ".." => {
+                out.pop();
+                if last {
+                    out.push("");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 #[cfg(test)]
@@ -167,9 +298,13 @@ pub(crate) mod testing {
     }
 
     pub fn ok(status: u16, body: &str) -> Result<Response, FetchError> {
+        reply(status, "application/json", body)
+    }
+
+    pub fn reply(status: u16, content_type: &str, body: &str) -> Result<Response, FetchError> {
         Ok(Response {
             status,
-            content_type: Some("application/json".to_owned()),
+            content_type: Some(content_type.to_owned()),
             body: body.to_owned(),
         })
     }
@@ -206,6 +341,25 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Like `serve`, but builds the responses from the base URL and reports each
+    /// request line it received.
+    fn serve_recording(
+        make: impl FnOnce(&str) -> Vec<Vec<u8>>,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = make(&base);
+        let (seen, request_lines) = mpsc::channel();
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = seen.send(drain_request(&mut stream));
+                let _ = stream.write_all(&response);
+            }
+        });
+        (base, request_lines)
     }
 
     /// Reads one request head and returns its first line.
@@ -277,15 +431,195 @@ mod tests {
     }
 
     #[test]
-    fn follows_redirects() {
-        let target = serve(vec![http_response("200 OK", "", b"final")]);
-        let base = serve(vec![http_response(
-            "302 Found",
-            &format!("Location: {target}/x\r\n"),
-            b"",
-        )]);
+    fn follows_same_origin_redirects() {
+        let base = serve(vec![
+            http_response("302 Found", "Location: /x\r\n", b""),
+            http_response("200 OK", "", b"final"),
+        ]);
         let resp = UreqFetch.get(&base, &opts()).unwrap();
         assert_eq!(resp.body, "final");
+    }
+
+    #[test]
+    fn a_redirect_to_another_origin_is_refused_and_never_contacted() {
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        other.set_nonblocking(true).unwrap();
+        let target = format!("http://{}/x", other.local_addr().unwrap());
+        let base = serve(vec![http_response(
+            "302 Found",
+            &format!("Location: {target}\r\n"),
+            b"",
+        )]);
+        let err = UreqFetch.get(&base, &opts()).unwrap_err();
+        assert!(
+            matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+            "{err:?}"
+        );
+        assert!(
+            !err.to_string().contains(&target),
+            "must not echo the target"
+        );
+        assert_eq!(
+            other.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the other origin must not be contacted"
+        );
+    }
+
+    #[test]
+    fn a_protocol_relative_or_downgrading_redirect_is_refused() {
+        for location in [
+            "//example.com/x",
+            "http://example.com/x",
+            "ftp://example.com/x",
+        ] {
+            let base = serve(vec![http_response(
+                "302 Found",
+                &format!("Location: {location}\r\n"),
+                b"",
+            )]);
+            let err = UreqFetch.get(&base, &opts()).unwrap_err();
+            assert!(
+                matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+                "{location}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_loop_gives_up() {
+        let hop = http_response("302 Found", "Location: /again\r\n", b"");
+        let base = serve(vec![hop; 8]);
+        let err = UreqFetch.get(&base, &opts()).unwrap_err();
+        assert!(
+            matches!(&err, FetchError::Transport(m) if m.contains("too many redirects")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn origin_check_accepts_only_the_same_scheme_and_authority() {
+        let base = "https://ipinfo.io/ip";
+        for (location, want) in [
+            ("/city", Some("https://ipinfo.io/city")),
+            ("https://ipinfo.io/x", Some("https://ipinfo.io/x")),
+            ("https://IPINFO.io/x", Some("https://IPINFO.io/x")),
+            ("http://ipinfo.io/x", None),
+            ("https://ipinfo.io.evil.example/x", None),
+            ("https://ipinfo.io:8443/x", None),
+            ("https://user@ipinfo.io/x", None),
+            ("//evil.example/x", None),
+            ("x", Some("https://ipinfo.io/x")),
+            ("", None),
+        ] {
+            assert_eq!(
+                same_origin_target(base, location).ok().as_deref(),
+                want,
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_references_resolve_against_the_current_url() {
+        let base = "https://ipinfo.io/a/b/c?z=1";
+        for (location, want) in [
+            ("d", Some("https://ipinfo.io/a/b/d")),
+            ("./d", Some("https://ipinfo.io/a/b/d")),
+            ("../d", Some("https://ipinfo.io/a/d")),
+            ("../../../d", Some("https://ipinfo.io/d")),
+            ("d/", Some("https://ipinfo.io/a/b/d/")),
+            ("..", Some("https://ipinfo.io/a/")),
+            ("?q=2", Some("https://ipinfo.io/a/b/c?q=2")),
+            ("d?q=2#f", Some("https://ipinfo.io/a/b/d?q=2#f")),
+            ("#f", Some("https://ipinfo.io/a/b/c?z=1#f")),
+            ("/abs", Some("https://ipinfo.io/abs")),
+            // The origin is always ours, whatever the path looks like.
+            (
+                "../..//evil.example/x",
+                Some("https://ipinfo.io//evil.example/x"),
+            ),
+            (
+                "x@evil.example",
+                Some("https://ipinfo.io/a/b/x@evil.example"),
+            ),
+            ("//evil.example/x", None),
+            ("city:80", None),
+            ("mailto:a@b", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                same_origin_target(base, location).ok().as_deref(),
+                want,
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_segments_are_removed_from_every_kind_of_target() {
+        let base = "https://ipinfo.io/ip";
+        for (location, want) in [
+            ("/a/../city", Some("https://ipinfo.io/city")),
+            ("/a/./b", Some("https://ipinfo.io/a/b")),
+            ("/a/b/..", Some("https://ipinfo.io/a/")),
+            ("/../city", Some("https://ipinfo.io/city")),
+            ("/a/../../city?q=1#f", Some("https://ipinfo.io/city?q=1#f")),
+            // Dots in the query or fragment are data, not path segments.
+            ("/a?q=../b", Some("https://ipinfo.io/a?q=../b")),
+            ("/a#../b", Some("https://ipinfo.io/a#../b")),
+            ("https://ipinfo.io/a/../x", Some("https://ipinfo.io/x")),
+            (
+                "https://IPINFO.io/a/./x?q=../y",
+                Some("https://IPINFO.io/a/x?q=../y"),
+            ),
+            ("https://ipinfo.io", Some("https://ipinfo.io")),
+            ("https://ipinfo.io?q=1", Some("https://ipinfo.io?q=1")),
+            // Still the same origin whatever the path says.
+            ("https://ipinfo.io/a/../../x", Some("https://ipinfo.io/x")),
+            ("https://evil.example/a/../x", None),
+        ] {
+            assert_eq!(
+                same_origin_target(base, location).ok().as_deref(),
+                want,
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_is_requested_with_dot_segments_removed() {
+        for location in ["/a/../city", "http://BASE/a/./b/../../city"] {
+            let (base, request_lines) = serve_recording(|base| {
+                let location = location.replace("http://BASE", base);
+                vec![
+                    http_response("302 Found", &format!("Location: {location}\r\n"), b""),
+                    http_response("200 OK", "", b"final"),
+                ]
+            });
+            let resp = UreqFetch.get(&format!("{base}/start"), &opts()).unwrap();
+            assert_eq!(resp.body, "final", "{location}");
+            let lines: Vec<String> = request_lines.try_iter().collect();
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert_eq!(lines[1], "GET /city HTTP/1.1", "{location}");
+        }
+    }
+
+    #[test]
+    fn a_path_relative_redirect_is_followed() {
+        let base = serve(vec![
+            http_response("302 Found", "Location: x\r\n", b""),
+            http_response("200 OK", "", b"final"),
+        ]);
+        let resp = UreqFetch.get(&base, &opts()).unwrap();
+        assert_eq!(resp.body, "final");
+    }
+
+    #[test]
+    fn a_redirect_without_a_location_is_just_a_response() {
+        let base = serve(vec![http_response("302 Found", "", b"moved")]);
+        let resp = UreqFetch.get(&base, &opts()).unwrap();
+        assert_eq!((resp.status, resp.body.as_str()), (302, "moved"));
     }
 
     #[test]

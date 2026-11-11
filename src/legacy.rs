@@ -1,146 +1,205 @@
-//! The 0.0.1 behavior: print whatever `https://ipinfo.io/<query>` returned.
+//! `myip [FIELD]`: print what `https://ipinfo.io/<FIELD>` returns.
 
 use std::time::Duration;
 
 use crate::Context;
-use crate::http::{Family, FetchOptions, ProxyMode};
+use crate::cli::Options;
+use crate::http::{FetchError, FetchOptions, Response};
+use crate::redact::redact_userinfo;
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
-const DEFAULT_QUERY: &str = "json";
+const DEFAULT_FIELD: &str = "json";
+const MAX_BODY_BYTES: usize = 1 << 20;
+const MAX_DETAIL_CHARS: usize = 200;
 
-/// Builds the request URL, normalizing the query the way the WHATWG URL parser
-/// (used by the old `reqwest::get`) did. `ureq` hands the string to
-/// `http::Uri`, which rejects spaces and control characters outright.
-pub fn build_url(query: &str) -> String {
-    let query = query.trim_end_matches(|c: char| c <= ' ');
-    let mut url = String::from(URL_IPINFO);
-    for c in query.chars() {
-        match c {
-            '\t' | '\n' | '\r' => {}
-            '\\' => url.push('/'),
-            c if c <= ' '
-                || !c.is_ascii()
-                || matches!(c, '\u{7f}' | '"' | '<' | '>' | '`' | '{' | '}') =>
-            {
-                let mut buf = [0; 4];
-                for b in c.encode_utf8(&mut buf).bytes() {
-                    url.push_str(&format!("%{b:02X}"));
-                }
-            }
-            c => url.push(c),
-        }
-    }
-    url
-}
-
-pub fn run(query: Option<&str>, ctx: &mut Context<'_>) -> u8 {
-    let opts = FetchOptions {
-        timeout: Duration::from_secs(30),
-        max_bytes: 10 * 1024 * 1024,
-        family: Family::Any,
-        proxy: ProxyMode::None,
+pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 {
+    let fetch_options = FetchOptions {
+        timeout: Duration::from_secs(options.timeout),
+        max_bytes: MAX_BODY_BYTES,
+        family: options.family(),
+        proxy: options.proxy.clone(),
         accept: "application/json",
     };
-    let url = build_url(query.unwrap_or(DEFAULT_QUERY));
-    match ctx.fetch.get(&url, &opts) {
-        Ok(response) => match write!(ctx.out, "{}", response.body) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        },
-        Err(e) => {
-            let _ = write!(ctx.out, "Error occured: \n{e}\n");
-            1
+    let url = format!("{URL_IPINFO}{}", field.unwrap_or(DEFAULT_FIELD));
+    if options.verbose {
+        let _ = writeln!(ctx.err, "myip: GET {url}");
+    }
+
+    let response = match ctx.fetch.get(&url, &fetch_options) {
+        Ok(response) => response,
+        Err(e) => return fail(ctx, &describe(&e, options.timeout)),
+    };
+    if options.verbose {
+        let _ = writeln!(
+            ctx.err,
+            "myip: HTTP {}, {} bytes",
+            response.status,
+            response.body.len()
+        );
+    }
+    match answer(&response) {
+        Ok(body) => print_line(ctx, body),
+        Err(message) => fail(ctx, &message),
+    }
+}
+
+fn print_line(ctx: &mut Context<'_>, body: &str) -> u8 {
+    let newline = if body.ends_with('\n') { "" } else { "\n" };
+    match write!(ctx.out, "{body}{newline}") {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn fail(ctx: &mut Context<'_>, message: &str) -> u8 {
+    let _ = writeln!(ctx.err, "myip: {}", redact_userinfo(message));
+    1
+}
+
+fn describe(error: &FetchError, timeout_secs: u64) -> String {
+    match error {
+        FetchError::Timeout(_) => format!("request to ipinfo.io timed out after {timeout_secs}s"),
+        FetchError::TooLarge(limit) => {
+            format!("response from ipinfo.io is larger than {limit} bytes")
         }
+        FetchError::Transport(message) => message.clone(),
+    }
+}
+
+/// Accepts only a real answer: 2xx, non-empty, and not a web page.
+/// ipinfo.io labels plain-text answers (`city`, `8.8.8.8/org`) as text/html, so the
+/// content type cannot be trusted and the body is inspected instead.
+fn answer(response: &Response) -> Result<&str, String> {
+    let html = looks_like_html(&response.body);
+    if !(200..300).contains(&response.status) {
+        let mut message = format!("ipinfo.io returned HTTP {}", response.status);
+        if !html && !response.body.trim().is_empty() {
+            message.push_str(": ");
+            message.push_str(&detail(&response.body));
+        }
+        return Err(message);
+    }
+    if response.body.trim().is_empty() {
+        return Err("empty response from ipinfo.io".to_owned());
+    }
+    if html {
+        return Err(
+            "received an HTML page instead of an answer (captive portal or proxy?)".to_owned(),
+        );
+    }
+    Ok(&response.body)
+}
+
+fn looks_like_html(body: &str) -> bool {
+    let mut rest = skip_blank(body);
+    while let Some(after) = rest.strip_prefix("<!--") {
+        match after.split_once("-->") {
+            Some((_, next)) => rest = skip_blank(next),
+            // A comment that never closes is not a plain answer either.
+            None => return true,
+        }
+    }
+    let head: String = rest
+        .chars()
+        .take(15)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    [
+        "<!doctype html",
+        "<html",
+        "<head",
+        "<body",
+        "<title",
+        "<meta",
+    ]
+    .iter()
+    .any(|start| head.starts_with(start))
+}
+
+/// Drops leading whitespace and byte-order marks.
+fn skip_blank(s: &str) -> &str {
+    s.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+}
+
+/// The body on one line, bounded, so an error message stays readable. Credentials are
+/// redacted before truncating, otherwise a cut between the userinfo and the `@` would
+/// leave the secret prefix unredactable.
+fn detail(body: &str) -> String {
+    let flat = redact_userinfo(&body.split_whitespace().collect::<Vec<_>>().join(" "));
+    let mut chars = flat.chars();
+    let shown: String = chars.by_ref().take(MAX_DETAIL_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{shown}...")
+    } else {
+        shown
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::testing::{FakeFetch, ok};
-    use crate::http::{Fetch, FetchError};
 
-    fn run_with(fetch: &FakeFetch, query: Option<&str>) -> (u8, String, String) {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = {
-            let mut ctx = Context {
-                fetch: fetch as &dyn Fetch,
-                out: &mut out,
-                err: &mut err,
-            };
-            run(query, &mut ctx)
-        };
-        (
-            code,
-            String::from_utf8(out).unwrap(),
-            String::from_utf8(err).unwrap(),
-        )
+    #[test]
+    fn html_detection_ignores_case_and_leading_whitespace() {
+        assert!(looks_like_html("\n  <!DOCTYPE HTML><html>"));
+        assert!(looks_like_html("<HTML lang=en>"));
+        assert!(!looks_like_html("Chicago"));
+        assert!(!looks_like_html(
+            "<note>xml is not a captive portal page</note>"
+        ));
     }
 
     #[test]
-    fn build_url_appends_query_to_base() {
-        assert_eq!(build_url("json"), "https://ipinfo.io/json");
-        assert_eq!(build_url("ip"), "https://ipinfo.io/ip");
+    fn html_detection_skips_a_bom_and_leading_comments() {
+        for page in [
+            "\u{feff}<!DOCTYPE html><html></html>",
+            "\u{feff}\n <html>",
+            "<!-- portal -->\n<html><body>Sign in</body></html>",
+            "<!-- a --><!-- b -->\n  <!doctype html>",
+            "\u{feff}<!-- a -->\u{feff}\n<HTML>",
+            "<!-- never closed <html>",
+        ] {
+            assert!(looks_like_html(page), "{page:?}");
+        }
+        for answer in ["<!-- note -->\nChicago", "\u{feff}Chicago", "<!-- x -->"] {
+            assert!(!looks_like_html(answer), "{answer:?}");
+        }
     }
 
     #[test]
-    fn build_url_ignores_trailing_whitespace_and_embedded_newlines() {
-        assert_eq!(build_url("8.8.8.8 "), "https://ipinfo.io/8.8.8.8");
-        assert_eq!(build_url("8.8.8.8\n"), "https://ipinfo.io/8.8.8.8");
-        assert_eq!(build_url("8.8.8.8\r\n"), "https://ipinfo.io/8.8.8.8");
-        assert_eq!(build_url("8.8\n.8.8"), "https://ipinfo.io/8.8.8.8");
+    fn html_detection_recognizes_documents_without_a_doctype_or_html_tag() {
+        for page in [
+            "<head><title>Login</title></head><body>Please sign in</body>",
+            "<BODY onload=x>Please sign in",
+            "\u{feff}<!-- portal -->\n<title>Sign in</title>",
+            "  <meta charset=utf-8><p>Sign in",
+        ] {
+            assert!(looks_like_html(page), "{page:?}");
+        }
+        for answer in [
+            "Chicago",
+            "<note>xml</note>",
+            "{\"ip\": \"1.2.3.4\"}",
+            "AS15169 Google LLC",
+        ] {
+            assert!(!looks_like_html(answer), "{answer:?}");
+        }
     }
 
     #[test]
-    fn build_url_percent_encodes_unsafe_characters() {
-        assert_eq!(build_url("foo bar"), "https://ipinfo.io/foo%20bar");
-        assert_eq!(build_url(" 8.8.8.8"), "https://ipinfo.io/%208.8.8.8");
-        assert_eq!(build_url("a\"b<c>d"), "https://ipinfo.io/a%22b%3Cc%3Ed");
-        assert_eq!(build_url("8.8.8.8\\org"), "https://ipinfo.io/8.8.8.8/org");
-        assert_eq!(build_url("café"), "https://ipinfo.io/caf%C3%A9");
+    fn credentials_are_redacted_before_the_detail_is_truncated() {
+        let body = format!("see http://user:{}@host:1/x for details", "p".repeat(400));
+        let shown = detail(&body);
+        assert!(!shown.contains("ppp"), "{shown}");
+        assert!(shown.contains("http://***@host:1/x"), "{shown}");
     }
 
     #[test]
-    fn no_argument_queries_json() {
-        let fetch = FakeFetch::new(vec![ok(200, "{}")]);
-        let (code, out, _) = run_with(&fetch, None);
-        assert_eq!((code, out.as_str()), (0, "{}"));
-        assert_eq!(fetch.requests.borrow()[0].0, "https://ipinfo.io/json");
-    }
-
-    #[test]
-    fn the_argument_selects_the_path() {
-        let fetch = FakeFetch::new(vec![ok(200, "Chicago")]);
-        let (_, out, _) = run_with(&fetch, Some("city"));
-        assert_eq!(out, "Chicago");
-        assert_eq!(fetch.requests.borrow()[0].0, "https://ipinfo.io/city");
-    }
-
-    #[test]
-    fn requests_keep_the_historical_transport_settings() {
-        let fetch = FakeFetch::new(vec![ok(200, "")]);
-        run_with(&fetch, None);
-        let (_, opts) = fetch.requests.borrow()[0].clone();
-        assert_eq!(opts.timeout, Duration::from_secs(30));
-        assert_eq!(opts.proxy, ProxyMode::None);
-        assert_eq!(opts.family, Family::Any);
-        assert_eq!(opts.accept, "application/json");
-    }
-
-    // The next two tests pin 0.0.1 behavior that the CLI-contract spec (#14) deliberately changes.
-    #[test]
-    fn non_2xx_bodies_are_printed_with_exit_zero() {
-        let fetch = FakeFetch::new(vec![ok(429, "{\"error\":\"rate limited\"}")]);
-        let (code, out, _) = run_with(&fetch, None);
-        assert_eq!((code, out.as_str()), (0, "{\"error\":\"rate limited\"}"));
-    }
-
-    #[test]
-    fn errors_go_to_stdout_with_exit_one() {
-        let fetch = FakeFetch::new(vec![Err(FetchError::Timeout("timeout: global".to_owned()))]);
-        let (code, out, err) = run_with(&fetch, None);
-        assert_eq!(code, 1);
-        assert_eq!(out, "Error occured: \ntimeout: global\n");
-        assert_eq!(err, "");
+    fn detail_is_flattened_and_bounded() {
+        assert_eq!(detail("{\n  \"a\": 1\n}\n"), "{ \"a\": 1 }");
+        let long = "x".repeat(500);
+        let shown = detail(&long);
+        assert_eq!(shown.chars().count(), MAX_DETAIL_CHARS + 3);
+        assert!(shown.ends_with("..."));
     }
 }
