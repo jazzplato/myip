@@ -10,11 +10,12 @@ use std::net::IpAddr;
 
 use crate::egress::EgressProbe;
 use crate::env::Env;
+use crate::fact::{Fact, SCHEMA_VERSION};
 use crate::http::Family;
 use crate::ifaces::Interfaces;
 use crate::json::Json;
-use crate::local::Report;
-use crate::location::Location;
+use crate::local::{self, EgressInfo, Report};
+use crate::location::{self, Environment, Location};
 
 /// The internet's view of this machine, as `all` needs it. The `public` module fills it in;
 /// the seam keeps this module testable without a network.
@@ -33,8 +34,14 @@ pub struct PublicSection {
 
 impl PublicSection {
     /// A section for a lookup that produced no answer.
-    pub fn unavailable(_error: &str) -> Self {
-        unimplemented!()
+    pub fn unavailable(error: &str) -> Self {
+        Self {
+            ip: None,
+            provider: None,
+            error: Some(error.to_owned()),
+            disagree: false,
+            json: Json::object([("ip", Json::Null), ("error", Json::from(error))]),
+        }
     }
 }
 
@@ -48,32 +55,199 @@ pub struct Overview {
 /// Looks at this machine through the given seams and combines it with the public answer.
 /// `family` limits the `local` section, like `-4`/`-6`; `where` ignores it.
 pub fn gather(
-    _env: &dyn Env,
-    _interfaces: &dyn Interfaces,
-    _probe: &dyn EgressProbe,
-    _family: Family,
-    _public: PublicSection,
+    env: &dyn Env,
+    interfaces: &dyn Interfaces,
+    probe: &dyn EgressProbe,
+    family: Family,
+    public: PublicSection,
 ) -> Overview {
-    unimplemented!()
+    Overview {
+        public,
+        local: local::gather(env, interfaces, probe, family),
+        location: location::detect(env),
+    }
+}
+
+/// The local egress address and the public address of one IP family, side by side.
+struct Nat<'a> {
+    public: IpAddr,
+    local: &'a EgressInfo,
+}
+
+impl Nat<'_> {
+    fn translated(&self) -> bool {
+        self.local.address != self.public
+    }
 }
 
 impl Overview {
     /// `0`, or `3` when `--verify` found the providers disagreeing. Never `1`.
     pub fn exit_code(&self) -> u8 {
-        unimplemented!()
+        if self.public.disagree { 3 } else { 0 }
     }
 
     pub fn to_json(&self) -> Json {
-        unimplemented!()
+        Json::object([
+            ("schema_version", Json::from(SCHEMA_VERSION)),
+            ("public", without_schema_version(self.public.json.clone())),
+            ("local", without_schema_version(self.local.to_json())),
+            ("where", without_schema_version(self.location.to_json())),
+            (
+                "highlights",
+                Json::object([
+                    ("nat", self.nat_json()),
+                    ("kubernetes", self.kubernetes_json()),
+                ]),
+            ),
+        ])
     }
 
     pub fn render_text(&self) -> String {
-        unimplemented!()
+        let mut out = String::from("[public]\n");
+        match self.public.ip {
+            Some(ip) => out.push_str(&format!(
+                "  {ip} ({}, observed by {})\n",
+                family_label(ip),
+                self.public
+                    .provider
+                    .as_deref()
+                    .unwrap_or("an external provider")
+            )),
+            None => out.push_str(&format!(
+                "  unavailable: {}\n",
+                self.public.error.as_deref().unwrap_or("no answer")
+            )),
+        }
+        out.push_str("\n[local]\n");
+        out.push_str(&self.local.render_text());
+        out.push_str("\n[where]\n");
+        out.push_str(&self.location.render_text());
+        out.push_str("\n[highlights]\n");
+        out.push_str(&self.nat_line());
+        if self.location.environment == Environment::Kubernetes {
+            out.push_str(&self.kubernetes_lines());
+        }
+        out
     }
 
     /// One line per section that could not be produced, for stderr.
     pub fn notes(&self) -> Vec<String> {
-        unimplemented!()
+        let mut notes = Vec::new();
+        if let Some(error) = &self.public.error {
+            notes.push(format!("public: {error}"));
+        }
+        if let Some(error) = self.local.error() {
+            notes.push(format!("local: {error}"));
+        }
+        notes
+    }
+
+    fn nat(&self) -> Option<Nat<'_>> {
+        let public = self.public.ip?;
+        let local = match public {
+            IpAddr::V4(_) => self.local.ipv4.as_ref(),
+            IpAddr::V6(_) => self.local.ipv6.as_ref(),
+        }?;
+        Some(Nat { public, local })
+    }
+
+    fn nat_json(&self) -> Json {
+        let Some(nat) = self.nat() else {
+            return Json::Null;
+        };
+        Json::object([
+            ("family", Json::from(family_name(nat.public))),
+            ("local", Json::from(nat.local.address.to_string())),
+            ("public", Json::from(nat.public.to_string())),
+            ("translated", Json::from(nat.translated())),
+        ])
+    }
+
+    fn nat_line(&self) -> String {
+        let Some(nat) = self.nat() else {
+            return "  NAT: unknown (needs a public answer and a local egress address of the same IP family)\n"
+                .to_owned();
+        };
+        let family = family_label(nat.public);
+        if nat.translated() {
+            format!(
+                "  NAT: this machine sends from {} ({}) but the internet sees {} ({family}); something in between (NAT, a proxy or a VPN) rewrites the address\n",
+                nat.local.address,
+                nat.local.scope.as_str(),
+                nat.public
+            )
+        } else {
+            format!(
+                "  no NAT: the egress address {} is the address the internet sees ({family})\n",
+                nat.public
+            )
+        }
+    }
+
+    fn kubernetes_json(&self) -> Json {
+        if self.location.environment != Environment::Kubernetes {
+            return Json::Null;
+        }
+        let k = &self.location.kubernetes;
+        Json::object([
+            ("pod_ip", Json::from(fact_text(&k.pod_ip))),
+            ("node_ip", Json::from(fact_text(&k.host_ip))),
+            ("egress_ipv4", Json::from(egress_text(&self.local.ipv4))),
+            ("egress_ipv6", Json::from(egress_text(&self.local.ipv6))),
+            (
+                "public_ip",
+                Json::from(self.public.ip.map(|ip| ip.to_string())),
+            ),
+        ])
+    }
+
+    fn kubernetes_lines(&self) -> String {
+        let k = &self.location.kubernetes;
+        let unknown = || "unknown".to_owned();
+        let egress: Vec<String> = [&self.local.ipv4, &self.local.ipv6]
+            .into_iter()
+            .filter_map(egress_text)
+            .collect();
+        let egress = if egress.is_empty() {
+            unknown()
+        } else {
+            egress.join(", ")
+        };
+        format!(
+            "  kubernetes  pod {}, node {}, egress {egress}, public {}\n  (pod and node addresses are declared by the Pod spec; egress and public are observed)\n",
+            fact_text(&k.pod_ip).unwrap_or_else(unknown),
+            fact_text(&k.host_ip).unwrap_or_else(unknown),
+            self.public.ip.map_or_else(unknown, |ip| ip.to_string()),
+        )
+    }
+}
+
+fn fact_text(fact: &Option<Fact>) -> Option<String> {
+    fact.as_ref().map(Fact::text)
+}
+
+fn egress_text(egress: &Option<EgressInfo>) -> Option<String> {
+    egress.as_ref().map(|e| e.address.to_string())
+}
+
+fn family_name(ip: IpAddr) -> &'static str {
+    if ip.is_ipv4() { "ipv4" } else { "ipv6" }
+}
+
+fn family_label(ip: IpAddr) -> &'static str {
+    if ip.is_ipv4() { "IPv4" } else { "IPv6" }
+}
+
+/// The embedded sections share the document's version instead of repeating it.
+fn without_schema_version(json: Json) -> Json {
+    match json {
+        Json::Object(fields) => Json::Object(
+            fields
+                .into_iter()
+                .filter(|(name, _)| name != "schema_version")
+                .collect(),
+        ),
+        other => other,
     }
 }
 
