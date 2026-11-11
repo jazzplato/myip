@@ -50,6 +50,9 @@ Repository rules live in `.github/settings/`: the `master` and `v*` tag rulesets
 ```
 To undo a ruleset, delete it in Settings -> Rules or with `gh api -X DELETE repos/OWNER/REPO/rulesets/ID`.
 
+## Releases
+A `v*` tag triggers `.github/workflows/release.yml`, which builds, checksums and attests the binaries and creates a draft GitHub Release; a human publishes it and runs `cargo publish`. See [docs/releasing.md](releasing.md).
+
 ## What actually protects `master` (honest limitation)
 GitHub cannot tell an agent that uses the maintainer's credentials from the maintainer. A `master` ruleset with no bypass actors stops accidents and unreviewed pushes, but it does not stop someone who holds the maintainer's token from merging. The real controls are:
 1. **CI as an objective oracle**: `ci-gate` must pass, and tests must be able to fail (bug fixes show a test that fails on base).
