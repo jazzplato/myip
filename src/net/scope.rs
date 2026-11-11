@@ -1,6 +1,6 @@
 //! Where an IP address can be reached from.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// The reachability class of an address. [`Scope::as_str`] is the stable spelling used in
 /// `--json` output; adding a variant is compatible, renaming one is not.
@@ -56,8 +56,70 @@ impl Scope {
 /// Classifies an address. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is classified as
 /// the IPv4 address it carries.
 pub fn classify(ip: IpAddr) -> Scope {
-    let _ = ip;
-    Scope::Global
+    match ip {
+        IpAddr::V4(v4) => classify_v4(v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => classify_v4(v4),
+            None => classify_v6(v6),
+        },
+    }
+}
+
+fn classify_v4(ip: Ipv4Addr) -> Scope {
+    if ip.is_unspecified() {
+        return Scope::Unspecified;
+    }
+    match ip.octets() {
+        [0 | 240..=255, ..] | [192, 0, 0, _] | [198, 18..=19, ..] => Scope::Reserved,
+        [10, ..] | [172, 16..=31, ..] | [192, 168, ..] => Scope::Private,
+        [100, 64..=127, ..] => Scope::Cgnat,
+        [127, ..] => Scope::Loopback,
+        [169, 254, ..] => Scope::LinkLocal,
+        [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _] => Scope::Documentation,
+        [224..=239, ..] => Scope::Multicast,
+        _ => Scope::Global,
+    }
+}
+
+fn classify_v6(ip: Ipv6Addr) -> Scope {
+    let s = ip.segments();
+    if ip.is_unspecified() {
+        Scope::Unspecified
+    } else if ip.is_loopback() {
+        Scope::Loopback
+    } else if s[0] & 0xff00 == 0xff00 {
+        Scope::Multicast
+    } else if s[0] & 0xffc0 == 0xfe80 {
+        Scope::LinkLocal
+    } else if s[0] & 0xfe00 == 0xfc00 {
+        Scope::UniqueLocal
+    } else if s[0] & 0xe000 != 0x2000 {
+        // Only 2000::/3 is allocated for global unicast. This also covers site-local
+        // fec0::/10, the discard prefix 100::/64 and the NAT64 prefixes 64:ff9b::/96 and
+        // 64:ff9b:1::/48, none of which is a host's public address.
+        Scope::Reserved
+    } else if (s[0] == 0x2001 && s[1] == 0x0db8) || (s[0] == 0x3fff && s[1] <= 0x0fff) {
+        Scope::Documentation
+    } else if is_protocol_assignment_v6(&s) {
+        Scope::Reserved
+    } else {
+        Scope::Global
+    }
+}
+
+/// `2001::/23` (IETF protocol assignments: Teredo, benchmarking, deprecated ORCHID, ...)
+/// except the parts IANA marks as globally reachable: the PCP and TURN anycast addresses
+/// `2001:1::1` and `2001:1::2`, AMT `2001:3::/32`, AS112 `2001:4:112::/48`, ORCHIDv2
+/// `2001:20::/28` and the drone remote ID prefix `2001:30::/28`.
+fn is_protocol_assignment_v6(s: &[u16; 8]) -> bool {
+    if s[0] != 0x2001 || s[1] >= 0x0200 {
+        return false;
+    }
+    let anycast = s[1] == 1 && s[2..7] == [0; 5] && matches!(s[7], 1 | 2);
+    let amt = s[1] == 3;
+    let as112 = s[1] == 4 && s[2] == 0x0112;
+    let orchid_v2_or_det = matches!(s[1], 0x0020..=0x003f);
+    !(anycast || amt || as112 || orchid_v2_or_det)
 }
 
 #[cfg(test)]
