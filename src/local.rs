@@ -6,14 +6,18 @@
 //! sent), and the gateway from the Linux routing tables. Whatever cannot be determined is
 //! `null`, never guessed.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
-use crate::egress::EgressProbe;
+use crate::egress::{
+    DefaultRoute, EgressProbe, PROBE_V4, PROBE_V6, gateway_for, parse_ipv4_routes,
+    parse_ipv6_routes,
+};
 use crate::env::Env;
+use crate::fact::{Basis, SCHEMA_VERSION};
 use crate::http::Family;
-use crate::ifaces::Interfaces;
+use crate::ifaces::{Interface, Interfaces, likely_virtual};
 use crate::json::Json;
-use crate::net::Scope;
+use crate::net::{Scope, classify};
 
 const ROUTES_V4: &str = "/proc/net/route";
 const ROUTES_V6: &str = "/proc/net/ipv6_route";
@@ -69,31 +73,332 @@ pub struct Report {
 /// Looks at this machine through the given seams. `family` limits the addresses and the
 /// egress probes to one IP family.
 pub fn gather(
-    _env: &dyn Env,
-    _interfaces: &dyn Interfaces,
-    _probe: &dyn EgressProbe,
-    _family: Family,
+    env: &dyn Env,
+    interfaces: &dyn Interfaces,
+    probe: &dyn EgressProbe,
+    family: Family,
 ) -> Report {
-    let _ = (ROUTES_V4, ROUTES_V6, SOURCE_INTERFACES, SOURCE_EGRESS);
-    unimplemented!()
+    let mut notes = Vec::new();
+    let listed = interfaces
+        .list()
+        .map_err(|e| format!("cannot list network interfaces: {e}"));
+
+    let ipv4 = if family == Family::V6 {
+        None
+    } else {
+        egress(env, probe, listed.as_ref().ok(), V4, &mut notes)
+    };
+    let ipv6 = if family == Family::V4 {
+        None
+    } else {
+        egress(env, probe, listed.as_ref().ok(), V6, &mut notes)
+    };
+
+    let interfaces = listed.map(|list| {
+        list.into_iter()
+            .filter_map(|interface| describe(interface, family, [&ipv4, &ipv6]))
+            .collect()
+    });
+    Report {
+        family,
+        interfaces,
+        ipv4,
+        ipv6,
+        notes,
+    }
+}
+
+/// What differs between the two address families when looking for the egress.
+struct Side {
+    label: &'static str,
+    target: SocketAddr,
+    routes: &'static str,
+    parse: fn(&str) -> Vec<DefaultRoute>,
+    matches: fn(&IpAddr) -> bool,
+}
+
+const V4: Side = Side {
+    label: "IPv4",
+    target: PROBE_V4,
+    routes: ROUTES_V4,
+    parse: parse_ipv4_routes,
+    matches: IpAddr::is_ipv4,
+};
+
+const V6: Side = Side {
+    label: "IPv6",
+    target: PROBE_V6,
+    routes: ROUTES_V6,
+    parse: parse_ipv6_routes,
+    matches: IpAddr::is_ipv6,
+};
+
+fn egress(
+    env: &dyn Env,
+    probe: &dyn EgressProbe,
+    listed: Option<&Vec<Interface>>,
+    side: Side,
+    notes: &mut Vec<String>,
+) -> Option<EgressInfo> {
+    let address = match probe.local_address_towards(side.target) {
+        Ok(ip) if (side.matches)(&ip) && !ip.is_unspecified() => ip,
+        Ok(ip) => {
+            notes.push(format!(
+                "{} egress probe answered {ip}, which is not a usable {} address",
+                side.label, side.label
+            ));
+            return None;
+        }
+        Err(e) => {
+            notes.push(format!("{} egress probe failed: {e}", side.label));
+            return None;
+        }
+    };
+    let interface = listed.and_then(|list| {
+        list.iter()
+            .find(|interface| interface.addresses.iter().any(|a| a.ip == address))
+            .map(|interface| interface.name.clone())
+    });
+    let gateway = match env.read_to_string(side.routes) {
+        Ok(content) => {
+            let routes = (side.parse)(&content);
+            gateway_for(&routes, interface.as_deref()).map(|route| GatewayInfo {
+                address: route.gateway,
+                scope: classify(route.gateway),
+            })
+        }
+        Err(e) => {
+            notes.push(format!("cannot read {}: {e}", side.routes));
+            None
+        }
+    };
+    Some(EgressInfo {
+        address,
+        scope: classify(address),
+        interface,
+        gateway,
+    })
+}
+
+/// Keeps the addresses of the requested family; an interface left with none is dropped.
+fn describe(
+    interface: Interface,
+    family: Family,
+    egresses: [&Option<EgressInfo>; 2],
+) -> Option<InterfaceInfo> {
+    let addresses: Vec<AddressInfo> = interface
+        .addresses
+        .iter()
+        .filter(|a| match family {
+            Family::Any => true,
+            Family::V4 => a.ip.is_ipv4(),
+            Family::V6 => a.ip.is_ipv6(),
+        })
+        .map(|a| AddressInfo {
+            ip: a.ip,
+            prefix_len: a.prefix_len,
+            scope: classify(a.ip),
+            primary_egress: egresses
+                .iter()
+                .any(|e| e.as_ref().is_some_and(|e| e.address == a.ip)),
+        })
+        .collect();
+    if addresses.is_empty() && family != Family::Any {
+        return None;
+    }
+    Some(InterfaceInfo {
+        likely_virtual: likely_virtual(&interface.name),
+        name: interface.name,
+        index: interface.index,
+        addresses,
+    })
+}
+
+fn family_name(ip: &IpAddr) -> &'static str {
+    if ip.is_ipv4() { "ipv4" } else { "ipv6" }
+}
+
+fn routes_source(ip: &IpAddr) -> String {
+    format!("file:{}", if ip.is_ipv4() { ROUTES_V4 } else { ROUTES_V6 })
 }
 
 impl Report {
     /// `1` only when the interface list itself could not be read.
     pub fn exit_code(&self) -> u8 {
-        unimplemented!()
+        u8::from(self.interfaces.is_err())
     }
 
     pub fn error(&self) -> Option<&str> {
-        unimplemented!()
+        self.interfaces.as_ref().err().map(String::as_str)
     }
 
     pub fn to_json(&self) -> Json {
-        unimplemented!()
+        let interfaces = match &self.interfaces {
+            Ok(list) => Json::Array(list.iter().map(interface_json).collect()),
+            Err(_) => Json::Null,
+        };
+        let mut egress = Vec::new();
+        if self.family != Family::V6 {
+            egress.push(("ipv4", egress_json(self.ipv4.as_ref())));
+        }
+        if self.family != Family::V4 {
+            egress.push(("ipv6", egress_json(self.ipv6.as_ref())));
+        }
+        Json::object([
+            ("schema_version", Json::from(SCHEMA_VERSION)),
+            ("interfaces", interfaces),
+            ("egress", Json::object(egress)),
+            ("error", Json::from(self.error())),
+        ])
     }
 
     pub fn render_text(&self) -> String {
-        unimplemented!()
+        let mut out = String::from("interfaces (observed)\n");
+        match &self.interfaces {
+            Err(message) => out.push_str(&format!("  unavailable: {message}\n")),
+            Ok(list) if list.is_empty() => out.push_str("  no interfaces found\n"),
+            Ok(list) => render_interfaces(&mut out, list),
+        }
+        out.push_str(&format!(
+            "egress (observed: a UDP connect() towards {}, which sends nothing)\n",
+            self.probe_targets()
+        ));
+        for (label, egress) in self.egresses() {
+            match egress {
+                None => out.push_str(&format!("  {label}  none (no route)\n")),
+                Some(e) => out.push_str(&format!("  {label}  {}\n", egress_line(e))),
+            }
+        }
+        if self
+            .interfaces
+            .as_ref()
+            .is_ok_and(|list| list.iter().any(|i| i.likely_virtual))
+        {
+            out.push_str("\"likely virtual\" is a guess from the interface name, not a fact.\n");
+        }
+        out
+    }
+
+    fn egresses(&self) -> Vec<(&'static str, Option<&EgressInfo>)> {
+        let mut rows = Vec::new();
+        if self.family != Family::V6 {
+            rows.push((V4.label, self.ipv4.as_ref()));
+        }
+        if self.family != Family::V4 {
+            rows.push((V6.label, self.ipv6.as_ref()));
+        }
+        rows
+    }
+
+    fn probe_targets(&self) -> String {
+        let mut targets = Vec::new();
+        if self.family != Family::V6 {
+            targets.push(PROBE_V4.ip().to_string());
+        }
+        if self.family != Family::V4 {
+            targets.push(PROBE_V6.ip().to_string());
+        }
+        targets.join(" and ")
+    }
+}
+
+fn interface_json(interface: &InterfaceInfo) -> Json {
+    let addresses = interface
+        .addresses
+        .iter()
+        .map(|a| {
+            Json::object([
+                ("ip", Json::from(a.ip.to_string())),
+                ("family", Json::from(family_name(&a.ip))),
+                ("prefix_len", Json::Int(i64::from(a.prefix_len))),
+                ("scope", Json::from(a.scope.as_str())),
+                ("primary_egress", Json::from(a.primary_egress)),
+            ])
+        })
+        .collect();
+    Json::object([
+        ("name", Json::from(interface.name.as_str())),
+        ("index", Json::from(interface.index)),
+        ("likely_virtual", Json::from(interface.likely_virtual)),
+        ("source", Json::from(SOURCE_INTERFACES)),
+        ("basis", Json::from(Basis::Observed.as_str())),
+        ("addresses", Json::Array(addresses)),
+    ])
+}
+
+fn egress_json(egress: Option<&EgressInfo>) -> Json {
+    let Some(egress) = egress else {
+        return Json::Null;
+    };
+    let gateway = match &egress.gateway {
+        None => Json::Null,
+        Some(gateway) => Json::object([
+            ("address", Json::from(gateway.address.to_string())),
+            ("scope", Json::from(gateway.scope.as_str())),
+            ("source", Json::from(routes_source(&gateway.address))),
+            ("basis", Json::from(Basis::Observed.as_str())),
+        ]),
+    };
+    Json::object([
+        ("address", Json::from(egress.address.to_string())),
+        ("scope", Json::from(egress.scope.as_str())),
+        ("interface", Json::from(egress.interface.as_deref())),
+        ("gateway", gateway),
+        ("source", Json::from(SOURCE_EGRESS)),
+        ("basis", Json::from(Basis::Observed.as_str())),
+    ])
+}
+
+fn egress_line(egress: &EgressInfo) -> String {
+    let mut line = format!("{} ({})", egress.address, egress.scope.as_str());
+    match &egress.interface {
+        Some(name) => line.push_str(&format!(" on {name}")),
+        None => line.push_str(", interface unknown"),
+    }
+    match &egress.gateway {
+        Some(gateway) => line.push_str(&format!(" via {}", gateway.address)),
+        None => line.push_str(", gateway unknown"),
+    }
+    line
+}
+
+fn render_interfaces(out: &mut String, list: &[InterfaceInfo]) {
+    let cidr = |a: &AddressInfo| format!("{}/{}", a.ip, a.prefix_len);
+    let addr_width = list
+        .iter()
+        .flat_map(|i| &i.addresses)
+        .map(|a| cidr(a).len())
+        .max()
+        .unwrap_or(0);
+    let scope_width = list
+        .iter()
+        .flat_map(|i| &i.addresses)
+        .map(|a| a.scope.as_str().len())
+        .max()
+        .unwrap_or(0);
+    for interface in list {
+        out.push_str(&format!("  {}", interface.name));
+        if interface.likely_virtual {
+            out.push_str(" (likely virtual)");
+        }
+        out.push('\n');
+        for address in &interface.addresses {
+            let mut line = format!(
+                "    {:<addr_width$}  {:<scope_width$}",
+                cidr(address),
+                address.scope.as_str()
+            );
+            if address.primary_egress {
+                let family = if address.ip.is_ipv4() {
+                    V4.label
+                } else {
+                    V6.label
+                };
+                line.push_str(&format!("  primary egress ({family})"));
+            }
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
     }
 }
 
