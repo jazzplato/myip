@@ -274,8 +274,11 @@ mod tests {
 
     use super::*;
     use crate::cli::Cli;
+    use crate::egress::testing::FakeProbe;
+    use crate::env::testing::FakeEnv;
     use crate::http::ProxyMode;
     use crate::http::testing::{RouteFetch, reply};
+    use crate::ifaces::testing::FakeInterfaces;
     use crate::json::Json;
     use crate::net::{Scope, classify};
 
@@ -319,17 +322,34 @@ mod tests {
         RouteFetch::new(routes)
     }
 
+    /// `public` never looks at the machine, so an empty fixture is enough.
+    fn quiet_host<R>(use_host: impl FnOnce(&crate::Host<'_>) -> R) -> R {
+        let (env, interfaces, probe) = (
+            FakeEnv::new(),
+            FakeInterfaces::with(vec![]),
+            FakeProbe::new(),
+        );
+        use_host(&crate::Host {
+            env: &env,
+            interfaces: &interfaces,
+            probe: &probe,
+        })
+    }
+
     fn go(fetch: &dyn Fetch, args: &[&str]) -> (u8, String, String) {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = crate::run(
-            &args,
-            &mut Context {
-                fetch,
-                out: &mut out,
-                err: &mut err,
-            },
-        );
+        let code = quiet_host(|host| {
+            crate::run(
+                &args,
+                &mut Context {
+                    fetch,
+                    host,
+                    out: &mut out,
+                    err: &mut err,
+                },
+            )
+        });
         (
             code,
             String::from_utf8(out).unwrap(),
@@ -1402,14 +1422,17 @@ no answer:
         for args in [&["public"][..], &["--json", "public"]] {
             let fetch = board(all(Ip(A)));
             let mut err = Vec::new();
-            let code = crate::run(
-                &args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>(),
-                &mut Context {
-                    fetch: &fetch,
-                    out: &mut Closed,
-                    err: &mut err,
-                },
-            );
+            let code = quiet_host(|host| {
+                crate::run(
+                    &args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>(),
+                    &mut Context {
+                        fetch: &fetch,
+                        host,
+                        out: &mut Closed,
+                        err: &mut err,
+                    },
+                )
+            });
             assert_eq!(code, 1, "{args:?}");
         }
     }

@@ -21,11 +21,33 @@ use std::io::Write;
 use clap::Parser;
 
 use cli::{Cli, Command};
+use egress::{EgressProbe, UdpProbe};
+use env::{Env, SystemEnv};
 use http::Fetch;
+use ifaces::{Interfaces, SystemInterfaces};
+
+/// The machine `local`, `where` and `all` look at. Tests substitute fixtures for all three.
+pub struct Host<'a> {
+    pub env: &'a dyn Env,
+    pub interfaces: &'a dyn Interfaces,
+    pub probe: &'a dyn EgressProbe,
+}
+
+impl Host<'static> {
+    /// The real machine.
+    pub fn system() -> Self {
+        Self {
+            env: &SystemEnv,
+            interfaces: &SystemInterfaces,
+            probe: &UdpProbe,
+        }
+    }
+}
 
 /// Everything `run` needs from the outside world, so tests can substitute it.
 pub struct Context<'a> {
     pub fetch: &'a dyn Fetch,
+    pub host: &'a Host<'a>,
     pub out: &'a mut dyn Write,
     pub err: &'a mut dyn Write,
 }
@@ -82,15 +104,65 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::egress::PROBE_V4;
+    use crate::egress::testing::FakeProbe;
+    use crate::env::RecordingEnv;
+    use crate::env::testing::FakeEnv;
     use crate::http::testing::{FakeFetch, ok, reply};
     use crate::http::{Family, FetchError, ProxyMode};
+    use crate::ifaces::testing::{FakeInterfaces, iface};
 
-    fn exec(fetch: &FakeFetch, args: &[&str]) -> (u8, String, String) {
+    /// A fixture machine; nothing here depends on the host the tests run on.
+    struct Machine {
+        env: FakeEnv,
+        interfaces: FakeInterfaces,
+        probe: FakeProbe,
+    }
+
+    impl Machine {
+        fn quiet() -> Self {
+            Self {
+                env: FakeEnv::new(),
+                interfaces: FakeInterfaces::with(vec![]),
+                probe: FakeProbe::new(),
+            }
+        }
+
+        fn laptop() -> Self {
+            Self {
+                env: FakeEnv::new(),
+                interfaces: FakeInterfaces::with(vec![
+                    iface("lo", 1, &[("127.0.0.1", 8)]),
+                    iface("en0", 2, &[("192.168.1.23", 24)]),
+                    iface("utun3", 9, &[("100.64.0.7", 32)]),
+                ]),
+                probe: FakeProbe::new().route(PROBE_V4, "192.168.1.23"),
+            }
+        }
+
+        fn without_interface_access() -> Self {
+            Self {
+                interfaces: FakeInterfaces::failing(std::io::ErrorKind::PermissionDenied),
+                ..Self::laptop()
+            }
+        }
+
+        fn host(&self) -> Host<'_> {
+            Host {
+                env: &self.env,
+                interfaces: &self.interfaces,
+                probe: &self.probe,
+            }
+        }
+    }
+
+    fn run_on(host: &Host<'_>, fetch: &FakeFetch, args: &[&str]) -> (u8, String, String) {
         let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = {
             let mut ctx = Context {
                 fetch,
+                host,
                 out: &mut out,
                 err: &mut err,
             };
@@ -101,6 +173,14 @@ mod tests {
             String::from_utf8(out).unwrap(),
             String::from_utf8(err).unwrap(),
         )
+    }
+
+    fn exec(fetch: &FakeFetch, args: &[&str]) -> (u8, String, String) {
+        run_on(&Machine::quiet().host(), fetch, args)
+    }
+
+    fn exec_on(machine: &Machine, args: &[&str]) -> (u8, String, String) {
+        run_on(&machine.host(), &no_network(), args)
     }
 
     fn no_network() -> FakeFetch {
@@ -410,27 +490,6 @@ mod tests {
     }
 
     #[test]
-    fn flags_before_a_reserved_name_do_not_turn_it_into_a_field() {
-        let cases: [&[&str]; 5] = [
-            &["--json", "local"],
-            &["-4", "where"],
-            &["--timeout", "5", "all"],
-            &["--proxy", "env", "all"],
-            &["-6", "-v", "--json", "local"],
-        ];
-        for args in cases {
-            let fetch = no_network();
-            let (code, out, err) = exec(&fetch, args);
-            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
-            assert!(err.contains("not implemented"), "{args:?}: {err}");
-            assert!(
-                requested(&fetch).is_empty(),
-                "{args:?} must not query ipinfo"
-            );
-        }
-    }
-
-    #[test]
     fn verify_and_extra_arguments_are_only_valid_for_public() {
         let cases: [&[&str]; 6] = [
             &["--verify"],
@@ -446,6 +505,32 @@ mod tests {
             assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
             assert!(err.contains("error:"), "{args:?}: {err}");
             assert!(requested(&fetch).is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn flags_around_a_command_name_do_not_turn_it_into_a_field() {
+        let cases: [&[&str]; 8] = [
+            &["--json", "local"],
+            &["-4", "where"],
+            &["--timeout", "5", "all"],
+            &["--proxy", "env", "all"],
+            &["-6", "-v", "--json", "local"],
+            &["where", "--json"],
+            &["local", "-4"],
+            &["-v", "where"],
+        ];
+        for args in cases {
+            let fetch = no_network();
+            let (code, out, err) = run_on(&Machine::laptop().host(), &fetch, args);
+            assert!(!out.is_empty(), "{args:?}: {err}");
+            assert!(!err.contains("not implemented"), "{args:?}: {err}");
+            assert!(!err.contains("error:"), "{args:?}: {err}");
+            assert_eq!(code, 0, "{args:?}: {err}");
+            assert!(
+                requested(&fetch).is_empty(),
+                "{args:?} must not query ipinfo"
+            );
         }
     }
 
@@ -525,13 +610,200 @@ mod tests {
     }
 
     #[test]
-    fn the_other_dimension_subcommands_are_reserved_but_not_implemented_yet() {
-        for name in ["local", "where", "all"] {
-            let fetch = no_network();
-            let (code, out, err) = exec(&fetch, &[name]);
-            assert_eq!((code, out.as_str()), (1, ""), "{name}");
-            assert!(err.contains("not implemented"), "{name}: {err}");
-            assert!(requested(&fetch).is_empty(), "{name}");
+    fn local_lists_interfaces_with_scope_and_marks_the_primary_egress() {
+        let fetch = no_network();
+        let (code, out, err) = run_on(&Machine::laptop().host(), &fetch, &["local"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.contains("en0"), "{out}");
+        assert!(out.contains("192.168.1.23/24"), "{out}");
+        assert!(out.contains("private"), "{out}");
+        assert!(out.contains("primary egress (IPv4)"), "{out}");
+        assert!(out.contains("utun3 (likely virtual)"), "{out}");
+        assert!(out.contains("cgnat"), "{out}");
+        assert!(
+            requested(&fetch).is_empty(),
+            "local must not use the network"
+        );
+    }
+
+    #[test]
+    fn local_json_is_one_compact_document_with_the_schema_version_first() {
+        let (code, out, err) = exec_on(&Machine::laptop(), &["--json", "local"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(
+            out.starts_with("{\"schema_version\":1,\"interfaces\":[{\"name\":\"lo\""),
+            "{out}"
+        );
+        assert!(out.ends_with("}\n"), "{out}");
+        assert_eq!(out.matches('\n').count(), 1, "{out}");
+        assert!(out.contains("\"primary_egress\":true"), "{out}");
+        assert!(out.contains("\"error\":null"), "{out}");
+    }
+
+    #[test]
+    fn local_filters_by_family_and_probes_only_that_family() {
+        let machine = Machine::laptop();
+        let (code, out, _) = exec_on(&machine, &["-4", "--json", "local"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("\"egress\":{\"ipv4\":{"), "{out}");
+        assert!(!out.contains("ipv6"), "{out}");
+        assert_eq!(machine.probe.asked(), [PROBE_V4]);
+    }
+
+    #[test]
+    fn local_exits_1_only_when_the_interfaces_cannot_be_listed() {
+        let (code, out, err) = exec_on(&Machine::without_interface_access(), &["local"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(
+            err.starts_with("myip: cannot list network interfaces"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn local_json_still_prints_a_document_when_the_interfaces_cannot_be_listed() {
+        let (code, out, err) = exec_on(&Machine::without_interface_access(), &["--json", "local"]);
+        assert_eq!(code, 1);
+        assert!(out.contains("\"interfaces\":null"), "{out}");
+        assert!(
+            out.contains("\"error\":\"cannot list network interfaces"),
+            "{out}"
+        );
+        assert_eq!(out.matches('\n').count(), 1, "{out}");
+        assert!(err.contains("cannot list network interfaces"), "{err}");
+    }
+
+    #[test]
+    fn where_says_host_on_a_bare_machine_and_exits_0() {
+        let (code, out, err) = exec_on(&Machine::quiet(), &["where"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(out.contains("host"), "{out}");
+    }
+
+    #[test]
+    fn where_json_is_one_compact_document_with_the_schema_version_first() {
+        let (code, out, _) = exec_on(&Machine::quiet(), &["--json", "where"]);
+        assert_eq!(code, 0);
+        assert!(
+            out.starts_with("{\"schema_version\":1,\"environment\":\"host\""),
+            "{out}"
+        );
+        assert_eq!(out.matches('\n').count(), 1, "{out}");
+    }
+
+    #[test]
+    fn where_ignores_the_family_flags() {
+        let machine = Machine::laptop();
+        let plain = exec_on(&machine, &["where"]);
+        assert_eq!(exec_on(&machine, &["-4", "where"]), plain);
+        assert_eq!(exec_on(&machine, &["-6", "where"]), plain);
+    }
+
+    #[test]
+    fn where_exits_0_even_when_every_file_is_unreadable() {
+        let mut machine = Machine::quiet();
+        machine.env = FakeEnv::new()
+            .unreadable("/proc/self/cgroup")
+            .unreadable("/proc/self/mountinfo")
+            .unreadable("/etc/resolv.conf");
+        let (code, _, _) = exec_on(&machine, &["where"]);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn where_recognises_a_pod() {
+        let mut machine = Machine::quiet();
+        machine.env = FakeEnv::new().var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
+        let (code, out, _) = exec_on(&machine, &["--json", "where"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("\"environment\":\"kubernetes\""), "{out}");
+    }
+
+    #[test]
+    fn all_prints_every_section_and_exits_0() {
+        let fetch = no_network();
+        let (code, out, _) = run_on(&Machine::laptop().host(), &fetch, &["all"]);
+        assert_eq!(code, 0);
+        for heading in ["[public]", "[local]", "[where]", "[highlights]"] {
+            assert!(out.contains(heading), "{heading} missing in\n{out}");
+        }
+    }
+
+    #[test]
+    fn all_json_is_one_compact_document_with_every_section() {
+        let (code, out, _) = exec_on(&Machine::laptop(), &["--json", "all"]);
+        assert_eq!(code, 0);
+        assert!(
+            out.starts_with("{\"schema_version\":1,\"public\":{"),
+            "{out}"
+        );
+        for key in ["\"local\":{", "\"where\":{", "\"highlights\":{"] {
+            assert!(out.contains(key), "{key} missing in {out}");
+        }
+        assert_eq!(out.matches('\n').count(), 1, "{out}");
+    }
+
+    #[test]
+    fn all_never_exits_1_and_reports_failed_sections_on_stderr() {
+        let (code, out, err) = exec_on(&Machine::without_interface_access(), &["all"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("[local]"), "{out}");
+        assert!(
+            err.contains("myip: local: cannot list network interfaces"),
+            "{err}"
+        );
+        assert!(err.contains("myip: public: "), "{err}");
+    }
+
+    #[test]
+    fn verbose_lists_what_was_read_and_why_a_probe_failed() {
+        let (code, out, err) = exec_on(&Machine::laptop(), &["-v", "local"]);
+        assert_eq!(code, 0);
+        assert!(!out.contains("/proc/"), "{out}");
+        assert!(err.contains("myip: read /proc/net/route"), "{err}");
+
+        let (_, _, err) = exec_on(&Machine::laptop(), &["-v", "where"]);
+        assert!(err.contains("myip: read /proc/self/cgroup"), "{err}");
+        assert!(err.contains("myip: stat /.dockerenv"), "{err}");
+
+        let (_, _, quiet) = exec_on(&Machine::laptop(), &["where"]);
+        assert_eq!(quiet, "");
+    }
+
+    #[test]
+    fn no_command_opens_the_service_account_token() {
+        const DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
+        let fake = FakeEnv::new()
+            .var("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+            .file(&format!("{DIR}/namespace"), "default\n")
+            .file(&format!("{DIR}/token"), "S3CR3T-TOKEN")
+            .file(&format!("{DIR}/ca.crt"), "S3CR3T-CERT");
+        for command in ["local", "where", "all"] {
+            let spy = RecordingEnv::new(&fake);
+            let machine = Machine::laptop();
+            let host = Host {
+                env: &spy,
+                interfaces: &machine.interfaces,
+                probe: &machine.probe,
+            };
+            let (code, out, err) = run_on(&host, &no_network(), &["--json", "-v", command]);
+            assert_eq!(code, 0, "{command}: {err}");
+            let touched: Vec<String> = spy.accesses().iter().map(ToString::to_string).collect();
+            assert!(
+                touched
+                    .iter()
+                    .all(|a| !a.contains("/token") && !a.contains("ca.crt")),
+                "{command} touched a credential: {touched:?}"
+            );
+            assert!(!format!("{out}{err}").contains("S3CR3T"), "{command}");
+            if command != "local" {
+                assert!(
+                    touched
+                        .iter()
+                        .any(|a| a.ends_with("serviceaccount/namespace")),
+                    "{command} must read the namespace file or this test proves nothing: {touched:?}"
+                );
+            }
         }
     }
 
