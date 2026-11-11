@@ -42,7 +42,8 @@ pub struct Response {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchError {
-    Timeout,
+    /// Carries the transport's own message (for ureq, `timeout: global`).
+    Timeout(String),
     TooLarge(usize),
     Transport(String),
 }
@@ -50,9 +51,8 @@ pub enum FetchError {
 impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Timeout => f.write_str("request timed out"),
+            Self::Timeout(msg) | Self::Transport(msg) => f.write_str(msg),
             Self::TooLarge(limit) => write!(f, "response larger than {limit} bytes"),
-            Self::Transport(msg) => f.write_str(msg),
         }
     }
 }
@@ -112,7 +112,7 @@ impl Fetch for UreqFetch {
             .as_reader()
             .take(opts.max_bytes as u64 + 1)
             .read_to_end(&mut raw)
-            .map_err(|e| FetchError::Transport(e.to_string()))?;
+            .map_err(|e| map_error(ureq::Error::from(e)))?;
         if raw.len() > opts.max_bytes {
             return Err(FetchError::TooLarge(opts.max_bytes));
         }
@@ -126,7 +126,7 @@ impl Fetch for UreqFetch {
 
 fn map_error(e: ureq::Error) -> FetchError {
     match e {
-        ureq::Error::Timeout(_) => FetchError::Timeout,
+        ureq::Error::Timeout(_) => FetchError::Timeout(e.to_string()),
         other => FetchError::Transport(other.to_string()),
     }
 }
@@ -206,7 +206,8 @@ mod tests {
         format!("http://{addr}")
     }
 
-    fn drain_request(stream: &mut TcpStream) {
+    /// Reads one request head and returns its first line.
+    fn drain_request(stream: &mut TcpStream) -> String {
         let mut seen = Vec::new();
         let mut buf = [0u8; 512];
         while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -215,6 +216,27 @@ mod tests {
                 Ok(n) => seen.extend_from_slice(&buf[..n]),
             }
         }
+        String::from_utf8_lossy(&seen)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// An HTTP proxy that tunnels one CONNECT and then answers the tunneled request.
+    /// Returns its URL and a channel that yields the CONNECT line it received.
+    fn serve_connect_proxy(body: &'static [u8]) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen, connect_line) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = seen.send(drain_request(&mut stream));
+            let _ = stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+            drain_request(&mut stream);
+            let _ = stream.write_all(&http_response("200 OK", "", body));
+        });
+        (format!("http://{addr}"), connect_line)
     }
 
     fn http_response(status_line: &str, extra_headers: &str, body: &[u8]) -> Vec<u8> {
@@ -286,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stalled_server_times_out() {
+    fn a_stalled_server_times_out_with_the_ureq_message() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (release, held) = mpsc::channel::<()>();
@@ -297,17 +319,54 @@ mod tests {
         let mut o = opts();
         o.timeout = Duration::from_millis(300);
         let err = UreqFetch.get(&format!("http://{addr}"), &o).unwrap_err();
-        assert_eq!(err, FetchError::Timeout);
+        assert_eq!(err, FetchError::Timeout("timeout: global".to_owned()));
         drop(release);
         guard.join().unwrap();
     }
 
+    /// Sends the headers and part of the body, then stalls or hangs up.
+    fn serve_truncated(then_stall: bool) -> (String, mpsc::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (release, held) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            drain_request(&mut stream);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial");
+            if then_stall {
+                let _ = held.recv();
+            }
+        });
+        (format!("http://{addr}"), release)
+    }
+
     #[test]
-    fn connection_refused_is_a_transport_error() {
-        let addr = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap()
-        };
+    fn a_timeout_while_reading_the_body_is_still_a_timeout() {
+        let (url, _release) = serve_truncated(true);
+        let mut o = opts();
+        o.timeout = Duration::from_millis(300);
+        let err = UreqFetch.get(&url, &o).unwrap_err();
+        assert_eq!(err, FetchError::Timeout("timeout: global".to_owned()));
+    }
+
+    #[test]
+    fn a_connection_cut_mid_body_is_a_transport_error_with_the_io_prefix() {
+        let (url, _release) = serve_truncated(false);
+        let err = UreqFetch.get(&url, &opts()).unwrap_err();
+        match err {
+            FetchError::Transport(msg) => assert!(msg.starts_with("io: "), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_peer_that_hangs_up_is_a_transport_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            drop(stream);
+        });
         let err = UreqFetch
             .get(&format!("http://{addr}"), &opts())
             .unwrap_err();
@@ -316,10 +375,12 @@ mod tests {
 
     #[test]
     fn the_family_restriction_is_applied() {
-        let base = serve(vec![http_response("200 OK", "", b"v4")]);
+        let ipv4_only = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut o = opts();
         o.family = Family::V6;
-        let err = UreqFetch.get(&base, &o).unwrap_err();
+        let err = UreqFetch
+            .get(&format!("http://{}", ipv4_only.local_addr().unwrap()), &o)
+            .unwrap_err();
         assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
 
         let base = serve(vec![http_response("200 OK", "", b"v4")]);
@@ -327,16 +388,59 @@ mod tests {
         assert_eq!(UreqFetch.get(&base, &o).unwrap().body, "v4");
     }
 
+    // 192.0.2.1 is unroutable, so only a proxy hit can produce this body.
     #[test]
     fn an_explicit_proxy_url_is_used() {
-        // The target is unroutable, so only a dead-proxy refusal yields `Transport` quickly.
-        let dead = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap()
-        };
+        let (proxy, connect_line) = serve_connect_proxy(b"via-proxy");
         let mut o = opts();
-        o.proxy = ProxyMode::Url(format!("http://{dead}"));
-        let err = UreqFetch.get("http://192.0.2.1/", &o).unwrap_err();
-        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+        o.proxy = ProxyMode::Url(proxy);
+        let resp = UreqFetch.get("http://192.0.2.1/", &o).unwrap();
+        assert_eq!(resp.body, "via-proxy");
+        assert!(
+            connect_line
+                .recv()
+                .unwrap()
+                .starts_with("CONNECT 192.0.2.1:80")
+        );
+    }
+
+    const CHILD_MODE: &str = "MYIP_TEST_PROXY_MODE";
+    const CHILD_TARGET: &str = "MYIP_TEST_TARGET";
+    const CHILD_TEST: &str = "http::tests::environment_proxies_are_honored_only_on_request";
+
+    /// Mutating this process's environment is unsafe in edition 2024, so the test
+    /// re-runs itself as a child process that has the proxy variables set.
+    #[test]
+    fn environment_proxies_are_honored_only_on_request() {
+        if let Ok(mode) = std::env::var(CHILD_MODE) {
+            let mut o = opts();
+            o.proxy = if mode == "env" {
+                ProxyMode::Env
+            } else {
+                ProxyMode::None
+            };
+            let resp = UreqFetch
+                .get(&std::env::var(CHILD_TARGET).unwrap(), &o)
+                .unwrap();
+            println!("BODY={}", resp.body);
+            return;
+        }
+        for (mode, want) in [("none", "BODY=direct"), ("env", "BODY=via-proxy")] {
+            let direct = serve(vec![http_response("200 OK", "", b"direct")]);
+            let (proxy, _) = serve_connect_proxy(b"via-proxy");
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD_MODE, mode)
+                .env(CHILD_TARGET, &direct)
+                .env("HTTP_PROXY", &proxy)
+                .env("http_proxy", &proxy)
+                .env("ALL_PROXY", &proxy)
+                .env("all_proxy", &proxy)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{mode}: {stdout}");
+            assert!(stdout.contains(want), "{mode}: {stdout}");
+        }
     }
 }

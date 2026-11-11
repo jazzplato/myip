@@ -36,7 +36,7 @@ pub fn build_url(query: &str) -> String {
 pub fn run(query: Option<&str>, ctx: &mut Context<'_>) -> u8 {
     let opts = FetchOptions {
         timeout: Duration::from_secs(30),
-        max_bytes: 1 << 20,
+        max_bytes: 10 * 1024 * 1024,
         family: Family::Any,
         proxy: ProxyMode::None,
         accept: "application/json",
@@ -137,10 +137,10 @@ mod tests {
 
     #[test]
     fn errors_go_to_stdout_with_exit_one() {
-        let fetch = FakeFetch::new(vec![Err(FetchError::Timeout)]);
+        let fetch = FakeFetch::new(vec![Err(FetchError::Timeout("timeout: global".to_owned()))]);
         let (code, out, err) = run_with(&fetch, None);
         assert_eq!(code, 1);
-        assert_eq!(out, "Error occured: \nrequest timed out\n");
+        assert_eq!(out, "Error occured: \ntimeout: global\n");
         assert_eq!(err, "");
     }
 }
