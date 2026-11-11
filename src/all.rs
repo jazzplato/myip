@@ -8,14 +8,17 @@
 
 use std::net::IpAddr;
 
+use crate::Context;
+use crate::cli::Options;
 use crate::egress::EgressProbe;
-use crate::env::Env;
+use crate::env::{Env, RecordingEnv};
 use crate::fact::{Fact, SCHEMA_VERSION};
 use crate::http::Family;
 use crate::ifaces::Interfaces;
 use crate::json::Json;
 use crate::local::{self, EgressInfo, Report};
 use crate::location::{self, Environment, Location};
+use crate::output;
 
 /// The internet's view of this machine, as `all` needs it. The `public` module fills it in;
 /// the seam keeps this module testable without a network.
@@ -66,6 +69,31 @@ pub fn gather(
         local: local::gather(env, interfaces, probe, family),
         location: location::detect(env),
     }
+}
+
+/// Prints the overview. A section that failed is reported on stderr and in the document;
+/// the exit code is `0` (or `3` for a `--verify` disagreement), never `1`.
+pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
+    let env = RecordingEnv::new(ctx.host.env);
+    let public = PublicSection::unavailable("myip public is not implemented yet");
+    let overview = gather(
+        &env,
+        ctx.host.interfaces,
+        ctx.host.probe,
+        options.family(),
+        public,
+    );
+    output::trace(options, &env, &overview.local.notes, ctx.err);
+    for note in overview.notes() {
+        let _ = writeln!(ctx.err, "myip: {note}");
+    }
+    let written = output::emit(
+        options,
+        &overview.to_json(),
+        Some(&overview.render_text()),
+        ctx.out,
+    );
+    output::exit_code(written, overview.exit_code())
 }
 
 /// The local egress address and the public address of one IP family, side by side.

@@ -12,6 +12,7 @@ pub mod legacy;
 pub mod local;
 pub mod location;
 pub mod net;
+pub mod output;
 pub mod public;
 pub mod redact;
 
@@ -71,7 +72,9 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
         };
     match (cli.command, cli.field.as_deref()) {
         (Some(Command::Public(args)), None) => public::run(&cli.options, args.verify, ctx),
-        (Some(command), None) => not_implemented(command, ctx),
+        (Some(Command::Local), None) => local::run(&cli.options, ctx),
+        (Some(Command::Where), None) => location::run(&cli.options, ctx),
+        (Some(Command::All), None) => all::run(&cli.options, ctx),
         (Some(command), Some(_)) => {
             let _ = writeln!(
                 ctx.err,
@@ -82,11 +85,6 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
         }
         (None, field) => legacy::run(field, &cli.options, ctx),
     }
-}
-
-fn not_implemented(command: Command, ctx: &mut Context<'_>) -> u8 {
-    let _ = writeln!(ctx.err, "myip: `{}` is not implemented yet", command.name());
-    1
 }
 
 /// Converts OS arguments to UTF-8 without altering them. A non-Unicode argument is
@@ -220,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_the_commands_that_exist_and_hides_the_reserved_one() {
+    fn help_lists_every_command() {
         let (code, out, _) = exec(&no_network(), &["--help"]);
         assert_eq!(code, 0);
         let commands = out
@@ -228,10 +226,9 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("Options:").next())
             .unwrap_or_else(|| panic!("no Commands section in\n{out}"));
-        for name in ["local", "where", "all"] {
+        for name in ["public", "local", "where", "all"] {
             assert!(commands.contains(name), "{name} missing in\n{commands}");
         }
-        assert!(!commands.contains("public"), "{commands}");
     }
 
     #[test]
@@ -539,7 +536,6 @@ mod tests {
             let fetch = no_network();
             let (code, out, err) = run_on(&Machine::laptop().host(), &fetch, args);
             assert!(!out.is_empty(), "{args:?}: {err}");
-            assert!(!err.contains("not implemented"), "{args:?}: {err}");
             assert!(!err.contains("error:"), "{args:?}: {err}");
             assert_eq!(code, 0, "{args:?}: {err}");
             assert!(

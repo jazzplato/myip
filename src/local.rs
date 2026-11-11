@@ -8,16 +8,19 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use crate::Context;
+use crate::cli::Options;
 use crate::egress::{
     DefaultRoute, EgressProbe, PROBE_V4, PROBE_V6, gateway_for, parse_ipv4_routes,
     parse_ipv6_routes,
 };
-use crate::env::Env;
+use crate::env::{Env, RecordingEnv};
 use crate::fact::{Basis, SCHEMA_VERSION};
 use crate::http::Family;
 use crate::ifaces::{Interface, Interfaces, likely_virtual};
 use crate::json::Json;
 use crate::net::{Scope, classify};
+use crate::output;
 
 const ROUTES_V4: &str = "/proc/net/route";
 const ROUTES_V6: &str = "/proc/net/ipv6_route";
@@ -106,6 +109,20 @@ pub fn gather(
         ipv6,
         notes,
     }
+}
+
+/// Prints the report. Exits 1 only when the interfaces could not be listed; the JSON
+/// document is printed regardless, with `interfaces` and `error` saying why.
+pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
+    let env = RecordingEnv::new(ctx.host.env);
+    let report = gather(&env, ctx.host.interfaces, ctx.host.probe, options.family());
+    output::trace(options, &env, &report.notes, ctx.err);
+    if let Some(error) = report.error() {
+        let _ = writeln!(ctx.err, "myip: {error}");
+    }
+    let text = report.error().is_none().then(|| report.render_text());
+    let written = output::emit(options, &report.to_json(), text.as_deref(), ctx.out);
+    output::exit_code(written, report.exit_code())
 }
 
 /// What differs between the two address families when looking for the egress.

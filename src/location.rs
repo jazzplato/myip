@@ -9,9 +9,12 @@
 
 use std::net::IpAddr;
 
-use crate::env::Env;
+use crate::Context;
+use crate::cli::Options;
+use crate::env::{Env, RecordingEnv};
 use crate::fact::{Fact, SCHEMA_VERSION, Value};
 use crate::json::Json;
+use crate::output;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -96,6 +99,21 @@ pub fn detect(env: &dyn Env) -> Location {
         container,
         kubernetes,
     }
+}
+
+/// Prints where this process runs. Always exits 0: what cannot be established is reported
+/// as unknown, never as a failure.
+pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
+    let env = RecordingEnv::new(ctx.host.env);
+    let location = detect(&env);
+    output::trace(options, &env, &[], ctx.err);
+    let written = output::emit(
+        options,
+        &location.to_json(),
+        Some(&location.render_text()),
+        ctx.out,
+    );
+    output::exit_code(written, 0)
 }
 
 struct Signal {
