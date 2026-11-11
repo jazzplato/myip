@@ -268,7 +268,12 @@ mod tests {
         for value in [
             "http://host:not-a-port",
             "http://host:99999",
+            "http://host:0",
+            "http://host:",
             "http://user:S3CR3T@host:not-a-port",
+            "http://user:S3CR3T/x@host:1",
+            "http://host:3128/path",
+            "http://host:3128?x=1",
             "http://",
         ] {
             let fetch = no_network();
@@ -277,6 +282,26 @@ mod tests {
             assert!(err.contains("--proxy"), "{value}: {err}");
             assert!(!err.contains("S3CR3T"), "{value}: {err}");
             assert!(requested(&fetch).is_empty(), "{value}");
+        }
+    }
+
+    #[test]
+    fn well_formed_proxy_urls_are_accepted() {
+        for value in [
+            "http://host",
+            "http://host:3128",
+            "http://host:3128/",
+            "http://[::1]:3128",
+            "http://user:pa%40ss@host:3128",
+            "http://127.0.0.1:65535",
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "1.2.3.4\n")]);
+            let (code, out, err) = exec(&fetch, &["--proxy", value, "ip"]);
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (0, "1.2.3.4\n", ""),
+                "{value}"
+            );
         }
     }
 

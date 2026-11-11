@@ -2,8 +2,8 @@
 
 /// Replaces the userinfo of every `scheme://user:password@host` in `text` with `***`.
 ///
-/// The authority is taken to extend to the next whitespace or quote, so a password
-/// that itself contains `/` or `?` is still covered. This may over-redact an `@` in a
+/// The authority is taken to extend to the next whitespace, so a password that itself
+/// contains `/`, `?` or a quote is still covered. This may over-redact an `@` in a
 /// URL path, which is the safe direction.
 pub fn redact_userinfo(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -11,9 +11,7 @@ pub fn redact_userinfo(text: &str) -> String {
     while let Some(at) = rest.find("://") {
         let (head, tail) = rest.split_at(at + 3);
         out.push_str(head);
-        let end = tail
-            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '`' | '<' | '>'))
-            .unwrap_or(tail.len());
+        let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
         let (authority, after) = tail.split_at(end);
         match authority.rfind('@') {
             Some(i) => {

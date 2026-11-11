@@ -135,11 +135,39 @@ fn proxy_mode(raw: &str) -> Option<ProxyMode> {
     match raw {
         "none" => Some(ProxyMode::None),
         "env" => Some(ProxyMode::Env),
-        url if url.starts_with("http://") && ureq::Proxy::new(url).is_ok() => {
+        url if is_http_proxy_url(url) && ureq::Proxy::new(url).is_ok() => {
             Some(ProxyMode::Url(url.to_owned()))
         }
         _ => None,
     }
+}
+
+/// `http://[userinfo@]host[:port][/]`. ureq parses the URL with `http::Uri`, which lets
+/// `host:not-a-port` and `host:99999` through to fail later as transport errors, so the
+/// authority is checked here from that same parse (no second parser to disagree with).
+fn is_http_proxy_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<ureq::http::Uri>() else {
+        return false;
+    };
+    let Some(authority) = uri.authority() else {
+        return false;
+    };
+    let host = authority.host();
+    let hostport = authority.as_str().rsplit('@').next().unwrap_or_default();
+    let suffix = hostport.get(host.len()..).unwrap_or("?");
+    let port_ok = match suffix.strip_prefix(':') {
+        None => suffix.is_empty(),
+        Some(port) => {
+            !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|p| p != 0)
+        }
+    };
+    uri.scheme_str() == Some("http")
+        && !host.is_empty()
+        && port_ok
+        && uri.query().is_none()
+        && matches!(uri.path(), "" | "/")
 }
 
 /// Validates `--proxy` without letting clap quote the rejected value, which may carry

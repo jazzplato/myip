@@ -197,8 +197,7 @@ fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> 
 fn has_scheme(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-        && chars.find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-            == Some(':')
+        && chars.find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))) == Some(':')
 }
 
 /// The path and query of a scheme-less, authority-less reference resolved against `base`.
