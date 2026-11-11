@@ -146,6 +146,11 @@ mod tests {
             "caf\u{e9}",
             "a\nb",
             "a\\b",
+            "/city",
+            "//example.com",
+            "a//b",
+            "https://example.com",
+            "file:///etc/passwd",
         ];
         for field in cases {
             let fetch = no_network();
@@ -155,6 +160,34 @@ mod tests {
             assert!(err.contains("error:"), "{field:?}: {err}");
             assert!(requested(&fetch).is_empty(), "{field:?}");
         }
+    }
+
+    #[test]
+    fn proxy_credentials_are_never_printed() {
+        const SECRET: &str = "s3cr3t";
+        let proxy = format!("http://user:{SECRET}@proxy.example:3128");
+
+        // clap echoes an invalid value in its usage error.
+        let fetch = no_network();
+        let (code, out, err) = exec(&fetch, &["--proxy", &format!("ftp://user:{SECRET}@h:1")]);
+        assert_eq!(code, 2);
+        assert!(!format!("{out}{err}").contains(SECRET), "{err}");
+        assert!(err.contains("***@h:1"), "{err}");
+
+        // A transport error may quote the proxy URL.
+        let fetch = FakeFetch::new(vec![Err(FetchError::Transport(format!(
+            "proxy {proxy} refused the connection"
+        )))]);
+        let (code, out, err) = exec(&fetch, &["-v", "--proxy", &proxy, "ip"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(!err.contains(SECRET), "{err}");
+        assert!(err.contains("***@proxy.example:3128"), "{err}");
+
+        // A successful verbose run never mentions it either.
+        let fetch = FakeFetch::new(vec![ok(200, "1.2.3.4\n")]);
+        let (code, out, err) = exec(&fetch, &["-v", "--proxy", &proxy, "ip"]);
+        assert_eq!((code, out.as_str()), (0, "1.2.3.4\n"));
+        assert!(!err.contains(SECRET), "{err}");
     }
 
     #[test]
