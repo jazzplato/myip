@@ -52,7 +52,9 @@ impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Timeout(msg) | Self::Transport(msg) => f.write_str(msg),
-            Self::TooLarge(limit) => write!(f, "response larger than {limit} bytes"),
+            Self::TooLarge(limit) => {
+                write!(f, "the response body is larger than request limit: {limit}")
+            }
         }
     }
 }
@@ -436,6 +438,10 @@ mod tests {
                 .env("http_proxy", &proxy)
                 .env("ALL_PROXY", &proxy)
                 .env("all_proxy", &proxy)
+                .env_remove("NO_PROXY")
+                .env_remove("no_proxy")
+                .env_remove("HTTPS_PROXY")
+                .env_remove("https_proxy")
                 .output()
                 .unwrap();
             let stdout = String::from_utf8_lossy(&out.stdout);
