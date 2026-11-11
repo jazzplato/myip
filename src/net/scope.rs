@@ -24,8 +24,11 @@ pub enum Scope {
     /// `2001:db8::/32` and `3fff::/20`.
     Documentation,
     /// Any other address that is not part of the public internet: `0.0.0.0/8`, `240.0.0.0/4`
-    /// (including the broadcast address), IETF protocol assignments, benchmarking, and
-    /// everything outside the allocated IPv6 global unicast space `2000::/3`.
+    /// (including the broadcast address), IETF protocol assignments (`192.0.0.0/24`,
+    /// `2001::/23`, minus the parts IANA marks globally reachable), `192.88.99.2`, benchmarking,
+    /// and everything outside the allocated IPv6 global unicast space `2000::/3`. That includes
+    /// the NAT64 translation prefix `64:ff9b::/96`: IANA marks it globally reachable, but it
+    /// only ever encodes someone else's IPv4 address and is never a host's own address.
     Reserved,
     /// A publicly routable unicast address.
     Global,
@@ -70,7 +73,10 @@ fn classify_v4(ip: Ipv4Addr) -> Scope {
         return Scope::Unspecified;
     }
     match ip.octets() {
-        [0 | 240..=255, ..] | [192, 0, 0, _] | [198, 18..=19, ..] => Scope::Reserved,
+        [0 | 240..=255, ..] | [198, 18..=19, ..] | [192, 88, 99, 2] => Scope::Reserved,
+        // 192.0.0.0/24 is reserved except the PCP (.9) and TURN (.10) anycast addresses.
+        [192, 0, 0, 9 | 10] => Scope::Global,
+        [192, 0, 0, _] => Scope::Reserved,
         [10, ..] | [172, 16..=31, ..] | [192, 168, ..] => Scope::Private,
         [100, 64..=127, ..] => Scope::Cgnat,
         [127, ..] => Scope::Loopback,
@@ -108,14 +114,14 @@ fn classify_v6(ip: Ipv6Addr) -> Scope {
 }
 
 /// `2001::/23` (IETF protocol assignments: Teredo, benchmarking, deprecated ORCHID, ...)
-/// except the parts IANA marks as globally reachable: the PCP and TURN anycast addresses
-/// `2001:1::1` and `2001:1::2`, AMT `2001:3::/32`, AS112 `2001:4:112::/48`, ORCHIDv2
-/// `2001:20::/28` and the drone remote ID prefix `2001:30::/28`.
+/// except the parts IANA marks as globally reachable: the PCP, TURN and DNS-SD SRP anycast
+/// addresses `2001:1::1`, `2001:1::2` and `2001:1::3`, AMT `2001:3::/32`, AS112
+/// `2001:4:112::/48`, ORCHIDv2 `2001:20::/28` and the drone remote ID prefix `2001:30::/28`.
 fn is_protocol_assignment_v6(s: &[u16; 8]) -> bool {
     if s[0] != 0x2001 || s[1] >= 0x0200 {
         return false;
     }
-    let anycast = s[1] == 1 && s[2..7] == [0; 5] && matches!(s[7], 1 | 2);
+    let anycast = s[1] == 1 && s[2..7] == [0; 5] && matches!(s[7], 1..=3);
     let amt = s[1] == 3;
     let as112 = s[1] == 4 && s[2] == 0x0112;
     let orchid_v2_or_det = matches!(s[1], 0x0020..=0x003f);
