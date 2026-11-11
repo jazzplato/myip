@@ -173,7 +173,10 @@ fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> 
         return Err(refused());
     }
     if location.starts_with('/') {
-        return Ok(format!("{scheme}://{authority}{location}"));
+        return Ok(format!(
+            "{scheme}://{authority}{}",
+            normalize_path(location)
+        ));
     }
     if !has_scheme(location) {
         return Ok(format!(
@@ -186,11 +189,29 @@ fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> 
         && target
             .authority()
             .is_some_and(|a| a.as_str().eq_ignore_ascii_case(authority.as_str()));
-    if same {
-        Ok(location.to_owned())
-    } else {
-        Err(refused())
+    if !same {
+        return Err(refused());
     }
+    // `scheme://authority` is kept as received; only what follows is normalized.
+    let head_len = location.find("://").map_or(0, |i| i + 3) + authority.as_str().len();
+    Ok(format!(
+        "{}{}",
+        &location[..head_len],
+        normalize_path(&location[head_len..])
+    ))
+}
+
+/// Removes dot segments from the path of `path_and_tail` (a path optionally followed
+/// by `?query` and `#fragment`, which are data and stay untouched).
+fn normalize_path(path_and_tail: &str) -> String {
+    let cut = path_and_tail
+        .find(['?', '#'])
+        .unwrap_or(path_and_tail.len());
+    let (path, tail) = path_and_tail.split_at(cut);
+    if path.is_empty() {
+        return path_and_tail.to_owned();
+    }
+    format!("{}{tail}", remove_dot_segments(path))
 }
 
 /// Whether `s` starts with `scheme:` (RFC 3986 section 3.1).
@@ -320,6 +341,25 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Like `serve`, but builds the responses from the base URL and reports each
+    /// request line it received.
+    fn serve_recording(
+        make: impl FnOnce(&str) -> Vec<Vec<u8>>,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = make(&base);
+        let (seen, request_lines) = mpsc::channel();
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = seen.send(drain_request(&mut stream));
+                let _ = stream.write_all(&response);
+            }
+        });
+        (base, request_lines)
     }
 
     /// Reads one request head and returns its first line.
@@ -513,6 +553,58 @@ mod tests {
                 want,
                 "{location:?}"
             );
+        }
+    }
+
+    #[test]
+    fn dot_segments_are_removed_from_every_kind_of_target() {
+        let base = "https://ipinfo.io/ip";
+        for (location, want) in [
+            ("/a/../city", Some("https://ipinfo.io/city")),
+            ("/a/./b", Some("https://ipinfo.io/a/b")),
+            ("/a/b/..", Some("https://ipinfo.io/a/")),
+            ("/../city", Some("https://ipinfo.io/city")),
+            (
+                "/a/../../city?q=1#f",
+                Some("https://ipinfo.io/city?q=1#f"),
+            ),
+            // Dots in the query or fragment are data, not path segments.
+            ("/a?q=../b", Some("https://ipinfo.io/a?q=../b")),
+            ("/a#../b", Some("https://ipinfo.io/a#../b")),
+            ("https://ipinfo.io/a/../x", Some("https://ipinfo.io/x")),
+            (
+                "https://IPINFO.io/a/./x?q=../y",
+                Some("https://IPINFO.io/a/x?q=../y"),
+            ),
+            ("https://ipinfo.io", Some("https://ipinfo.io")),
+            ("https://ipinfo.io?q=1", Some("https://ipinfo.io?q=1")),
+            // Still the same origin whatever the path says.
+            ("https://ipinfo.io/a/../../x", Some("https://ipinfo.io/x")),
+            ("https://evil.example/a/../x", None),
+        ] {
+            assert_eq!(
+                same_origin_target(base, location).ok().as_deref(),
+                want,
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_is_requested_with_dot_segments_removed() {
+        for location in ["/a/../city", "http://BASE/a/./b/../city"] {
+            let (base, request_lines) = serve_recording(|base| {
+                let location = location.replace("http://BASE", base);
+                vec![
+                    http_response("302 Found", &format!("Location: {location}\r\n"), b""),
+                    http_response("200 OK", "", b"final"),
+                ]
+            });
+            let resp = UreqFetch.get(&format!("{base}/start"), &opts()).unwrap();
+            assert_eq!(resp.body, "final", "{location}");
+            let lines: Vec<String> = request_lines.try_iter().collect();
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert_eq!(lines[1], "GET /city HTTP/1.1", "{location}");
         }
     }
 
