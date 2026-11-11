@@ -1,6 +1,10 @@
 //! Command-line surface. The contract is recorded in ADR 0001.
 
-use clap::{Args, Parser, Subcommand};
+use std::ffi::OsStr;
+
+use clap::builder::TypedValueParser;
+use clap::error::ErrorKind;
+use clap::{Arg, Args, Command as ClapCommand, Parser, Subcommand};
 
 use crate::http::{Family, ProxyMode};
 
@@ -16,7 +20,7 @@ Exit codes:
 /// Without a subcommand, prints what ipinfo.io returns for FIELD (default: json).
 #[derive(Parser, Debug)]
 #[command(name = "myip", version, after_help = EXIT_CODES)]
-#[command(args_conflicts_with_subcommands = true, disable_help_subcommand = true)]
+#[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(flatten)]
     pub options: Options,
@@ -58,7 +62,7 @@ pub struct Options {
         long,
         value_name = "none|env|URL",
         default_value = "none",
-        value_parser = parse_proxy,
+        value_parser = ProxyParser,
         global = true
     )]
     pub proxy: ProxyMode,
@@ -127,13 +131,36 @@ fn parse_field(raw: &str) -> Result<String, String> {
     Ok(field.to_owned())
 }
 
-fn parse_proxy(raw: &str) -> Result<ProxyMode, String> {
+fn proxy_mode(raw: &str) -> Option<ProxyMode> {
     match raw {
-        "none" => Ok(ProxyMode::None),
-        "env" => Ok(ProxyMode::Env),
+        "none" => Some(ProxyMode::None),
+        "env" => Some(ProxyMode::Env),
         url if url.starts_with("http://") && url.len() > "http://".len() => {
-            Ok(ProxyMode::Url(url.to_owned()))
+            Some(ProxyMode::Url(url.to_owned()))
         }
-        _ => Err("expected `none`, `env` or an http://HOST:PORT URL".to_owned()),
+        _ => None,
+    }
+}
+
+/// Validates `--proxy` without letting clap quote the rejected value, which may carry
+/// credentials in any shape (with or without a scheme, with spaces or quotes).
+#[derive(Clone)]
+struct ProxyParser;
+
+impl TypedValueParser for ProxyParser {
+    type Value = ProxyMode;
+
+    fn parse_ref(
+        &self,
+        cmd: &ClapCommand,
+        _arg: Option<&Arg>,
+        value: &OsStr,
+    ) -> Result<ProxyMode, clap::Error> {
+        value.to_str().and_then(proxy_mode).ok_or_else(|| {
+            cmd.clone().error(
+                ErrorKind::InvalidValue,
+                "invalid value for '--proxy <none|env|URL>': expected `none`, `env` or an http://HOST:PORT URL",
+            )
+        })
     }
 }

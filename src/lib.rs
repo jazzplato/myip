@@ -37,9 +37,17 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
                 return u8::try_from(e.exit_code()).unwrap_or(2);
             }
         };
-    match cli.command {
-        Some(command) => not_implemented(command, ctx),
-        None => legacy::run(cli.field.as_deref(), &cli.options, ctx),
+    match (cli.command, cli.field.as_deref()) {
+        (Some(command), None) => not_implemented(command, ctx),
+        (Some(command), Some(_)) => {
+            let _ = writeln!(
+                ctx.err,
+                "error: a FIELD cannot be combined with `{}`\n\nFor more information, try '--help'.",
+                command.name()
+            );
+            2
+        }
+        (None, field) => legacy::run(field, &cli.options, ctx),
     }
 }
 
@@ -49,9 +57,13 @@ fn not_implemented(command: Command, ctx: &mut Context<'_>) -> u8 {
 }
 
 /// Converts OS arguments to UTF-8 without altering them. A non-Unicode argument is
-/// returned as the error so the caller can reject it (0.0.1 panicked here).
-pub fn utf8_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, OsString> {
-    args.into_iter().map(OsString::into_string).collect()
+/// reported by its 1-based position, never by content, because it may be a credential
+/// (0.0.1 panicked here).
+pub fn utf8_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>, usize> {
+    args.into_iter()
+        .enumerate()
+        .map(|(i, arg)| arg.into_string().map_err(|_| i + 1))
+        .collect()
 }
 
 #[cfg(test)]
@@ -168,12 +180,13 @@ mod tests {
         const SECRET: &str = "s3cr3t";
         let proxy = format!("http://user:{SECRET}@proxy.example:3128");
 
-        // clap echoes an invalid value in its usage error.
+        // A rejected value is not quoted back at all.
         let fetch = no_network();
         let (code, out, err) = exec(&fetch, &["--proxy", &format!("ftp://user:{SECRET}@h:1")]);
         assert_eq!(code, 2);
         assert!(!format!("{out}{err}").contains(SECRET), "{err}");
-        assert!(err.contains("***@h:1"), "{err}");
+        assert!(!err.contains("h:1"), "{err}");
+        assert!(err.contains("--proxy"), "{err}");
 
         // A transport error may quote the proxy URL.
         let fetch = FakeFetch::new(vec![Err(FetchError::Transport(format!(
@@ -326,7 +339,10 @@ mod tests {
             let (code, out, err) = exec(&fetch, args);
             assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
             assert!(err.contains("not implemented"), "{args:?}: {err}");
-            assert!(requested(&fetch).is_empty(), "{args:?} must not query ipinfo");
+            assert!(
+                requested(&fetch).is_empty(),
+                "{args:?} must not query ipinfo"
+            );
         }
     }
 
@@ -413,6 +429,6 @@ mod tests {
     fn a_non_unicode_argument_is_rejected_not_substituted() {
         use std::os::unix::ffi::OsStringExt;
         let bad = OsString::from_vec(vec![b'i', 0xFF, b'p']);
-        assert_eq!(utf8_args([OsString::from("ip"), bad.clone()]), Err(bad));
+        assert_eq!(utf8_args([OsString::from("ip"), bad]), Err(2));
     }
 }
