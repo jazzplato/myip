@@ -85,8 +85,11 @@ impl Fact {
     }
 
     pub fn to_json(&self) -> Json {
-        let _ = (&self.value, &self.source, self.basis);
-        unimplemented!()
+        Json::object([
+            ("value", self.value.to_json()),
+            ("source", self.source.as_str().into()),
+            ("basis", self.basis.as_str().into()),
+        ])
     }
 }
 
