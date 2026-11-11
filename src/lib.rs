@@ -305,6 +305,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_non_2xx_body_never_prints_credentials_even_when_truncated() {
+        let body = format!("proxy http://user:{}@host:1/x refused", "S3CR3T".repeat(60));
+        let fetch = FakeFetch::new(vec![reply(502, "text/plain", &body)]);
+        let (code, out, err) = exec(&fetch, &["ip"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTTP 502"), "{err}");
+        assert!(!err.contains("S3CR3T"), "{err}");
+    }
+
+    #[test]
+    fn a_portal_page_without_a_doctype_is_still_an_error() {
+        let page = "<head><title>Login</title></head><body>Please sign in</body>";
+        let fetch = FakeFetch::new(vec![ok(200, page)]);
+        let (code, out, err) = exec(&fetch, &["ip"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTML"), "{err}");
+    }
+
     // ipinfo.io labels plain-text answers such as `city` as text/html.
     #[test]
     fn a_plain_answer_labelled_text_html_is_still_an_answer() {

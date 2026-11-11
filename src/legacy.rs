@@ -104,7 +104,9 @@ fn looks_like_html(body: &str) -> bool {
         .take(15)
         .collect::<String>()
         .to_ascii_lowercase();
-    head.starts_with("<!doctype html") || head.starts_with("<html")
+    ["<!doctype html", "<html", "<head", "<body", "<title", "<meta"]
+        .iter()
+        .any(|start| head.starts_with(start))
 }
 
 /// Drops leading whitespace and byte-order marks.
@@ -112,9 +114,11 @@ fn skip_blank(s: &str) -> &str {
     s.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
-/// The body on one line, bounded, so an error message stays readable.
+/// The body on one line, bounded, so an error message stays readable. Credentials are
+/// redacted before truncating, otherwise a cut between the userinfo and the `@` would
+/// leave the secret prefix unredactable.
 fn detail(body: &str) -> String {
-    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = redact_userinfo(&body.split_whitespace().collect::<Vec<_>>().join(" "));
     let mut chars = flat.chars();
     let shown: String = chars.by_ref().take(MAX_DETAIL_CHARS).collect();
     if chars.next().is_some() {
@@ -153,6 +157,34 @@ mod tests {
         for answer in ["<!-- note -->\nChicago", "\u{feff}Chicago", "<!-- x -->"] {
             assert!(!looks_like_html(answer), "{answer:?}");
         }
+    }
+
+    #[test]
+    fn html_detection_recognizes_documents_without_a_doctype_or_html_tag() {
+        for page in [
+            "<head><title>Login</title></head><body>Please sign in</body>",
+            "<BODY onload=x>Please sign in",
+            "\u{feff}<!-- portal -->\n<title>Sign in</title>",
+            "  <meta charset=utf-8><p>Sign in",
+        ] {
+            assert!(looks_like_html(page), "{page:?}");
+        }
+        for answer in [
+            "Chicago",
+            "<note>xml</note>",
+            "{\"ip\": \"1.2.3.4\"}",
+            "AS15169 Google LLC",
+        ] {
+            assert!(!looks_like_html(answer), "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn credentials_are_redacted_before_the_detail_is_truncated() {
+        let body = format!("see http://user:{}@host:1/x for details", "p".repeat(400));
+        let shown = detail(&body);
+        assert!(!shown.contains("ppp"), "{shown}");
+        assert!(shown.contains("http://***@host:1/x"), "{shown}");
     }
 
     #[test]
