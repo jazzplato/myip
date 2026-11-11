@@ -15,6 +15,7 @@ use crate::env::{Env, RecordingEnv};
 use crate::fact::{Fact, SCHEMA_VERSION, Value};
 use crate::json::Json;
 use crate::output;
+use crate::sanitize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -705,7 +706,7 @@ impl Location {
         if !evidence.is_empty() {
             out.push_str("evidence\n");
             for line in evidence {
-                out.push_str(&format!("  - {line}\n"));
+                out.push_str(&format!("  - {}\n", sanitize::escape(line)));
             }
         }
         out.push_str(
@@ -736,9 +737,9 @@ fn fact_or(fact: &Option<Fact>, missing: &str, shorten: fn(&str) -> String) -> S
     match fact {
         Some(fact) => format!(
             "{}  ({}: {})",
-            shorten(&fact.text()),
+            sanitize::escape(&shorten(&fact.text())),
             fact.basis.as_str(),
-            fact.source
+            sanitize::escape(&fact.source)
         ),
         None => missing.to_owned(),
     }

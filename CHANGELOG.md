@@ -31,7 +31,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `--timeout`, `--proxy`, `-4`/`-6`, `--json`, `-v`/`--verbose`, `--help` and `--version`.
 - Documented exit codes: 0 success, 1 no answer, 2 usage error, 3 `--verify` disagreement.
 - Proxy credentials are redacted from anything printed.
-- Text that comes from outside the process (interface names, `/etc/resolv.conf`, environment variables, container files) never reaches a terminal raw: control characters (ESC, NUL, DEL, the C1 range) and characters that reorder or hide text are shown as visible escapes such as `\x1b` in text output and in `-v` lines, and as `\uXXXX` in JSON. Cluster domains and namespaces must also be plain lowercase DNS names to count as a signal.
+- Text that comes from outside the process (interface names, `/etc/resolv.conf`, environment variables, container files) never reaches a terminal raw: control characters (ESC, NUL, DEL, the C1 range) and characters that reorder or hide text are shown as visible escapes such as `\x1b` in text output and in `-v` lines, and as `\uXXXX` in JSON. Each such value (including OS and provider error messages) is escaped on its own, line breaks included, so it can neither end its line nor start a heading or result line of a report. Cluster domains and namespaces must also be plain lowercase DNS names to count as a signal.
 
 ### Internal
 

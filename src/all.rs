@@ -20,6 +20,7 @@ use crate::local::{self, EgressInfo, Report};
 use crate::location::{self, Environment, Location};
 use crate::output;
 use crate::public::{self, PublicReport};
+use crate::sanitize;
 
 #[derive(Debug)]
 pub struct Overview {
@@ -155,7 +156,7 @@ impl Overview {
         }
         let mut lines = format!(
             "  unavailable: {}\n",
-            self.public.error().unwrap_or("no answer")
+            sanitize::escape(self.public.error().unwrap_or("no answer"))
         );
         if self.public.code() == 3 {
             for line in public::disagreement_report(&self.public).lines() {
@@ -238,8 +239,8 @@ impl Overview {
         };
         format!(
             "  kubernetes  pod {}, node {}, egress {egress}, public {}\n  (pod and node addresses are declared by the Pod spec; egress and public are observed)\n",
-            fact_text(&k.pod_ip).unwrap_or_else(unknown),
-            fact_text(&k.host_ip).unwrap_or_else(unknown),
+            fact_text(&k.pod_ip).map_or_else(unknown, |text| sanitize::escape(&text)),
+            fact_text(&k.host_ip).map_or_else(unknown, |text| sanitize::escape(&text)),
             self.public_ip().map_or_else(unknown, |ip| ip.to_string()),
         )
     }

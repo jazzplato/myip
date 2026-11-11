@@ -313,7 +313,9 @@ impl Report {
     pub fn render_text(&self) -> String {
         let mut out = String::from("interfaces (observed)\n");
         match &self.interfaces {
-            Err(message) => out.push_str(&format!("  unavailable: {message}\n")),
+            Err(message) => {
+                out.push_str(&format!("  unavailable: {}\n", sanitize::escape(message)))
+            }
             Ok(list) if list.is_empty() => out.push_str("  no interfaces found\n"),
             Ok(list) => render_interfaces(&mut out, list),
         }
