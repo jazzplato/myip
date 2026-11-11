@@ -2,6 +2,7 @@
 //! implementation over the `if-addrs` crate, and the pure helpers that group, order and
 //! label what the operating system reports.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::net::IpAddr;
 
@@ -39,21 +40,98 @@ pub struct SystemInterfaces;
 
 impl Interfaces for SystemInterfaces {
     fn list(&self) -> io::Result<Vec<Interface>> {
-        unimplemented!()
+        let entries = if_addrs::get_if_addrs()?
+            .into_iter()
+            .map(|found| Entry {
+                prefix_len: match &found.addr {
+                    if_addrs::IfAddr::V4(v4) => v4.prefixlen,
+                    if_addrs::IfAddr::V6(v6) => v6.prefixlen,
+                },
+                ip: found.addr.ip(),
+                index: found.index,
+                name: found.name,
+            })
+            .collect();
+        Ok(group(entries))
     }
 }
 
 /// Groups a flat list by interface, collapses duplicates and orders the result: by
 /// interface index (unknown last), then name; within an interface IPv4 before IPv6, then
 /// by address.
-pub fn group(_entries: Vec<Entry>) -> Vec<Interface> {
-    unimplemented!()
+pub fn group(entries: Vec<Entry>) -> Vec<Interface> {
+    let mut by_name: BTreeMap<String, Interface> = BTreeMap::new();
+    for entry in entries {
+        let interface = by_name
+            .entry(entry.name.clone())
+            .or_insert_with(|| Interface {
+                name: entry.name,
+                index: None,
+                addresses: Vec::new(),
+            });
+        interface.index = interface.index.or(entry.index);
+        interface.addresses.push(Address {
+            ip: entry.ip,
+            prefix_len: entry.prefix_len,
+        });
+    }
+    let mut interfaces: Vec<Interface> = by_name.into_values().collect();
+    for interface in &mut interfaces {
+        interface
+            .addresses
+            .sort_by_key(|address| (address.ip, address.prefix_len));
+        interface.addresses.dedup();
+    }
+    interfaces
+        .sort_by_key(|interface| (interface.index.unwrap_or(u32::MAX), interface.name.clone()));
+    interfaces
 }
+
+/// Name prefixes (compared case-insensitively) of interfaces that are usually not a
+/// physical NIC: loopback, container bridges and veth pairs, hypervisor switches,
+/// VPN/overlay tunnels and Apple's per-purpose pseudo interfaces.
+const VIRTUAL_PREFIXES: &[&str] = &[
+    "docker",
+    "br-",
+    "veth",
+    "virbr",
+    "utun",
+    "awdl",
+    "llw",
+    "tun",
+    "tap",
+    "tailscale",
+    "wg",
+    "vmnet",
+    "vboxnet",
+    "bridge",
+    "gif",
+    "stf",
+    "anpi",
+    "cni",
+    "flannel",
+    "cali",
+    "vxlan",
+    "kube-",
+    "lxcbr",
+    "lxdbr",
+    "podman",
+    "zt",
+    "vethernet",
+    "loopback pseudo-interface",
+];
 
 /// A hint, from the interface name alone, that the interface is a loopback, bridge, tunnel,
 /// VPN or container/VM network rather than a physical one. It is a heuristic and can be wrong.
-pub fn likely_virtual(_name: &str) -> bool {
-    unimplemented!()
+pub fn likely_virtual(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let is_loopback = lower
+        .strip_prefix("lo")
+        .is_some_and(|rest| rest.bytes().all(|byte| byte.is_ascii_digit()));
+    is_loopback
+        || VIRTUAL_PREFIXES
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
 }
 
 #[cfg(test)]
