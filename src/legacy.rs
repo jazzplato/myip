@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::Context;
 use crate::cli::Options;
 use crate::http::{FetchError, FetchOptions, Response};
+use crate::redact::redact_userinfo;
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
 const DEFAULT_FIELD: &str = "json";
@@ -51,7 +52,7 @@ fn print_line(ctx: &mut Context<'_>, body: &str) -> u8 {
 }
 
 fn fail(ctx: &mut Context<'_>, message: &str) -> u8 {
-    let _ = writeln!(ctx.err, "myip: {message}");
+    let _ = writeln!(ctx.err, "myip: {}", redact_userinfo(message));
     1
 }
 

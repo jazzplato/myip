@@ -102,7 +102,9 @@ impl Command {
     }
 }
 
-/// A FIELD is spliced into a URL path, so only characters that need no escaping are allowed.
+/// A FIELD is appended to `https://ipinfo.io/`, so it must stay a relative path: only
+/// characters that need no escaping, never a leading `/` or a `//` (which would turn
+/// the host into whatever follows), and no `..`.
 fn parse_field(raw: &str) -> Result<String, String> {
     let field = raw.trim();
     if field.is_empty() {
@@ -110,6 +112,9 @@ fn parse_field(raw: &str) -> Result<String, String> {
     }
     if field.contains("..") {
         return Err("must not contain `..`".to_owned());
+    }
+    if field.starts_with('/') || field.contains("//") {
+        return Err("must be a relative path without a leading `/` or `//`".to_owned());
     }
     if let Some(bad) = field
         .chars()

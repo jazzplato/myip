@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod http;
 pub mod legacy;
+pub mod redact;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -26,7 +27,7 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             Ok(cli) => cli,
             Err(e) => {
                 // `--help` and `--version` arrive here too; clap says which stream they belong on.
-                let rendered = e.render().to_string();
+                let rendered = redact::redact_userinfo(&e.render().to_string());
                 let sink = if e.use_stderr() {
                     &mut ctx.err
                 } else {
