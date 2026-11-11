@@ -167,9 +167,13 @@ pub(crate) mod testing {
     }
 
     pub fn ok(status: u16, body: &str) -> Result<Response, FetchError> {
+        reply(status, "application/json", body)
+    }
+
+    pub fn reply(status: u16, content_type: &str, body: &str) -> Result<Response, FetchError> {
         Ok(Response {
             status,
-            content_type: Some("application/json".to_owned()),
+            content_type: Some(content_type.to_owned()),
             body: body.to_owned(),
         })
     }

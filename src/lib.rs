@@ -28,7 +28,235 @@ pub fn utf8_args(args: impl IntoIterator<Item = OsString>) -> Result<Vec<String>
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::http::testing::{FakeFetch, ok, reply};
+    use crate::http::{Family, FetchError, ProxyMode};
+
+    fn exec(fetch: &FakeFetch, args: &[&str]) -> (u8, String, String) {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = {
+            let mut ctx = Context {
+                fetch,
+                out: &mut out,
+                err: &mut err,
+            };
+            run(&args, &mut ctx)
+        };
+        (
+            code,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    fn no_network() -> FakeFetch {
+        FakeFetch::new(vec![])
+    }
+
+    fn requested(fetch: &FakeFetch) -> Vec<String> {
+        fetch.requests.borrow().iter().map(|r| r.0.clone()).collect()
+    }
+
+    #[test]
+    fn help_prints_usage_and_exit_codes_without_a_request() {
+        for flag in ["--help", "-h"] {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, &[flag]);
+            assert_eq!(code, 0, "{flag}");
+            assert!(out.contains("Usage: myip"), "{out}");
+            assert!(out.contains("Exit codes"), "{out}");
+            assert_eq!(err, "");
+            assert!(requested(&fetch).is_empty(), "{flag} must not query ipinfo");
+        }
+    }
+
+    #[test]
+    fn version_prints_the_crate_version() {
+        let fetch = no_network();
+        let (code, out, _) = exec(&fetch, &["--version"]);
+        assert_eq!(code, 0);
+        assert_eq!(out, concat!("myip ", env!("CARGO_PKG_VERSION"), "\n"));
+        assert!(requested(&fetch).is_empty());
+    }
+
+    #[test]
+    fn usage_errors_exit_2_with_the_message_on_stderr() {
+        let cases: [&[&str]; 5] = [
+            &["--bogus"],
+            &["-4", "-6"],
+            &["--timeout", "abc"],
+            &["--timeout", "0"],
+            &["--proxy", "ftp://example.com"],
+        ];
+        for case in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, case);
+            assert_eq!(code, 2, "{case:?}");
+            assert_eq!(out, "", "{case:?}");
+            assert!(err.contains("error:"), "{case:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{case:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_fields_are_rejected_before_any_request() {
+        let cases = [
+            "", "   ", "foo bar", "a/../b", "..", "x?y=1", "x#f", "caf\u{e9}", "a\nb", "a\\b",
+        ];
+        for field in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, &[field]);
+            assert_eq!(code, 2, "{field:?}");
+            assert_eq!(out, "", "{field:?}");
+            assert!(err.contains("error:"), "{field:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{field:?}");
+        }
+    }
+
+    #[test]
+    fn valid_fields_select_the_url_path_and_ends_are_trimmed() {
+        let cases = [
+            ("city", "https://ipinfo.io/city"),
+            ("8.8.8.8/org", "https://ipinfo.io/8.8.8.8/org"),
+            ("2001:db8::1", "https://ipinfo.io/2001:db8::1"),
+            (" 8.8.8.8\n", "https://ipinfo.io/8.8.8.8"),
+        ];
+        for (field, url) in cases {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, _, err) = exec(&fetch, &[field]);
+            assert_eq!(code, 0, "{field:?}: {err}");
+            assert_eq!(requested(&fetch), [url], "{field:?}");
+        }
+    }
+
+    #[test]
+    fn no_argument_queries_json() {
+        let fetch = FakeFetch::new(vec![ok(200, "{}\n")]);
+        let (code, out, _) = exec(&fetch, &[]);
+        assert_eq!((code, out.as_str()), (0, "{}\n"));
+        assert_eq!(requested(&fetch), ["https://ipinfo.io/json"]);
+    }
+
+    #[test]
+    fn http_errors_exit_1_with_empty_stdout_and_the_reason_on_stderr() {
+        for status in [404, 429, 500, 503] {
+            let fetch = FakeFetch::new(vec![ok(status, "{\"error\":\"nope\"}")]);
+            let (code, out, err) = exec(&fetch, &[]);
+            assert_eq!(code, 1, "{status}");
+            assert_eq!(out, "", "{status}");
+            assert!(err.starts_with("myip: "), "{err}");
+            assert!(err.contains(&status.to_string()), "{err}");
+            assert!(err.contains("nope"), "the body explains the failure: {err}");
+        }
+    }
+
+    #[test]
+    fn html_answers_are_errors_not_results() {
+        let page = "\n<!DOCTYPE html><html><body>Sign in to the Wi-Fi</body></html>";
+        let fetch = FakeFetch::new(vec![reply(200, "text/html", page)]);
+        let (code, out, err) = exec(&fetch, &[]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTML"), "{err}");
+    }
+
+    // ipinfo.io labels plain-text answers such as `city` as text/html.
+    #[test]
+    fn a_plain_answer_labelled_text_html_is_still_an_answer() {
+        let fetch = FakeFetch::new(vec![reply(200, "text/html; charset=utf-8", "Chicago\n")]);
+        let (code, out, _) = exec(&fetch, &["city"]);
+        assert_eq!((code, out.as_str()), (0, "Chicago\n"));
+    }
+
+    #[test]
+    fn an_empty_answer_is_an_error() {
+        let fetch = FakeFetch::new(vec![ok(200, " \n")]);
+        let (code, out, err) = exec(&fetch, &["city"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn output_always_ends_with_exactly_one_newline() {
+        for (body, want) in [("1.2.3.4", "1.2.3.4\n"), ("1.2.3.4\n", "1.2.3.4\n")] {
+            let fetch = FakeFetch::new(vec![ok(200, body)]);
+            let (_, out, _) = exec(&fetch, &["ip"]);
+            assert_eq!(out, want);
+        }
+    }
+
+    #[test]
+    fn transport_errors_go_to_stderr_without_the_old_typo() {
+        let fetch = FakeFetch::new(vec![Err(FetchError::Timeout)]);
+        let (code, out, err) = exec(&fetch, &[]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert_eq!(err, "myip: request timed out\n");
+    }
+
+    #[test]
+    fn defaults_are_a_10s_timeout_no_proxy_and_either_family() {
+        let fetch = FakeFetch::new(vec![ok(200, "x")]);
+        exec(&fetch, &[]);
+        let (_, opts) = fetch.requests.borrow()[0].clone();
+        assert_eq!(opts.timeout, Duration::from_secs(10));
+        assert_eq!(opts.proxy, ProxyMode::None);
+        assert_eq!(opts.family, Family::Any);
+        assert_eq!(opts.accept, "application/json");
+    }
+
+    #[test]
+    fn flags_reach_the_transport_before_and_after_the_field() {
+        for args in [
+            ["--timeout", "3", "-4", "--proxy", "env", "ip"],
+            ["ip", "--timeout", "3", "-4", "--proxy", "env"],
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, _, err) = exec(&fetch, &args);
+            assert_eq!(code, 0, "{args:?}: {err}");
+            let (_, opts) = fetch.requests.borrow()[0].clone();
+            assert_eq!(opts.timeout, Duration::from_secs(3));
+            assert_eq!(opts.family, Family::V4);
+            assert_eq!(opts.proxy, ProxyMode::Env);
+        }
+    }
+
+    #[test]
+    fn an_explicit_proxy_url_and_ipv6_are_forwarded() {
+        let fetch = FakeFetch::new(vec![ok(200, "x")]);
+        exec(&fetch, &["-6", "--proxy", "http://127.0.0.1:3128"]);
+        let (_, opts) = fetch.requests.borrow()[0].clone();
+        assert_eq!(opts.family, Family::V6);
+        assert_eq!(opts.proxy, ProxyMode::Url("http://127.0.0.1:3128".to_owned()));
+    }
+
+    #[test]
+    fn json_is_accepted_and_passes_the_ipinfo_body_through() {
+        let fetch = FakeFetch::new(vec![ok(200, "{\"ip\":\"1.2.3.4\"}\n")]);
+        let (code, out, _) = exec(&fetch, &["--json"]);
+        assert_eq!((code, out.as_str()), (0, "{\"ip\":\"1.2.3.4\"}\n"));
+    }
+
+    #[test]
+    fn verbose_logs_to_stderr_and_leaves_stdout_alone() {
+        let fetch = FakeFetch::new(vec![ok(200, "1.2.3.4\n")]);
+        let (code, out, err) = exec(&fetch, &["-v", "ip"]);
+        assert_eq!((code, out.as_str()), (0, "1.2.3.4\n"));
+        assert!(err.contains("https://ipinfo.io/ip"), "{err}");
+        assert!(err.contains("200"), "{err}");
+    }
+
+    #[test]
+    fn dimension_subcommands_are_reserved_but_not_implemented_yet() {
+        for name in ["public", "local", "where", "all"] {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, &[name]);
+            assert_eq!((code, out.as_str()), (1, ""), "{name}");
+            assert!(err.contains("not implemented"), "{name}: {err}");
+            assert!(requested(&fetch).is_empty(), "{name}");
+        }
+    }
 
     #[test]
     fn unicode_arguments_pass_through_unchanged() {
