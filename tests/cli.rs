@@ -67,3 +67,23 @@ fn a_non_unicode_argument_exits_2_and_is_never_echoed() {
     assert!(stderr.contains("not valid UTF-8"), "{stderr}");
     assert!(!stderr.contains("S3CR3T"), "{stderr}");
 }
+
+// The two tests below assert only what holds on any host: they read the real machine.
+#[test]
+fn where_always_exits_zero_with_a_versioned_json_document() {
+    let out = myip(&["--json", "where"]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = text(&out.stdout);
+    assert!(stdout.starts_with("{\"schema_version\":1,"), "{stdout}");
+    assert!(stdout.ends_with("}\n"), "{stdout}");
+}
+
+#[test]
+fn local_prints_a_versioned_json_document_whatever_the_host() {
+    let out = myip(&["--json", "local"]);
+    // 0, or 1 on a host that refuses interface enumeration; the document is there either way.
+    assert!(matches!(out.status.code(), Some(0 | 1)), "{:?}", out.status);
+    let stdout = text(&out.stdout);
+    assert!(stdout.starts_with("{\"schema_version\":1,"), "{stdout}");
+    assert!(stdout.ends_with("}\n"), "{stdout}");
+}

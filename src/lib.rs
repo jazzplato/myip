@@ -220,6 +220,21 @@ mod tests {
     }
 
     #[test]
+    fn help_lists_the_commands_that_exist_and_hides_the_reserved_one() {
+        let (code, out, _) = exec(&no_network(), &["--help"]);
+        assert_eq!(code, 0);
+        let commands = out
+            .split("Commands:")
+            .nth(1)
+            .and_then(|rest| rest.split("Options:").next())
+            .unwrap_or_else(|| panic!("no Commands section in\n{out}"));
+        for name in ["local", "where", "all"] {
+            assert!(commands.contains(name), "{name} missing in\n{commands}");
+        }
+        assert!(!commands.contains("public"), "{commands}");
+    }
+
+    #[test]
     fn usage_errors_exit_2_with_the_message_on_stderr() {
         let cases: [&[&str]; 5] = [
             &["--bogus"],
