@@ -21,6 +21,7 @@ use crate::ifaces::{Interface, Interfaces, likely_virtual};
 use crate::json::Json;
 use crate::net::{Scope, classify};
 use crate::output;
+use crate::sanitize;
 
 const ROUTES_V4: &str = "/proc/net/route";
 const ROUTES_V6: &str = "/proc/net/ipv6_route";
@@ -118,7 +119,7 @@ pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
     let report = gather(&env, ctx.host.interfaces, ctx.host.probe, options.family());
     output::trace(options, &env, &report.notes, ctx.err);
     if let Some(error) = report.error() {
-        let _ = writeln!(ctx.err, "myip: {error}");
+        output::diagnostic(ctx.err, error);
     }
     let text = report.error().is_none().then(|| report.render_text());
     let written = output::emit(options, &report.to_json(), text.as_deref(), ctx.out);
@@ -179,7 +180,14 @@ fn egress(
     let gateway = match env.read_to_string(side.routes) {
         Ok(content) => {
             let routes = (side.parse)(&content);
-            gateway_for(&routes, interface.as_deref()).map(|route| GatewayInfo {
+            let found = gateway_for(&routes, interface.as_deref(), &address);
+            if found.is_none() && interface.is_some() {
+                notes.push(format!(
+                    "{}: no single default route in {} applies to {address}; gateway left unknown",
+                    side.label, side.routes
+                ));
+            }
+            found.map(|route| GatewayInfo {
                 address: route.gateway,
                 scope: classify(route.gateway),
             })
@@ -282,7 +290,9 @@ impl Report {
         ));
         for (label, egress) in self.egresses() {
             match egress {
-                None => out.push_str(&format!("  {label}  none (no route)\n")),
+                None => out.push_str(&format!(
+                    "  {label}  unknown (the egress probe found no address; -v shows why)\n"
+                )),
                 Some(e) => out.push_str(&format!("  {label}  {}\n", egress_line(e))),
             }
         }
@@ -369,7 +379,7 @@ fn egress_json(egress: Option<&EgressInfo>) -> Json {
 fn egress_line(egress: &EgressInfo) -> String {
     let mut line = format!("{} ({})", egress.address, egress.scope.as_str());
     match &egress.interface {
-        Some(name) => line.push_str(&format!(" on {name}")),
+        Some(name) => line.push_str(&format!(" on {}", shown_name(name))),
         None => line.push_str(", interface unknown"),
     }
     match &egress.gateway {
@@ -377,6 +387,17 @@ fn egress_line(egress: &EgressInfo) -> String {
         None => line.push_str(", gateway unknown"),
     }
     line
+}
+
+/// An interface name as shown in text: control characters are made visible, and a name
+/// that is empty is called out instead of leaving a blank-looking line. JSON keeps the
+/// name as it is.
+fn shown_name(name: &str) -> String {
+    if name.is_empty() {
+        "(unnamed)".to_owned()
+    } else {
+        sanitize::escape(name)
+    }
 }
 
 fn render_interfaces(out: &mut String, list: &[InterfaceInfo]) {
@@ -394,7 +415,7 @@ fn render_interfaces(out: &mut String, list: &[InterfaceInfo]) {
         .max()
         .unwrap_or(0);
     for interface in list {
-        out.push_str(&format!("  {}", interface.name));
+        out.push_str(&format!("  {}", shown_name(&interface.name)));
         if interface.likely_virtual {
             out.push_str(" (likely virtual)");
         }

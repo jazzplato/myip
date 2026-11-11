@@ -23,13 +23,15 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - `myip public --verify`: asks all providers concurrently and cross-checks them per address family. At least two agreeing answers in a family verify it (exit 0); a split exits 3 and lists who said what on stdout; fewer than two answers in every family exits 1.
 - `myip --json public`: one compact JSON line (`schema_version` 1) with the headline answer, every attempt and, with `--verify`, the per-family result.
 - `-4`/`-6` apply to `public`, `local` and `all`. With `-6` the providers without an IPv6 address (checkip.amazonaws.com, ipinfo.io) are not asked.
-- `myip local`: interface addresses with their scope, likely-virtual interfaces and the primary egress address (found with a UDP `connect()` that sends nothing) and its gateway on Linux.
-- `myip where`: host, container or Kubernetes pod, with runtime, container id, namespace and pod/node identity; every value is labelled declared or observed and unknown values are `null`. It never calls the Kubernetes API and never opens the ServiceAccount token.
+- `myip local`: interface addresses with their scope, likely-virtual interfaces and the primary egress address (found with a UDP `connect()` that sends nothing) and its gateway on Linux. The gateway is the default route on the egress interface whose source constraint (IPv6 source-specific routes) contains the egress address, the most specific first and then the lowest metric; when no single route applies it is `null`. An egress probe that finds no address is reported as `unknown`, not "no route": a sandbox can deny the probe.
+- `myip where`: host, container or Kubernetes pod, with runtime, container id, namespace and pod/node identity; every value is labelled declared or observed and unknown values are `null`. A pod is recognised from `KUBERNETES_SERVICE_HOST`, the ServiceAccount `namespace` file, a cluster search domain in `/etc/resolv.conf`, or (observed) a `kubepods` cgroup, so a pod with `dnsPolicy: Default` and no ServiceAccount mount is still a pod. It never calls the Kubernetes API and never opens the ServiceAccount token.
 - `myip all`: the public address (the `public` lookup), `local` and `where` together, with NAT and pod highlights. `myip all --verify` cross-checks the public address like `public --verify` and exits 3 on a disagreement. `all` never exits 1: a failed section is reported in place (`null` values and an `error`).
 - `--json` for these commands: one compact document, `schema_version` first.
 - Documented Pod spec snippet that exposes the Downward API variables `where` reads (see the README).
 - `--timeout`, `--proxy`, `-4`/`-6`, `--json`, `-v`/`--verbose`, `--help` and `--version`.
-- Documented exit codes: 0 success, 1 no answer, 2 usage error, 3 `--verify` disagreement. are redacted from anything printed.
+- Documented exit codes: 0 success, 1 no answer, 2 usage error, 3 `--verify` disagreement.
+- Proxy credentials are redacted from anything printed.
+- Text that comes from outside the process (interface names, `/etc/resolv.conf`, environment variables, container files) never reaches a terminal raw: control characters (ESC, NUL, DEL, the C1 range) and characters that reorder or hide text are shown as visible escapes such as `\x1b` in text output and in `-v` lines, and as `\uXXXX` in JSON. Cluster domains and namespaces must also be plain lowercase DNS names to count as a signal.
 
 ### Internal
 

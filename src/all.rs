@@ -51,7 +51,7 @@ pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
     let verbose = options.verbose;
     let public = public::lookup(ctx.fetch, options, verify, &mut |attempt| {
         if verbose {
-            let _ = writeln!(ctx.err, "myip: {}", public::attempt_line(attempt));
+            output::diagnostic(ctx.err, &public::attempt_line(attempt));
         }
     });
     let overview = gather(
@@ -63,7 +63,7 @@ pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
     );
     output::trace(options, &env, &overview.local.notes, ctx.err);
     for note in overview.notes() {
-        let _ = writeln!(ctx.err, "myip: {note}");
+        output::diagnostic(ctx.err, &note);
     }
     let written = output::emit(
         options,

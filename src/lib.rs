@@ -15,6 +15,7 @@ pub mod net;
 pub mod output;
 pub mod public;
 pub mod redact;
+pub mod sanitize;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -1204,7 +1205,8 @@ mod tests {
     #[test]
     fn verbose_diagnostics_are_escaped_too() {
         let machine = machine_with("interface name", "\u{1b}[2J0");
-        let (_, _, err) = exec_on(&machine, &["-v", "all"]);
+        let (_, _, err) = run_on(&machine.host(), &everyone_says(PUBLIC_IP), &["-v", "all"]);
+        assert!(err.contains("myip: read /proc/net/route"), "{err:?}");
         assert!(!err.contains('\u{1b}'), "{err:?}");
     }
 

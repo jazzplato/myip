@@ -36,6 +36,9 @@ impl Environment {
 #[derive(Debug, Default)]
 pub struct Container {
     pub detected: bool,
+    /// `/proc/self/cgroup` places the process under a `kubepods` cgroup: something the
+    /// kubelet did, observed here, independent of any variable or mount.
+    pub kubepods: bool,
     pub runtime: Option<Fact>,
     pub id: Option<Fact>,
     pub evidence: Vec<String>,
@@ -86,7 +89,7 @@ const DOWNWARD_VARS: &[&str] = &[
 
 pub fn detect(env: &dyn Env) -> Location {
     let container = detect_container(env);
-    let kubernetes = detect_kubernetes(env);
+    let kubernetes = detect_kubernetes(env, container.kubepods);
     let environment = if kubernetes.detected {
         Environment::Kubernetes
     } else if container.detected {
@@ -124,8 +127,12 @@ struct Signal {
 }
 
 fn detect_container(env: &dyn Env) -> Container {
+    let (cgroup, kubepods) = match cgroup_signal(env) {
+        Some((signal, kubepods)) => (Some(signal), kubepods),
+        None => (None, false),
+    };
     let signals: Vec<Signal> = [
-        cgroup_signal(env),
+        cgroup,
         systemd_signal(env),
         mountinfo_signal(env),
         containerenv_signal(env),
@@ -143,6 +150,7 @@ fn detect_container(env: &dyn Env) -> Container {
     };
     Container {
         detected: !signals.is_empty(),
+        kubepods,
         runtime: pick(|s| s.runtime.as_ref()),
         id: pick(|s| s.id.as_ref()),
         evidence: signals.iter().map(|s| s.evidence.clone()).collect(),
@@ -156,12 +164,19 @@ struct CgroupHit {
     kubepods: bool,
 }
 
-fn cgroup_signal(env: &dyn Env) -> Option<Signal> {
+/// The container signal from the cgroup file, and whether any line of it is under a
+/// `kubepods` cgroup (the first matching line supplies the runtime and id, but every line
+/// counts for kubepods).
+fn cgroup_signal(env: &dyn Env) -> Option<(Signal, bool)> {
     let content = env.read_to_string(CGROUP).ok()?;
-    let hit = content
+    let hits: Vec<CgroupHit> = content
         .lines()
         .filter_map(|line| line.splitn(3, ':').nth(2))
         .map(cgroup_hit)
+        .collect();
+    let kubepods = hits.iter().any(|hit| hit.kubepods);
+    let hit = hits
+        .into_iter()
         .find(|hit| hit.runtime.is_some() || hit.id.is_some() || hit.kubepods)?;
     let evidence = match (&hit.runtime, &hit.id) {
         (Some(runtime), _) => {
@@ -172,12 +187,13 @@ fn cgroup_signal(env: &dyn Env) -> Option<Signal> {
         }
         (None, None) => format!("{CGROUP} places this process under the kubepods cgroup"),
     };
-    Some(Signal {
+    let signal = Signal {
         source: format!("file:{CGROUP}"),
         runtime: hit.runtime.map(str::to_owned),
         id: hit.id,
         evidence,
-    })
+    };
+    Some((signal, kubepods))
 }
 
 /// Scans one cgroup path; the deepest (last) match wins so nested containers report the
@@ -351,7 +367,7 @@ fn parse_resolv(content: &str) -> Option<ClusterDns> {
     let (namespace, domain) = search.iter().find_map(|entry| {
         let (namespace, domain) = entry.split_once(".svc.")?;
         let bare = format!("svc.{domain}");
-        (valid_label(namespace) && !domain.is_empty() && search.contains(&bare.as_str()))
+        (valid_label(namespace) && valid_domain(domain) && search.contains(&bare.as_str()))
             .then(|| (namespace.to_owned(), domain.to_owned()))
     })?;
     Some(ClusterDns {
@@ -370,10 +386,23 @@ fn valid_name(text: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
+/// A Kubernetes namespace name: a lowercase RFC 1123 label (at most 63 characters of
+/// `a-z`, `0-9` and `-`, starting and ending with an alphanumeric). Also the only
+/// charset that reaches output from a resolver file or a namespace file.
 fn valid_label(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= 63
-        && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    let edge = |b: Option<&u8>| b.is_some_and(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9'));
+    text.len() <= 63
+        && edge(text.as_bytes().first())
+        && edge(text.as_bytes().last())
+        && text
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
+}
+
+/// A cluster domain such as `cluster.local`: dot-separated [`valid_label`]s, at most 253
+/// characters.
+fn valid_domain(text: &str) -> bool {
+    text.len() <= 253 && text.split('.').all(valid_label)
 }
 
 fn clean(value: Option<String>) -> Option<String> {
@@ -433,7 +462,7 @@ fn declared_env(
     }
 }
 
-fn detect_kubernetes(env: &dyn Env) -> Kubernetes {
+fn detect_kubernetes(env: &dyn Env, kubepods: bool) -> Kubernetes {
     let mut k = Kubernetes::default();
     let service_host = clean(env.var("KUBERNETES_SERVICE_HOST"));
     let namespace_file_present = env.exists(NAMESPACE_FILE);
@@ -458,6 +487,11 @@ fn detect_kubernetes(env: &dyn Env) -> Kubernetes {
         k.evidence.push(format!(
             "{RESOLV_CONF} searches {}.svc.{} and svc.{}",
             dns.namespace, dns.domain, dns.domain
+        ));
+    }
+    if kubepods {
+        k.evidence.push(format!(
+            "observed: {CGROUP} places this process under the kubepods cgroup"
         ));
     }
     k.detected = !k.evidence.is_empty();

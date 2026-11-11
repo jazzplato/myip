@@ -1,6 +1,8 @@
 //! A tiny ordered JSON writer for the `--json` documents of the dimension subcommands.
 //! Output only: nothing in `myip` parses JSON, so a full serializer would be dead weight.
 
+use crate::sanitize;
+
 /// A JSON value whose object keys keep insertion order, so `schema_version` stays first.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
@@ -98,7 +100,7 @@ fn write_string(out: &mut String, value: &str) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if sanitize::is_unsafe(c) => out.push_str(&format!("\\u{:04x}", u32::from(c))),
             c => out.push(c),
         }
     }

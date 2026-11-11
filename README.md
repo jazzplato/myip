@@ -160,7 +160,7 @@ interfaces (observed)
     172.17.0.2/16  private   primary egress (IPv4)
 egress (observed: a UDP connect() towards 1.1.1.1 and 2606:4700:4700::1111, which sends nothing)
   IPv4  172.17.0.2 (private) on eth0 via 172.17.0.1
-  IPv6  none (no route)
+  IPv6  unknown (the egress probe found no address; -v shows why)
 "likely virtual" is a guess from the interface name, not a fact.
 ```
 ```bash
@@ -178,8 +178,9 @@ evidence
 - `--json` prints one compact JSON document with `"schema_version": 1` as the first key. Fields only ever get added within a schema version; unknown values are `null`. The text output is for people and may change.
 - `-4` / `-6` limit `local` (and the local part of `all`) to one IP family. `where` ignores them.
 - `-v` lists every environment variable and file that was looked at, and why a probe or route table could not be used.
-- The gateway in `local` comes from the Linux routing tables; elsewhere it is `null`.
+- The gateway in `local` comes from the Linux routing tables; elsewhere it is `null`. For IPv6 it is the default route on the egress interface whose source-specific constraint (if any) contains the egress address; if no single route applies it is `null` and `-v` says so.
 - `where` never calls the Kubernetes API and never opens the ServiceAccount token or CA certificate. It reads only the ServiceAccount `namespace` file, `/etc/resolv.conf` and a fixed list of environment variables and marker files.
+- Text that other parties control (interface names, resolver and cgroup files, environment variables) is never printed raw. Control characters and characters that reorder or hide text show up as visible escapes such as `\x1b` in text output and `-v` lines, and as `\u001b` in JSON; an interface with an empty name is shown as `(unnamed)` in text.
 
 #### Kubernetes pods
 
@@ -201,7 +202,7 @@ env:
     valueFrom: { fieldRef: { fieldPath: status.hostIP } }
 ```
 
-The variable names are a convention `myip` reads, not something Kubernetes sets by itself. Without them `where` still recognises a pod (from `KUBERNETES_SERVICE_HOST`) and reports the missing identity as `unknown`, naming the variable that would fill it in.
+The variable names are a convention `myip` reads, not something Kubernetes sets by itself. Without them `where` still recognises a pod (from `KUBERNETES_SERVICE_HOST`, the ServiceAccount `namespace` file, a cluster search domain in `/etc/resolv.conf`, or a `kubepods` cgroup in `/proc/self/cgroup`, which is *observed*) and reports the missing identity as `unknown`, naming the variable that would fill it in. The Downward API variables are read for a pod recognised by any of these signals, including one with `dnsPolicy: Default` and no ServiceAccount mount. A variable such as `POD_NAME` on its own, in a plain container, is ignored.
 
 ### Options
 

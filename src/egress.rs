@@ -42,6 +42,27 @@ pub struct DefaultRoute {
     pub gateway: IpAddr,
     pub interface: String,
     pub metric: u32,
+    /// A source-specific route (IPv6 `from <prefix>`) only applies to traffic whose source
+    /// address is inside the prefix. `None` is an unconditional default.
+    pub source: Option<(Ipv6Addr, u8)>,
+}
+
+impl DefaultRoute {
+    /// Whether traffic from `address` may take this route.
+    fn applies_to(&self, address: &IpAddr) -> bool {
+        let Some((prefix, length)) = self.source else {
+            return true;
+        };
+        let IpAddr::V6(address) = address else {
+            return false;
+        };
+        let mask = u128::MAX.checked_shl(128 - u32::from(length)).unwrap_or(0);
+        (prefix.to_bits() ^ address.to_bits()) & mask == 0
+    }
+
+    fn specificity(&self) -> u8 {
+        self.source.map_or(0, |(_, length)| length)
+    }
 }
 
 const RTF_UP: u32 = 0x1;
@@ -76,6 +97,7 @@ fn ipv4_default_route(line: &str) -> Option<DefaultRoute> {
         gateway: IpAddr::V4(Ipv4Addr::from(gateway.to_ne_bytes())),
         interface: fields[0].to_owned(),
         metric,
+        source: None,
     })
 }
 
@@ -101,31 +123,47 @@ fn ipv6_default_route(line: &str) -> Option<DefaultRoute> {
     };
     let destination = address(fields[0])?;
     let prefix_len = u32::from_str_radix(fields[1], 16).ok()?;
+    let source = address(fields[2])?;
+    let source_len = u8::from_str_radix(fields[3], 16).ok()?;
     let next_hop = address(fields[4])?;
     let metric = u32::from_str_radix(fields[5], 16).ok()?;
     let flags = u32::from_str_radix(fields[8], 16).ok()?;
     let is_default = destination.is_unspecified() && prefix_len == 0 && !next_hop.is_unspecified();
-    if !is_default || flags & (RTF_UP | RTF_GATEWAY) != (RTF_UP | RTF_GATEWAY) {
+    if !is_default || flags & (RTF_UP | RTF_GATEWAY) != (RTF_UP | RTF_GATEWAY) || source_len > 128 {
         return None;
     }
     Some(DefaultRoute {
         gateway: IpAddr::V6(next_hop),
         interface: fields[9].to_owned(),
         metric,
+        source: (source_len > 0).then_some((source, source_len)),
     })
 }
 
-/// The default route on `interface`, lowest metric first. With no known egress interface
-/// there is nothing to tie a gateway to, so the answer is `None` rather than a guess.
+/// The gateway traffic from `address` would use on `interface`: among the default routes
+/// on that interface whose source constraint (if any) contains `address`, the most
+/// specific source wins, then the lowest metric. When the best candidates disagree on the
+/// gateway, or none applies, or the interface is unknown, the answer is `None` rather than
+/// a guess.
 pub fn gateway_for<'a>(
     routes: &'a [DefaultRoute],
     interface: Option<&str>,
+    address: &IpAddr,
 ) -> Option<&'a DefaultRoute> {
     let interface = interface?;
-    routes
-        .iter()
-        .filter(|route| route.interface == interface)
-        .min_by_key(|route| route.metric)
+    let applicable = || {
+        routes
+            .iter()
+            .filter(|route| route.interface == interface && route.applies_to(address))
+    };
+    let best = applicable()
+        .map(|route| (std::cmp::Reverse(route.specificity()), route.metric))
+        .min()?;
+    let mut tied =
+        applicable().filter(|route| (std::cmp::Reverse(route.specificity()), route.metric) == best);
+    let first = tied.next()?;
+    tied.all(|route| route.gateway == first.gateway)
+        .then_some(first)
 }
 
 #[cfg(test)]
@@ -193,6 +231,7 @@ mod tests {
                 gateway: "172.17.0.1".parse().unwrap(),
                 interface: "eth0".to_owned(),
                 metric: 0,
+                source: None,
             }]
         );
     }
@@ -265,6 +304,7 @@ mod tests {
                 gateway: "fe80::a00:27ff:fe7d:e5b".parse().unwrap(),
                 interface: "eth0".to_owned(),
                 metric: 100,
+                source: None,
             }]
         );
     }
@@ -289,7 +329,21 @@ mod tests {
             gateway: gateway.parse().unwrap(),
             interface: interface.to_owned(),
             metric,
+            source: None,
         }
+    }
+
+    fn from_source(mut route: DefaultRoute, prefix: &str, length: u8) -> DefaultRoute {
+        route.source = Some((prefix.parse().unwrap(), length));
+        route
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    fn gateway_of(routes: &[DefaultRoute], interface: &str, address: &str) -> Option<IpAddr> {
+        gateway_for(routes, Some(interface), &ip(address)).map(|r| r.gateway)
     }
 
     #[test]
@@ -299,8 +353,8 @@ mod tests {
             route("en0", "192.168.0.1", 600),
         ];
         assert_eq!(
-            gateway_for(&routes, Some("en0")).map(|r| r.gateway),
-            Some("192.168.0.1".parse().unwrap())
+            gateway_of(&routes, "en0", "192.168.0.20"),
+            Some(ip("192.168.0.1"))
         );
     }
 
@@ -311,17 +365,110 @@ mod tests {
             route("eth0", "10.0.0.1", 100),
         ];
         assert_eq!(
-            gateway_for(&routes, Some("eth0")).map(|r| r.gateway),
-            Some("10.0.0.1".parse().unwrap())
+            gateway_of(&routes, "eth0", "10.0.0.5"),
+            Some(ip("10.0.0.1"))
         );
     }
 
     #[test]
     fn no_known_interface_or_no_route_on_it_means_no_gateway() {
         let routes = [route("eth0", "10.0.0.1", 100)];
-        assert!(gateway_for(&routes, None).is_none());
-        assert!(gateway_for(&routes, Some("wlan0")).is_none());
-        assert!(gateway_for(&[], Some("eth0")).is_none());
+        let address = ip("10.0.0.5");
+        assert!(gateway_for(&routes, None, &address).is_none());
+        assert!(gateway_for(&routes, Some("wlan0"), &address).is_none());
+        assert!(gateway_for(&[], Some("eth0"), &address).is_none());
+    }
+
+    #[test]
+    fn a_source_specific_route_only_applies_inside_its_prefix() {
+        let routes = [from_source(
+            route("eth0", "fe80::1", 100),
+            "2001:db8:1::",
+            64,
+        )];
+        assert_eq!(
+            gateway_of(&routes, "eth0", "2001:db8:1::7"),
+            Some(ip("fe80::1"))
+        );
+        assert_eq!(gateway_of(&routes, "eth0", "2001:db8:2::7"), None);
+        assert_eq!(gateway_of(&routes, "eth0", "fd00::7"), None);
+        assert_eq!(gateway_of(&routes, "eth0", "192.168.0.7"), None);
+    }
+
+    #[test]
+    fn the_source_prefix_length_is_honoured_bit_by_bit() {
+        let at = |length| {
+            [from_source(
+                route("eth0", "fe80::1", 1),
+                "2001:db8:8000::",
+                length,
+            )]
+        };
+        assert!(gateway_of(&at(1), "eth0", "7fff::1").is_some());
+        assert!(gateway_of(&at(1), "eth0", "8000::1").is_none());
+        assert!(gateway_of(&at(64), "eth0", "2001:db8:8000:1::1").is_none());
+        assert!(gateway_of(&at(63), "eth0", "2001:db8:8000:1::1").is_some());
+        assert!(gateway_of(&at(128), "eth0", "2001:db8:8000::").is_some());
+        assert!(gateway_of(&at(128), "eth0", "2001:db8:8000::1").is_none());
+    }
+
+    #[test]
+    fn the_most_specific_source_beats_a_better_metric() {
+        let routes = [
+            route("eth0", "fe80::a", 50),
+            from_source(route("eth0", "fe80::b", 900), "2001:db8:2::", 64),
+            from_source(route("eth0", "fe80::c", 100), "2001:db8::", 32),
+        ];
+        assert_eq!(
+            gateway_of(&routes, "eth0", "2001:db8:2::5"),
+            Some(ip("fe80::b"))
+        );
+        assert_eq!(
+            gateway_of(&routes, "eth0", "2001:db8:3::5"),
+            Some(ip("fe80::c"))
+        );
+        assert_eq!(gateway_of(&routes, "eth0", "fd00::5"), Some(ip("fe80::a")));
+    }
+
+    #[test]
+    fn equally_good_routes_to_different_gateways_are_ambiguous() {
+        let two = [route("eth0", "fe80::a", 100), route("eth0", "fe80::b", 100)];
+        assert_eq!(gateway_of(&two, "eth0", "2001:db8::5"), None);
+        let same = [route("eth0", "fe80::a", 100), route("eth0", "fe80::a", 100)];
+        assert_eq!(
+            gateway_of(&same, "eth0", "2001:db8::5"),
+            Some(ip("fe80::a"))
+        );
+        let tie_then_better = [
+            route("eth0", "fe80::a", 100),
+            route("eth0", "fe80::b", 100),
+            route("eth0", "fe80::c", 10),
+        ];
+        assert_eq!(
+            gateway_of(&tie_then_better, "eth0", "2001:db8::5"),
+            Some(ip("fe80::c"))
+        );
+    }
+
+    #[test]
+    fn ipv6_source_fields_are_parsed_into_the_route() {
+        let line = |src: &str, len: &str| {
+            format!(
+                "00000000000000000000000000000000 00 {src} {len} fe800000000000000000000000000001 00000064 00000001 00000000 00450003 eth0\n"
+            )
+        };
+        let source = "20010db8000100000000000000000000";
+        let routes = parse_ipv6_routes(&line(source, "40"));
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].source,
+            Some(("2001:db8:1::".parse().unwrap(), 64))
+        );
+        let routes = parse_ipv6_routes(&line("00000000000000000000000000000000", "00"));
+        assert_eq!(routes[0].source, None);
+        // A prefix longer than 128 bits is not a route; neither is a garbled source.
+        assert!(parse_ipv6_routes(&line(source, "81")).is_empty());
+        assert!(parse_ipv6_routes(&line("zz", "00")).is_empty());
     }
 
     #[test]

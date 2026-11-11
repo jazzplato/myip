@@ -6,9 +6,13 @@ use std::io::{self, Write};
 use crate::cli::Options;
 use crate::env::RecordingEnv;
 use crate::json::Json;
+use crate::sanitize;
 
 /// Prints `json` as one line when `--json` is set, otherwise `text` (when there is any).
 /// Plain mode prints nothing on stdout when `text` is `None`: a failure belongs on stderr.
+///
+/// This is the boundary where text stops being trusted: control characters in `text`
+/// (other than its own newlines) are shown as visible escapes, never printed raw.
 pub fn emit(
     options: &Options,
     json: &Json,
@@ -18,10 +22,15 @@ pub fn emit(
     if options.json {
         writeln!(out, "{}", json.render(false))
     } else if let Some(text) = text {
-        out.write_all(text.as_bytes())
+        out.write_all(sanitize::escape_keeping_newlines(text).as_bytes())
     } else {
         Ok(())
     }
+}
+
+/// One `myip: ` line on stderr, with control characters shown as visible escapes.
+pub fn diagnostic(err: &mut dyn Write, message: &str) {
+    let _ = writeln!(err, "myip: {}", sanitize::escape(message));
 }
 
 /// With `-v`: every variable and file that was consulted, then the notes about what could
@@ -31,10 +40,10 @@ pub fn trace(options: &Options, env: &RecordingEnv<'_>, notes: &[String], err: &
         return;
     }
     for access in env.accesses() {
-        let _ = writeln!(err, "myip: {access}");
+        diagnostic(err, &access.to_string());
     }
     for note in notes {
-        let _ = writeln!(err, "myip: {note}");
+        diagnostic(err, note);
     }
 }
 
