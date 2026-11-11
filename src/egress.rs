@@ -246,23 +246,30 @@ mod tests {
     }
 
     #[test]
-    fn only_up_gateway_routes_to_everywhere_count() {
+    fn only_up_default_routes_that_are_not_rejects_count() {
         let table = v4(&[
             // not UP
             "eth1\t00000000\t0100000A\t0002\t0\t0\t10\t00000000\t0\t0\t0",
-            // not a gateway route
+            // a direct default (`default dev eth2`): UP, no gateway
             "eth2\t00000000\t00000000\t0001\t0\t0\t10\t00000000\t0\t0\t0",
             // a specific network, not the default
             "eth3\t0000A8C0\t0100A8C0\t0003\t0\t0\t10\t00FFFFFF\t0\t0\t0",
             // a default destination with a non-default mask
             "eth4\t00000000\t0100A8C0\t0003\t0\t0\t10\t000000FF\t0\t0\t0",
+            // `unreachable default`: UP and REJECT
+            "*\t00000000\t00000000\t0201\t0\t0\t10\t00000000\t0\t0\t0",
+            // the gateway flag without a gateway, and a gateway without the flag
+            "eth5\t00000000\t00000000\t0003\t0\t0\t10\t00000000\t0\t0\t0",
+            "eth6\t00000000\t0100000A\t0001\t0\t0\t10\t00000000\t0\t0\t0",
             // the real one
             "eth0\t00000000\t0100000A\t0003\t0\t0\t100\t00000000\t0\t0\t0",
         ]);
         let routes = parse_ipv4_routes(&table);
-        assert_eq!(routes.len(), 1, "{routes:?}");
-        assert_eq!(routes[0].interface, "eth0");
-        assert_eq!(routes[0].metric, 100);
+        let found: Vec<(&str, u32)> = routes
+            .iter()
+            .map(|route| (route.interface.as_str(), route.metric))
+            .collect();
+        assert_eq!(found, [("eth2", 10), ("eth0", 100)], "{routes:?}");
     }
 
     #[test]
@@ -319,9 +326,23 @@ mod tests {
     }
 
     #[test]
-    fn a_default_route_must_carry_a_gateway_address() {
+    fn a_gateway_flag_without_a_gateway_address_is_malformed() {
         let table = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000064 00000001 00000000 00000003 eth0\n";
         assert!(parse_ipv6_routes(table).is_empty());
+        let address_without_flag = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000064 00000001 00000000 00000001 eth0\n";
+        assert!(parse_ipv6_routes(address_without_flag).is_empty());
+    }
+
+    #[test]
+    fn an_ipv6_direct_default_is_parsed_but_a_reject_default_is_not() {
+        let table = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 0000000a 00000001 00000000 00000001 wg0\n\
+                     00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000064 00000001 00000000 00000201 eth1\n";
+        let routes = parse_ipv6_routes(table);
+        let found: Vec<(&str, u32)> = routes
+            .iter()
+            .map(|route| (route.interface.as_str(), route.metric))
+            .collect();
+        assert_eq!(found, [("wg0", 10)], "{routes:?}");
     }
 
     fn route(interface: &str, gateway: &str, metric: u32) -> DefaultRoute {
@@ -469,6 +490,153 @@ mod tests {
         // A prefix longer than 128 bits is not a route; neither is a garbled source.
         assert!(parse_ipv6_routes(&line(source, "81")).is_empty());
         assert!(parse_ipv6_routes(&line("zz", "00")).is_empty());
+    }
+
+    fn hex4(address: &str) -> String {
+        let octets = address.parse::<Ipv4Addr>().unwrap().octets();
+        format!("{:08X}", u32::from_ne_bytes(octets))
+    }
+
+    /// A `/proc/net/route` row for `default via <gateway> dev <interface> metric <metric>`.
+    fn v4_via(interface: &str, gateway: &str, metric: u32) -> String {
+        let gateway = hex4(gateway);
+        format!("{interface}\t00000000\t{gateway}\t0003\t0\t0\t{metric}\t00000000\t0\t0\t0")
+    }
+
+    /// A `/proc/net/route` row for `default dev <interface> metric <metric>`.
+    fn v4_direct(interface: &str, metric: u32) -> String {
+        format!("{interface}\t00000000\t00000000\t0001\t0\t0\t{metric}\t00000000\t0\t0\t0")
+    }
+
+    fn v4_gateway(rows: &[String], interface: &str) -> Option<IpAddr> {
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        gateway_of(&parse_ipv4_routes(&v4(&rows)), interface, "10.0.0.5")
+    }
+
+    #[test]
+    fn a_direct_default_is_parsed_alongside_a_gateway_default() {
+        let table = v4(&[&v4_via("eth0", "10.0.0.1", 100), &v4_direct("wg0", 10)]);
+        let interfaces: Vec<String> = parse_ipv4_routes(&table)
+            .into_iter()
+            .map(|route| route.interface)
+            .collect();
+        assert_eq!(interfaces, ["wg0", "eth0"]);
+    }
+
+    #[test]
+    fn a_direct_default_with_the_lower_metric_wins_so_there_is_no_gateway() {
+        let rows = [v4_direct("eth0", 10), v4_via("eth0", "10.0.0.1", 100)];
+        assert_eq!(v4_gateway(&rows, "eth0"), None);
+    }
+
+    #[test]
+    fn a_gateway_default_with_a_strictly_lower_metric_beats_a_direct_one() {
+        let rows = [v4_direct("eth0", 100), v4_via("eth0", "10.0.0.1", 10)];
+        assert_eq!(v4_gateway(&rows, "eth0"), Some(ip("10.0.0.1")));
+    }
+
+    #[test]
+    fn a_direct_default_tied_with_a_gateway_default_gives_no_gateway() {
+        let rows = [v4_via("eth0", "10.0.0.1", 100), v4_direct("eth0", 100)];
+        assert_eq!(v4_gateway(&rows, "eth0"), None);
+    }
+
+    #[test]
+    fn direct_and_gateway_defaults_on_other_interfaces_are_left_alone() {
+        let rows = [
+            v4_direct("wg0", 10),
+            v4_via("eth0", "10.0.0.1", 100),
+            v4_direct("eth0", 200),
+            v4_via("eth1", "10.1.0.1", 50),
+        ];
+        assert_eq!(v4_gateway(&rows, "wg0"), None);
+        assert_eq!(v4_gateway(&rows, "eth0"), Some(ip("10.0.0.1")));
+        assert_eq!(v4_gateway(&rows, "eth1"), Some(ip("10.1.0.1")));
+        assert_eq!(v4_gateway(&rows, "eth2"), None);
+    }
+
+    /// A `/proc/net/ipv6_route` row for a default route; no gateway is a direct default.
+    fn v6_row(
+        source: Option<(&str, u8)>,
+        gateway: Option<&str>,
+        metric: u32,
+        interface: &str,
+    ) -> String {
+        let bits = |text: &str| text.parse::<Ipv6Addr>().unwrap().to_bits();
+        let (source, length) = source.map_or((0, 0), |(prefix, length)| (bits(prefix), length));
+        let (next_hop, flags) = gateway.map_or((0, 0x1), |gateway| (bits(gateway), 0x3));
+        format!(
+            "{:032x} 00 {source:032x} {length:02x} {next_hop:032x} {metric:08x} 00000001 00000000 {flags:08x} {interface}\n",
+            0u128
+        )
+    }
+
+    fn v6_gateway(rows: &[String], interface: &str, address: &str) -> Option<IpAddr> {
+        gateway_of(&parse_ipv6_routes(&rows.concat()), interface, address)
+    }
+
+    #[test]
+    fn an_ipv6_direct_default_with_the_lower_metric_wins_so_there_is_no_gateway() {
+        let rows = [
+            v6_row(None, None, 10, "eth0"),
+            v6_row(None, Some("fe80::1"), 100, "eth0"),
+        ];
+        assert_eq!(v6_gateway(&rows, "eth0", "2001:db8::5"), None);
+        let tie = [
+            v6_row(None, Some("fe80::1"), 100, "eth0"),
+            v6_row(None, None, 100, "eth0"),
+        ];
+        assert_eq!(v6_gateway(&tie, "eth0", "2001:db8::5"), None);
+        let backup_better = [
+            v6_row(None, None, 100, "eth0"),
+            v6_row(None, Some("fe80::1"), 10, "eth0"),
+        ];
+        assert_eq!(
+            v6_gateway(&backup_better, "eth0", "2001:db8::5"),
+            Some(ip("fe80::1"))
+        );
+    }
+
+    #[test]
+    fn a_source_specific_direct_default_only_applies_to_its_own_source() {
+        let rows = [
+            v6_row(None, Some("fe80::a"), 100, "eth0"),
+            v6_row(Some(("2001:db8:2::", 64)), None, 10, "eth0"),
+        ];
+        // Inside its prefix the kernel prefers the source-specific route, which is direct:
+        // there is no gateway to report, and the unconditional one is not it.
+        assert_eq!(v6_gateway(&rows, "eth0", "2001:db8:2::5"), None);
+        // Outside it the source-specific direct default does not apply at all.
+        assert_eq!(
+            v6_gateway(&rows, "eth0", "2001:db8:3::5"),
+            Some(ip("fe80::a"))
+        );
+    }
+
+    #[test]
+    fn an_unconditional_direct_default_loses_to_a_matching_source_specific_gateway() {
+        let rows = [
+            v6_row(None, None, 10, "eth0"),
+            v6_row(Some(("2001:db8:2::", 64)), Some("fe80::2"), 100, "eth0"),
+        ];
+        assert_eq!(
+            v6_gateway(&rows, "eth0", "2001:db8:2::5"),
+            Some(ip("fe80::2"))
+        );
+        assert_eq!(v6_gateway(&rows, "eth0", "2001:db8:3::5"), None);
+    }
+
+    #[test]
+    fn ipv6_direct_and_gateway_defaults_on_different_interfaces_do_not_interfere() {
+        let rows = [
+            v6_row(None, None, 10, "wg0"),
+            v6_row(None, Some("fe80::1"), 100, "eth0"),
+        ];
+        assert_eq!(v6_gateway(&rows, "wg0", "2001:db8::5"), None);
+        assert_eq!(
+            v6_gateway(&rows, "eth0", "2001:db8::5"),
+            Some(ip("fe80::1"))
+        );
     }
 
     #[test]

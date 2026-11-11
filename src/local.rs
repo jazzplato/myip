@@ -841,6 +841,114 @@ mod tests {
         assert!(json.contains("eth\\u001b[2J0"), "{json}");
     }
 
+    /// A `/proc/net/ipv6_route` line for `default dev <interface>`: UP, no gateway.
+    fn v6_direct(metric: u32, interface: &str) -> String {
+        format!(
+            "{:032x} 00 {:032x} 00 {:032x} {metric:08x} 00000001 00000000 00000001 {interface}\n",
+            0u128, 0u128, 0u128,
+        )
+    }
+
+    const DIRECT_BEATS_BACKUP: &str = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+        eth0\t00000000\t00000000\t0001\t0\t0\t10\t00000000\t0\t0\t0\n\
+        eth0\t00000000\t010011AC\t0003\t0\t0\t100\t00000000\t0\t0\t0\n";
+
+    #[test]
+    fn a_direct_default_that_wins_means_a_null_gateway_not_the_backups() {
+        let env = FakeEnv::new().file(ROUTES_V4, DIRECT_BEATS_BACKUP);
+        let r = report(&env, &container(), &container_probe(), Family::Any);
+        let egress = r.ipv4.as_ref().unwrap();
+        assert_eq!(egress.interface.as_deref(), Some("eth0"));
+        assert!(egress.gateway.is_none(), "{egress:?}");
+        assert_eq!(json_at(&r.to_json(), "egress.ipv4.gateway"), &Json::Null);
+        assert!(r.render_text().contains("gateway unknown"));
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.contains("no gateway") && n.contains(ROUTES_V4)),
+            "{:?}",
+            r.notes
+        );
+        assert_eq!(r.exit_code(), 0);
+    }
+
+    #[test]
+    fn an_ipv6_direct_default_that_wins_means_a_null_gateway_not_the_backups() {
+        let table = [
+            v6_direct(10, "eth0"),
+            v6_default(None, "fe80::a", 100, "eth0"),
+        ]
+        .concat();
+        let (r, gateway) = v6_egress_from(&table, "2001:db8:2::5");
+        assert_eq!(gateway, None);
+        assert_eq!(json_at(&r.to_json(), "egress.ipv6.gateway"), &Json::Null);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.contains("no gateway") && n.contains("ipv6_route")),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    fn vip_on_lo_and_eth0() -> FakeInterfaces {
+        FakeInterfaces::with(vec![
+            iface("lo", 1, &[("127.0.0.1", 8), ("172.17.0.2", 32)]),
+            iface("eth0", 2, &[("172.17.0.2", 16)]),
+        ])
+    }
+
+    #[test]
+    fn an_address_on_two_interfaces_leaves_the_egress_interface_and_gateway_unknown() {
+        let r = report(
+            &container_env(),
+            &vip_on_lo_and_eth0(),
+            &container_probe(),
+            Family::Any,
+        );
+        let egress = r.ipv4.as_ref().unwrap();
+        assert_eq!(egress.address.to_string(), "172.17.0.2");
+        assert_eq!(egress.interface, None);
+        assert!(egress.gateway.is_none(), "{egress:?}");
+        let json = r.to_json();
+        assert_eq!(json_at(&json, "egress.ipv4.interface"), &Json::Null);
+        assert_eq!(json_at(&json, "egress.ipv4.gateway"), &Json::Null);
+        assert!(r.render_text().contains("interface unknown"));
+        assert!(
+            r.notes.iter().any(|n| n.contains("172.17.0.2")
+                && n.contains("lo")
+                && n.contains("eth0")
+                && n.contains("several")),
+            "{:?}",
+            r.notes
+        );
+        assert_eq!(r.exit_code(), 0);
+    }
+
+    #[test]
+    fn the_listing_order_does_not_pick_the_egress_interface() {
+        let reversed = FakeInterfaces::with(vec![
+            iface("eth0", 2, &[("172.17.0.2", 16)]),
+            iface("lo", 1, &[("127.0.0.1", 8), ("172.17.0.2", 32)]),
+        ]);
+        let r = report(&container_env(), &reversed, &container_probe(), Family::Any);
+        let egress = r.ipv4.unwrap();
+        assert_eq!(egress.interface, None);
+        assert!(egress.gateway.is_none(), "{egress:?}");
+    }
+
+    #[test]
+    fn one_address_listed_twice_on_one_interface_still_has_one_owner() {
+        let ifaces = FakeInterfaces::with(vec![
+            iface("lo", 1, &[("127.0.0.1", 8)]),
+            iface("eth0", 2, &[("172.17.0.2", 16), ("172.17.0.2", 24)]),
+        ]);
+        let r = report(&container_env(), &ifaces, &container_probe(), Family::Any);
+        let egress = r.ipv4.unwrap();
+        assert_eq!(egress.interface.as_deref(), Some("eth0"));
+        assert_eq!(egress.gateway.unwrap().address.to_string(), "172.17.0.1");
+    }
+
     #[test]
     fn a_default_route_on_another_interface_is_not_this_egress_gateway() {
         let env = FakeEnv::new().file(
