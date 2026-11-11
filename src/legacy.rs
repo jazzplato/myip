@@ -104,9 +104,16 @@ fn looks_like_html(body: &str) -> bool {
         .take(15)
         .collect::<String>()
         .to_ascii_lowercase();
-    ["<!doctype html", "<html", "<head", "<body", "<title", "<meta"]
-        .iter()
-        .any(|start| head.starts_with(start))
+    [
+        "<!doctype html",
+        "<html",
+        "<head",
+        "<body",
+        "<title",
+        "<meta",
+    ]
+    .iter()
+    .any(|start| head.starts_with(start))
 }
 
 /// Drops leading whitespace and byte-order marks.
