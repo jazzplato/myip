@@ -35,20 +35,20 @@ Bare `myip` and `myip FIELD` keep printing the ipinfo body. Making an identity o
 
 **Cross-cutting flags**
 - `--json`, `-v`, `--timeout <SECS>`, `--proxy none|env|URL`, and `-4`/`-6` (mutually exclusive; both together is a usage error).
-- `--timeout` is an integer number of seconds applied to each HTTP request, default 10 (0.0.1 used 30). Fallback can therefore take up to providers x timeout; `--verify` queries concurrently and takes about one timeout.
+- `--timeout` is an integer number of seconds from 1 to 600 (`0` and non-numbers are usage errors), applied to each HTTP request, default 10 (0.0.1 used 30). Fallback can therefore take up to providers x timeout; `--verify` queries concurrently and takes about one timeout.
 - `--proxy` defaults to `none`, matching 0.0.1: environment proxies are ignored unless asked for. Userinfo in a proxy URL (and in `HTTPS_PROXY`/`ALL_PROXY` under `env`) is never printed: not in `-v`, errors or `--json`. Credentials on argv are visible to other local users, so `--proxy env` is the recommended way to pass them.
-- `-4`/`-6` restrict remote lookups (`public`, the public part of `all`, the legacy path) and filter the addresses `local` prints. They do not affect `where`.
+- `-4`/`-6` restrict remote lookups (`public`, the public part of `all`, the legacy path) and filter the addresses `local` prints. They do not affect `where`. They are implemented as IP-family control on the same hostname, never by switching to different (for example `api6.`) hostnames, so the provider list below stays the complete list of hosts. #14 owns the flag, mutual exclusion and the legacy path; #15 the provider path; #16 the `local` filter. Without either flag the family is whatever the connection uses (dual-stack hosts may therefore see IPv4 or IPv6).
 - `--verify` belongs to `public` and `all`.
 
 **Command semantics**
-- `public`: the first provider that returns a valid answer wins; if none does, exit `1`. With `--verify` all providers are queried: exit `0` only if at least two answered and every answer agrees; any disagreement exits `3` and prints the per-provider answers with the headline address `null`; fewer than two answers exits `1` (cannot verify). A provider that errored is listed but is not a disagreement.
-- `local`, `where`: read-only; facts that cannot be determined are `null`. They exit `0` unless a usage error occurs.
-- `all`: a failed section is reported in-band (`null` values plus an `error` string, with a note on stderr). It exits `1` only if every section failed, `3` if `--verify` found a disagreement, otherwise `0`. Use `public` for strict scripting.
+- `public`: the first provider that returns a valid answer wins; if none does, exit `1`. With `--verify` all providers are queried and answers are compared within each address family: a split between families (one provider answered with IPv4, another with IPv6) is not a disagreement. Exit `0` only if, in each family that answered, at least two providers answered and all of them agree; any disagreement inside a family exits `3` and prints the per-provider answers with the headline address `null`; a family with fewer than two answers cannot be verified and exits `1`. A provider that errored is listed but is not a disagreement.
+- `local`, `where`: read-only; facts that cannot be determined are `null`. `where` always exits `0` (a bare host is a valid answer). `local` exits `1` only if interface enumeration itself fails.
+- `all`: a report, not a gate. A failed section is reported in-band (`null` values plus an `error` string, with a note on stderr). It exits `1` only if every section failed, `3` if `--verify` found a disagreement, otherwise `0`; an unverifiable result (fewer than two answers) is reported in-band and does not change the exit code. Use `public --verify` for strict scripting.
 
 **Providers.** `public` queries, in this order: Cloudflare trace, ipify, checkip.amazonaws.com, icanhazip, ident.me, ipinfo.io `/ip`. Changing the list or its order is a provider-strategy change and needs a new ADR; #15 implements it. `myip` sends no telemetry and contacts no host other than the provider it is querying.
 
 **Trust rules**
-- Remote answers are untrusted: HTTPS only, including redirect targets (a downgrade to `http` is an error, and so is a redirect to another host), size-capped, and HTML bodies are errors. For provider answers the body must also parse as a valid, globally routable address of the requested family.
+- Remote answers are untrusted: HTTPS only, including redirect targets (a downgrade to `http` is an error, and so is a redirect to another host), size-capped (1 MiB for the legacy path, 4 KiB for provider answers; exceeding the cap is an error with exit `1`, never a truncated answer), and HTML bodies are errors. For provider answers the body must also parse as a valid, globally routable address of the requested family.
 - Local reads are read-only and allow-listed. Credentials are never read, in particular `/var/run/secrets/kubernetes.io/serviceaccount/token`.
 - The legacy FIELD is an opaque path suffix appended by string concatenation to the constant `https://ipinfo.io/`; it is never resolved as a URL reference. Surrounding whitespace is trimmed (as in 0.0.1), then FIELD must be non-empty, match `[A-Za-z0-9._:/-]`, not start with `/`, and contain neither `..` nor `//`. Anything else is a usage error (exit `2`) with no request made. Tests must show that `//example.com`, `https://example.com` and `file:///etc/passwd` never produce a request to another host.
 
@@ -67,7 +67,7 @@ Bare `myip` and `myip FIELD` keep printing the ipinfo body. Making an identity o
 ## Consequences
 - Easier: the answers are auditable (provenance), scriptable (`--json`, exit codes), and degrade gracefully when a provider is down.
 - Harder: the output contract is now a promise; changing JSON field meanings needs a `schema_version` bump and a new ADR.
-- Legacy behavior changes are documented in the changelog as fixes, not silent drift: errors on stderr; non-2xx exits `1`; HTML bodies are errors; FIELD is validated; extra positional arguments are a usage error (0.0.1 ignored them); a trailing newline is guaranteed; default timeout 30s to 10s; response cap 10 MiB to 1 MiB.
+- Legacy behavior changes are documented in the changelog as fixes, not silent drift: errors on stderr; non-2xx exits `1`; HTML bodies are errors; FIELD is validated; extra positional arguments are a usage error (0.0.1 ignored them); a trailing newline is guaranteed; default timeout 30s to 10s; response cap 10 MiB to 1 MiB; redirects to another host or to `http` are errors (0.0.1 followed them).
 - Third-party providers see the caller's IP. That is inherent to the question; the README (and `SECURITY.md`'s scope note) will say so when `myip public` lands (#15).
 - Cannot do in 0.1.0: cloud metadata, Kubernetes API access, an echo server mode, STUN/DNS providers, a cache, geolocation databases. They are the 0.2+ roadmap.
 
