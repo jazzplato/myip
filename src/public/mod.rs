@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn every_kind_of_bad_answer_is_an_error_and_falls_back() {
-        let cases: [(Slot, &str); 12] = [
+        let cases: [(Slot, &str); 13] = [
             (Timeout, "timed out after 10s"),
             (Status(429), "HTTP 429"),
             (Raw("<!DOCTYPE html><title>Sign in</title>"), "web page"),
@@ -402,6 +402,7 @@ mod tests {
             (Raw("127.0.0.1"), "not a public address (loopback)"),
             (Raw("100.64.0.1"), "not a public address (cgnat)"),
             (Raw("fe80::1"), "not a public address (link-local)"),
+            (Raw("192.88.99.2"), "not a public address (reserved)"),
             (Raw("::ffff:1.2.3.4"), "IPv4-mapped"),
             (TooBig, "larger than 4096 bytes"),
             (Fail("connection refused"), "connection refused"),

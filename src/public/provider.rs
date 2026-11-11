@@ -367,11 +367,43 @@ tls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n";
             ("203.0.113.9", Scope::Documentation),
             ("2001:db8::1", Scope::Documentation),
             ("255.255.255.255", Scope::Reserved),
+            ("192.88.99.2", Scope::Reserved),
+            ("192.0.0.8", Scope::Reserved),
+            ("192.0.0.11", Scope::Reserved),
+            ("2001:1::4", Scope::Reserved),
         ] {
             assert_eq!(
                 read(Parser::PlainText, body, Family::Any),
                 Err(Reject::NotGlobal(ip(body), scope)),
                 "{body}"
+            );
+        }
+    }
+
+    // IANA marks these as globally reachable, so a provider may legitimately answer with them.
+    #[test]
+    fn globally_reachable_special_purpose_addresses_are_accepted() {
+        for (body, family) in [
+            ("192.0.0.9", Family::V4),
+            ("192.0.0.10", Family::V4),
+            ("192.31.196.1", Family::V4),
+            ("2001:1::1", Family::V6),
+            ("2001:1::2", Family::V6),
+            ("2001:1::3", Family::V6),
+            ("2001:3::1", Family::V6),
+        ] {
+            for wanted in [Family::Any, family] {
+                assert_eq!(
+                    read(Parser::PlainText, &format!("{body}\n"), wanted),
+                    Ok(ip(body)),
+                    "{body} {wanted:?}"
+                );
+            }
+            let trace = format!("fl=1\nh=one.one.one.one\nip={body}\n");
+            assert_eq!(
+                read(Parser::CloudflareTrace, &trace, family),
+                Ok(ip(body)),
+                "trace {body}"
             );
         }
     }

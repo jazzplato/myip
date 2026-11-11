@@ -190,6 +190,34 @@ mod tests {
         ]);
     }
 
+    // Rows follow the IANA IPv4 Special-Purpose Address Registry (updated 2025-10-09).
+    #[test]
+    fn ipv4_protocol_block_is_reserved_except_the_globally_reachable_parts() {
+        use Scope::*;
+        check(&[
+            // 192.0.0.0/29 service continuity, .8 dummy, .170/.171 NAT64/DNS64 discovery
+            ("192.0.0.0", Reserved),
+            ("192.0.0.7", Reserved),
+            ("192.0.0.8", Reserved),
+            // .9 PCP anycast and .10 TURN anycast are globally reachable
+            ("192.0.0.9", Global),
+            ("192.0.0.10", Global),
+            ("192.0.0.11", Reserved),
+            ("192.0.0.170", Reserved),
+            ("192.0.0.171", Reserved),
+            ("192.0.0.255", Reserved),
+            // AS112-v4, AMT and the AS112 direct delegation service are globally reachable
+            ("192.31.196.1", Global),
+            ("192.52.193.1", Global),
+            ("192.175.48.1", Global),
+            // the 6a44-relay anycast address is not; the rest of the deprecated 6to4 relay
+            // block has no globally-reachable value in the registry and stays global
+            ("192.88.99.1", Global),
+            ("192.88.99.2", Reserved),
+            ("192.88.99.3", Global),
+        ]);
+    }
+
     #[test]
     fn well_known_ipv4_addresses_are_global() {
         for text in [
@@ -241,6 +269,7 @@ mod tests {
         ]);
     }
 
+    // Rows follow the IANA IPv6 Special-Purpose Address Registry (updated 2025-10-09).
     #[test]
     fn ipv6_ietf_protocol_block_is_reserved_except_the_globally_reachable_parts() {
         use Scope::*;
@@ -250,18 +279,47 @@ mod tests {
             ("2001:2::1", Reserved),
             ("2001:10::1", Reserved),
             ("2001:1ff:ffff::1", Reserved),
+            // PCP (::1), TURN (::2) and DNS-SD SRP (::3) anycast addresses, and only those
+            ("2001:1::", Reserved),
             ("2001:1::1", Global),
             ("2001:1::2", Global),
-            ("2001:1::", Reserved),
+            ("2001:1::3", Global),
+            ("2001:1::4", Reserved),
+            ("2001:1::1:1", Reserved),
+            ("2001:1:1::1", Reserved),
+            ("2001:2:ffff::1", Reserved),
+            // AMT 2001:3::/32
+            ("2001:3::", Global),
+            ("2001:3:ffff:ffff:ffff:ffff:ffff:ffff", Global),
             ("2001:3::1", Global),
+            ("2001:4::1", Reserved),
+            // AS112-v6 2001:4:112::/48
+            ("2001:4:111::1", Reserved),
             ("2001:4:112::1", Global),
+            ("2001:4:112:ffff::1", Global),
             ("2001:4:113::1", Reserved),
+            // deprecated ORCHID 2001:10::/28, then ORCHIDv2 2001:20::/28 and DETs 2001:30::/28
+            ("2001:f::1", Reserved),
+            ("2001:1f:ffff::1", Reserved),
+            ("2001:20::", Global),
             ("2001:20::1", Global),
             ("2001:2f:ffff::1", Global),
             ("2001:30::1", Global),
             ("2001:3f:ffff::1", Global),
             ("2001:40::1", Reserved),
             ("2001:200::1", Global),
+        ]);
+    }
+
+    #[test]
+    fn other_ipv6_registry_rows() {
+        use Scope::*;
+        check(&[
+            // 100:0:0:1::/64 dummy prefix and 5f00::/16 SRv6 SIDs are not globally reachable
+            ("100:0:0:1::1", Reserved),
+            ("5f00::1", Reserved),
+            // the AS112 direct delegation service is globally reachable
+            ("2620:4f:8000::1", Global),
         ]);
     }
 
