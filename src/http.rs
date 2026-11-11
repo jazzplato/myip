@@ -78,6 +78,8 @@ impl Fetch for UreqFetch {
         };
         let mut builder = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .user_agent(USER_AGENT)
             .timeout_global(Some(opts.timeout))
             .ip_family(match opts.family {
@@ -95,11 +97,31 @@ impl Fetch for UreqFetch {
         }
         let agent: ureq::Agent = builder.build().into();
 
-        let mut response = agent
-            .get(url)
-            .header("Accept", opts.accept)
-            .call()
-            .map_err(map_error)?;
+        let mut current = url.to_owned();
+        let mut hops = 0;
+        let mut response = loop {
+            let response = agent
+                .get(&current)
+                .header("Accept", opts.accept)
+                .call()
+                .map_err(map_error)?;
+            let location = match response.status().as_u16() {
+                301 | 302 | 303 | 307 | 308 => response
+                    .headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned),
+                _ => None,
+            };
+            let Some(location) = location else {
+                break response;
+            };
+            hops += 1;
+            if hops > MAX_REDIRECTS {
+                return Err(FetchError::Transport("too many redirects".to_owned()));
+            }
+            current = same_origin_target(&current, &location)?;
+        };
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -130,6 +152,34 @@ fn map_error(e: ureq::Error) -> FetchError {
     match e {
         ureq::Error::Timeout(_) => FetchError::Timeout(e.to_string()),
         other => FetchError::Transport(other.to_string()),
+    }
+}
+
+const MAX_REDIRECTS: usize = 5;
+
+/// Resolves a `Location` against `base`, accepting only a target on the same scheme
+/// and authority (ADR 0001: no cross-host redirects, no downgrade to http). The
+/// target is deliberately not echoed in the error: it is server-controlled and may
+/// carry credentials.
+fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> {
+    let refused = || FetchError::Transport("refused a redirect to a different host".to_owned());
+    let base: ureq::http::Uri = base.parse().map_err(|_| refused())?;
+    let (scheme, authority) = match (base.scheme_str(), base.authority()) {
+        (Some(s), Some(a)) => (s, a),
+        _ => return Err(refused()),
+    };
+    if location.starts_with('/') && !location.starts_with("//") {
+        return Ok(format!("{scheme}://{authority}{location}"));
+    }
+    let target: ureq::http::Uri = location.parse().map_err(|_| refused())?;
+    let same = target.scheme_str() == Some(scheme)
+        && target
+            .authority()
+            .is_some_and(|a| a.as_str().eq_ignore_ascii_case(authority.as_str()));
+    if same {
+        Ok(location.to_owned())
+    } else {
+        Err(refused())
     }
 }
 
@@ -281,15 +331,100 @@ mod tests {
     }
 
     #[test]
-    fn follows_redirects() {
-        let target = serve(vec![http_response("200 OK", "", b"final")]);
-        let base = serve(vec![http_response(
-            "302 Found",
-            &format!("Location: {target}/x\r\n"),
-            b"",
-        )]);
+    fn follows_same_origin_redirects() {
+        let base = serve(vec![
+            http_response("302 Found", "Location: /x\r\n", b""),
+            http_response("200 OK", "", b"final"),
+        ]);
         let resp = UreqFetch.get(&base, &opts()).unwrap();
         assert_eq!(resp.body, "final");
+    }
+
+    #[test]
+    fn a_redirect_to_another_origin_is_refused_and_never_contacted() {
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        other.set_nonblocking(true).unwrap();
+        let target = format!("http://{}/x", other.local_addr().unwrap());
+        let base = serve(vec![http_response(
+            "302 Found",
+            &format!("Location: {target}\r\n"),
+            b"",
+        )]);
+        let err = UreqFetch.get(&base, &opts()).unwrap_err();
+        assert!(
+            matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+            "{err:?}"
+        );
+        assert!(
+            !err.to_string().contains(&target),
+            "must not echo the target"
+        );
+        assert_eq!(
+            other.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the other origin must not be contacted"
+        );
+    }
+
+    #[test]
+    fn a_protocol_relative_or_downgrading_redirect_is_refused() {
+        for location in [
+            "//example.com/x",
+            "http://example.com/x",
+            "ftp://example.com/x",
+        ] {
+            let base = serve(vec![http_response(
+                "302 Found",
+                &format!("Location: {location}\r\n"),
+                b"",
+            )]);
+            let err = UreqFetch.get(&base, &opts()).unwrap_err();
+            assert!(
+                matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+                "{location}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_loop_gives_up() {
+        let hop = http_response("302 Found", "Location: /again\r\n", b"");
+        let base = serve(vec![hop; 8]);
+        let err = UreqFetch.get(&base, &opts()).unwrap_err();
+        assert!(
+            matches!(&err, FetchError::Transport(m) if m.contains("too many redirects")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn origin_check_accepts_only_the_same_scheme_and_authority() {
+        let base = "https://ipinfo.io/ip";
+        for (location, want) in [
+            ("/city", Some("https://ipinfo.io/city")),
+            ("https://ipinfo.io/x", Some("https://ipinfo.io/x")),
+            ("https://IPINFO.io/x", Some("https://IPINFO.io/x")),
+            ("http://ipinfo.io/x", None),
+            ("https://ipinfo.io.evil.example/x", None),
+            ("https://ipinfo.io:8443/x", None),
+            ("https://user@ipinfo.io/x", None),
+            ("//evil.example/x", None),
+            ("x", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                same_origin_target(base, location).ok().as_deref(),
+                want,
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_without_a_location_is_just_a_response() {
+        let base = serve(vec![http_response("302 Found", "", b"moved")]);
+        let resp = UreqFetch.get(&base, &opts()).unwrap();
+        assert_eq!((resp.status, resp.body.as_str()), (302, "moved"));
     }
 
     #[test]
