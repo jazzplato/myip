@@ -1,6 +1,7 @@
 //! Implementation detail of the `myip` binary. The API is not stable.
 
 pub mod cli;
+pub mod egress;
 pub mod env;
 pub mod fact;
 pub mod http;
