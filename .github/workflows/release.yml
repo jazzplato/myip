@@ -69,11 +69,16 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: A release tag must point at a commit on master
-        if: github.event_name == 'push'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "$GITHUB_SHA is on master"
+          elif [ "$EVENT_NAME" = push ]; then
             echo "::error::$GITHUB_SHA is not reachable from master; release only reviewed commits"
             exit 1
+          else
+            echo "::warning::Dry run on a commit that is not on master; a real tag here would be refused"
           fi
       - name: Verify the crate packages (never publishes)
         run: cargo publish --dry-run --locked
