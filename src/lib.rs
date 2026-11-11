@@ -1,11 +1,15 @@
 //! Implementation detail of the `myip` binary. The API is not stable.
 
+pub mod cli;
 pub mod http;
 pub mod legacy;
 
 use std::ffi::OsString;
 use std::io::Write;
 
+use clap::Parser;
+
+use cli::{Cli, Command};
 use http::Fetch;
 
 /// Everything `run` needs from the outside world, so tests can substitute it.
@@ -17,7 +21,30 @@ pub struct Context<'a> {
 
 /// Runs the CLI with the arguments after the program name and returns the exit code.
 pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
-    legacy::run(args.first().map(String::as_str), ctx)
+    let cli =
+        match Cli::try_parse_from(std::iter::once("myip").chain(args.iter().map(String::as_str))) {
+            Ok(cli) => cli,
+            Err(e) => {
+                // `--help` and `--version` arrive here too; clap says which stream they belong on.
+                let rendered = e.render().to_string();
+                let sink = if e.use_stderr() {
+                    &mut ctx.err
+                } else {
+                    &mut ctx.out
+                };
+                let _ = write!(sink, "{rendered}");
+                return u8::try_from(e.exit_code()).unwrap_or(2);
+            }
+        };
+    match cli.command {
+        Some(command) => not_implemented(command, ctx),
+        None => legacy::run(cli.field.as_deref(), &cli.options, ctx),
+    }
+}
+
+fn not_implemented(command: Command, ctx: &mut Context<'_>) -> u8 {
+    let _ = writeln!(ctx.err, "myip: `{}` is not implemented yet", command.name());
+    1
 }
 
 /// Converts OS arguments to UTF-8 without altering them. A non-Unicode argument is
@@ -57,7 +84,12 @@ mod tests {
     }
 
     fn requested(fetch: &FakeFetch) -> Vec<String> {
-        fetch.requests.borrow().iter().map(|r| r.0.clone()).collect()
+        fetch
+            .requests
+            .borrow()
+            .iter()
+            .map(|r| r.0.clone())
+            .collect()
     }
 
     #[test]
@@ -104,7 +136,16 @@ mod tests {
     #[test]
     fn invalid_fields_are_rejected_before_any_request() {
         let cases = [
-            "", "   ", "foo bar", "a/../b", "..", "x?y=1", "x#f", "caf\u{e9}", "a\nb", "a\\b",
+            "",
+            "   ",
+            "foo bar",
+            "a/../b",
+            "..",
+            "x?y=1",
+            "x#f",
+            "caf\u{e9}",
+            "a\nb",
+            "a\\b",
         ];
         for field in cases {
             let fetch = no_network();
@@ -189,10 +230,10 @@ mod tests {
 
     #[test]
     fn transport_errors_go_to_stderr_without_the_old_typo() {
-        let fetch = FakeFetch::new(vec![Err(FetchError::Timeout)]);
+        let fetch = FakeFetch::new(vec![Err(FetchError::Timeout("timeout: global".to_owned()))]);
         let (code, out, err) = exec(&fetch, &[]);
         assert_eq!((code, out.as_str()), (1, ""));
-        assert_eq!(err, "myip: request timed out\n");
+        assert_eq!(err, "myip: request to ipinfo.io timed out after 10s\n");
     }
 
     #[test]
@@ -228,7 +269,10 @@ mod tests {
         exec(&fetch, &["-6", "--proxy", "http://127.0.0.1:3128"]);
         let (_, opts) = fetch.requests.borrow()[0].clone();
         assert_eq!(opts.family, Family::V6);
-        assert_eq!(opts.proxy, ProxyMode::Url("http://127.0.0.1:3128".to_owned()));
+        assert_eq!(
+            opts.proxy,
+            ProxyMode::Url("http://127.0.0.1:3128".to_owned())
+        );
     }
 
     #[test]
