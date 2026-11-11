@@ -1,6 +1,7 @@
 //! Implementation detail of the `myip` binary. The API is not stable.
 
 pub mod cli;
+pub mod env;
 pub mod http;
 pub mod json;
 pub mod legacy;
