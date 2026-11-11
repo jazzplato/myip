@@ -4,7 +4,9 @@
 
 use std::cell::RefCell;
 use std::fmt;
-use std::io;
+use std::fs::File;
+use std::io::{self, Read};
+use std::path::Path;
 
 /// Files `myip` may look at (existence or contents). Kubernetes credentials are
 /// deliberately absent: the service-account `token` and `ca.crt` are never opened.
@@ -57,21 +59,33 @@ impl SystemEnv {
 }
 
 impl Env for SystemEnv {
-    fn var(&self, _name: &str) -> Option<String> {
-        unimplemented!()
+    fn var(&self, name: &str) -> Option<String> {
+        if !Self::allows_var(name) {
+            return None;
+        }
+        std::env::var(name).ok()
     }
 
-    fn read_to_string(&self, _path: &str) -> io::Result<String> {
-        unimplemented!()
+    fn read_to_string(&self, path: &str) -> io::Result<String> {
+        if !Self::allows_path(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{path} is not on myip's read allow-list"),
+            ));
+        }
+        read_limited(File::open(path)?, MAX_READ_BYTES)
     }
 
-    fn exists(&self, _path: &str) -> bool {
-        unimplemented!()
+    fn exists(&self, path: &str) -> bool {
+        Self::allows_path(path) && Path::new(path).exists()
     }
 }
 
-fn read_limited(_reader: impl io::Read, _limit: u64) -> io::Result<String> {
-    unimplemented!()
+/// Reads at most `limit` bytes; invalid UTF-8 becomes U+FFFD rather than an error.
+fn read_limited(reader: impl Read, limit: u64) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    reader.take(limit).read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// One call made through an [`Env`].
@@ -113,16 +127,25 @@ impl<'a> RecordingEnv<'a> {
 }
 
 impl Env for RecordingEnv<'_> {
-    fn var(&self, _name: &str) -> Option<String> {
-        unimplemented!()
+    fn var(&self, name: &str) -> Option<String> {
+        self.accesses
+            .borrow_mut()
+            .push(Access::Var(name.to_owned()));
+        self.inner.var(name)
     }
 
-    fn read_to_string(&self, _path: &str) -> io::Result<String> {
-        unimplemented!()
+    fn read_to_string(&self, path: &str) -> io::Result<String> {
+        self.accesses
+            .borrow_mut()
+            .push(Access::Read(path.to_owned()));
+        self.inner.read_to_string(path)
     }
 
-    fn exists(&self, _path: &str) -> bool {
-        unimplemented!()
+    fn exists(&self, path: &str) -> bool {
+        self.accesses
+            .borrow_mut()
+            .push(Access::Exists(path.to_owned()));
+        self.inner.exists(path)
     }
 }
 
