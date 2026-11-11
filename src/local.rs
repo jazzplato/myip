@@ -172,25 +172,46 @@ fn egress(
             return None;
         }
     };
-    let interface = listed.and_then(|list| {
-        list.iter()
-            .find(|interface| interface.addresses.iter().any(|a| a.ip == address))
-            .map(|interface| interface.name.clone())
-    });
+    let interface = match owners(listed, &address).as_slice() {
+        [] => None,
+        [only] => Some((*only).to_owned()),
+        several => {
+            notes.push(format!(
+                "{}: the egress address {address} is carried by several interfaces ({}); the egress interface and gateway are left unknown",
+                side.label,
+                several.join(", ")
+            ));
+            None
+        }
+    };
     let gateway = match env.read_to_string(side.routes) {
         Ok(content) => {
             let routes = (side.parse)(&content);
-            let found = gateway_for(&routes, interface.as_deref(), &address);
-            if found.is_none() && interface.is_some() {
-                notes.push(format!(
-                    "{}: no single default route in {} applies to {address}; gateway left unknown",
-                    side.label, side.routes
-                ));
+            match gateway_for(&routes, interface.as_deref(), &address) {
+                Some(DefaultRoute {
+                    gateway: Some(gateway),
+                    ..
+                }) => Some(GatewayInfo {
+                    address: *gateway,
+                    scope: classify(*gateway),
+                }),
+                Some(_) => {
+                    notes.push(format!(
+                        "{}: the default route for {address} in {} has no gateway (it leaves directly through the interface); gateway left unknown",
+                        side.label, side.routes
+                    ));
+                    None
+                }
+                None => {
+                    if interface.is_some() {
+                        notes.push(format!(
+                            "{}: no single default route in {} applies to {address}; gateway left unknown",
+                            side.label, side.routes
+                        ));
+                    }
+                    None
+                }
             }
-            found.map(|route| GatewayInfo {
-                address: route.gateway,
-                scope: classify(route.gateway),
-            })
         }
         Err(e) => {
             notes.push(format!("cannot read {}: {e}", side.routes));
@@ -203,6 +224,18 @@ fn egress(
         interface,
         gateway,
     })
+}
+
+/// The distinct names of the interfaces that carry `address`, in listing order.
+fn owners<'a>(listed: Option<&'a Vec<Interface>>, address: &IpAddr) -> Vec<&'a str> {
+    let mut names: Vec<&str> = Vec::new();
+    for interface in listed.into_iter().flatten() {
+        let name = interface.name.as_str();
+        if interface.addresses.iter().any(|a| a.ip == *address) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Keeps the addresses of the requested family; an interface left with none is dropped.

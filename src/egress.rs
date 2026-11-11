@@ -39,7 +39,9 @@ impl EgressProbe for UdpProbe {
 /// A default route: where traffic with no more specific route is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultRoute {
-    pub gateway: IpAddr,
+    /// The next hop; `None` for a direct default (`default dev wg0`), which sends traffic
+    /// out of the interface with no gateway.
+    pub gateway: Option<IpAddr>,
     pub interface: String,
     pub metric: u32,
     /// A source-specific route (IPv6 `from <prefix>`) only applies to traffic whose source
@@ -67,6 +69,17 @@ impl DefaultRoute {
 
 const RTF_UP: u32 = 0x1;
 const RTF_GATEWAY: u32 = 0x2;
+const RTF_REJECT: u32 = 0x200;
+
+/// Whether the next hop agrees with the gateway flag. A direct default has neither; a flag
+/// without an address, or an address without the flag, is a row that cannot be trusted.
+fn gateway_field<T>(flags: u32, hop: T, unspecified: bool) -> Option<Option<T>> {
+    match (flags & RTF_GATEWAY != 0, unspecified) {
+        (true, false) => Some(Some(hop)),
+        (false, true) => Some(None),
+        _ => None,
+    }
+}
 
 /// `/proc/net/route`: hexadecimal fields printed from native-endian 32-bit words, so the
 /// bytes of an address are in memory order.
@@ -89,12 +102,13 @@ fn ipv4_default_route(line: &str) -> Option<DefaultRoute> {
         word(fields[7])?,
     );
     let metric: u32 = fields[6].parse().ok()?;
-    let is_default = destination == 0 && mask == 0 && gateway != 0;
-    if !is_default || flags & (RTF_UP | RTF_GATEWAY) != (RTF_UP | RTF_GATEWAY) {
+    let is_default = destination == 0 && mask == 0;
+    if !is_default || flags & (RTF_UP | RTF_REJECT) != RTF_UP {
         return None;
     }
+    let hop = Ipv4Addr::from(gateway.to_ne_bytes());
     Some(DefaultRoute {
-        gateway: IpAddr::V4(Ipv4Addr::from(gateway.to_ne_bytes())),
+        gateway: gateway_field(flags, IpAddr::V4(hop), gateway == 0)?,
         interface: fields[0].to_owned(),
         metric,
         source: None,
@@ -128,23 +142,24 @@ fn ipv6_default_route(line: &str) -> Option<DefaultRoute> {
     let next_hop = address(fields[4])?;
     let metric = u32::from_str_radix(fields[5], 16).ok()?;
     let flags = u32::from_str_radix(fields[8], 16).ok()?;
-    let is_default = destination.is_unspecified() && prefix_len == 0 && !next_hop.is_unspecified();
-    if !is_default || flags & (RTF_UP | RTF_GATEWAY) != (RTF_UP | RTF_GATEWAY) || source_len > 128 {
+    let is_default = destination.is_unspecified() && prefix_len == 0;
+    if !is_default || flags & (RTF_UP | RTF_REJECT) != RTF_UP || source_len > 128 {
         return None;
     }
     Some(DefaultRoute {
-        gateway: IpAddr::V6(next_hop),
+        gateway: gateway_field(flags, IpAddr::V6(next_hop), next_hop.is_unspecified())?,
         interface: fields[9].to_owned(),
         metric,
         source: (source_len > 0).then_some((source, source_len)),
     })
 }
 
-/// The gateway traffic from `address` would use on `interface`: among the default routes
+/// The route traffic from `address` would take on `interface`: among the default routes
 /// on that interface whose source constraint (if any) contains `address`, the most
-/// specific source wins, then the lowest metric. When the best candidates disagree on the
-/// gateway, or none applies, or the interface is unknown, the answer is `None` rather than
-/// a guess.
+/// specific source wins, then the lowest metric. A direct default competes like any other,
+/// so the winner may have no gateway. When the best candidates disagree on the gateway
+/// (including a direct default tied with a gateway-backed one), or none applies, or the
+/// interface is unknown, the answer is `None` rather than a guess.
 pub fn gateway_for<'a>(
     routes: &'a [DefaultRoute],
     interface: Option<&str>,
@@ -228,7 +243,7 @@ mod tests {
         assert_eq!(
             parse_ipv4_routes(&table),
             vec![DefaultRoute {
-                gateway: "172.17.0.1".parse().unwrap(),
+                gateway: Some("172.17.0.1".parse().unwrap()),
                 interface: "eth0".to_owned(),
                 metric: 0,
                 source: None,
@@ -241,7 +256,7 @@ mod tests {
         let table = v4(&["wlan0\t00000000\t0100A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0"]);
         assert_eq!(
             parse_ipv4_routes(&table)[0].gateway,
-            "192.168.0.1".parse::<IpAddr>().unwrap()
+            Some("192.168.0.1".parse::<IpAddr>().unwrap())
         );
     }
 
@@ -308,7 +323,7 @@ mod tests {
         assert_eq!(
             routes,
             vec![DefaultRoute {
-                gateway: "fe80::a00:27ff:fe7d:e5b".parse().unwrap(),
+                gateway: Some("fe80::a00:27ff:fe7d:e5b".parse().unwrap()),
                 interface: "eth0".to_owned(),
                 metric: 100,
                 source: None,
@@ -347,7 +362,7 @@ mod tests {
 
     fn route(interface: &str, gateway: &str, metric: u32) -> DefaultRoute {
         DefaultRoute {
-            gateway: gateway.parse().unwrap(),
+            gateway: Some(gateway.parse().unwrap()),
             interface: interface.to_owned(),
             metric,
             source: None,
@@ -364,7 +379,7 @@ mod tests {
     }
 
     fn gateway_of(routes: &[DefaultRoute], interface: &str, address: &str) -> Option<IpAddr> {
-        gateway_for(routes, Some(interface), &ip(address)).map(|r| r.gateway)
+        gateway_for(routes, Some(interface), &ip(address)).and_then(|r| r.gateway)
     }
 
     #[test]
