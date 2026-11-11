@@ -13,7 +13,11 @@ A release is built by [`release.yml`](../.github/workflows/release.yml) from a `
    ```sh
    gh release download "v$VERSION" -R jazzplato/myip -D /tmp/myip-release && cd /tmp/myip-release
    sha256sum --check SHA256SUMS            # shasum -a 256 -c SHA256SUMS on macOS
-   for f in myip-v*.tar.gz myip-v*.zip SHA256SUMS; do gh attestation verify "$f" -R jazzplato/myip; done
+   for f in myip-v*.tar.gz myip-v*.zip SHA256SUMS; do
+     gh attestation verify "$f" -R jazzplato/myip \
+       --signer-workflow jazzplato/myip/.github/workflows/release.yml \
+       --source-ref "refs/tags/v$VERSION" --deny-self-hosted-runners
+   done
    ```
 5. Edit the notes from `CHANGELOG.md`, then publish the draft. Then run `cargo publish` yourself.
 
@@ -24,7 +28,9 @@ Actions -> Release -> Run workflow on any branch. It verifies the tag/version ru
 - the tag equals `v` + the `Cargo.toml` version, and (real tags only) the commit is reachable from `master`;
 - `cargo publish --dry-run --locked` succeeds (nothing is published);
 - every binary prints `myip <version>` from `--version`; the Linux binaries also run in an empty `scratch` container (static); the Windows binary does not import the Visual C++ runtime;
-- exactly five archives exist, and `SHA256SUMS` matches them (checked again in the release job).
+- exactly the five archives and `SHA256SUMS` exist, and `SHA256SUMS` matches them; the release job downloads only the `myip-*` and `SHA256SUMS` artifacts, re-checks that exact file set and the checksums, and only then attests and uploads.
+
+Build artifacts are kept for 30 days, the longest a `release` environment approval can stay pending. If an approval is older than that, the run fails; re-run all jobs to rebuild.
 
 ## Rollback
 Delete the draft release. A pushed `v*` tag cannot be deleted or moved while the `release-tags` ruleset is active; to retire a bad tag, temporarily disable that ruleset, delete the tag, and re-enable it, or ship a fixed `vX.Y.(Z+1)`. A **published** release and a crates.io upload cannot be taken back (crates.io allows only `cargo yank`), so do the verification in step 4 first.
