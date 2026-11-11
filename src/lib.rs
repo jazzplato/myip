@@ -6,6 +6,7 @@ pub mod fact;
 pub mod http;
 pub mod json;
 pub mod legacy;
+pub mod location;
 pub mod net;
 pub mod public;
 pub mod redact;
