@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod http;
 pub mod legacy;
+pub mod net;
 pub mod redact;
 
 use std::ffi::OsString;
