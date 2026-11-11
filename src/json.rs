@@ -20,9 +20,89 @@ impl Json {
 
     /// `pretty` indents with two spaces and puts one element per line; otherwise the
     /// output is one line with no spaces. Neither form ends with a newline.
-    pub fn render(&self, _pretty: bool) -> String {
-        unimplemented!()
+    pub fn render(&self, pretty: bool) -> String {
+        let mut out = String::new();
+        self.write(&mut out, pretty, 0);
+        out
     }
+
+    fn write(&self, out: &mut String, pretty: bool, depth: usize) {
+        match self {
+            Self::Null => out.push_str("null"),
+            Self::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+            Self::Int(value) => out.push_str(&value.to_string()),
+            Self::Str(value) => write_string(out, value),
+            Self::Array(items) => write_seq(out, pretty, depth, ('[', ']'), items, |out, item| {
+                item.write(out, pretty, depth + 1);
+            }),
+            Self::Object(fields) => {
+                write_seq(
+                    out,
+                    pretty,
+                    depth,
+                    ('{', '}'),
+                    fields,
+                    |out, (key, value)| {
+                        write_string(out, key);
+                        out.push(':');
+                        if pretty {
+                            out.push(' ');
+                        }
+                        value.write(out, pretty, depth + 1);
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn write_seq<T>(
+    out: &mut String,
+    pretty: bool,
+    depth: usize,
+    (open, close): (char, char),
+    items: &[T],
+    mut write_item: impl FnMut(&mut String, &T),
+) {
+    out.push(open);
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        if pretty {
+            newline(out, depth + 1);
+        }
+        write_item(out, item);
+    }
+    if pretty && !items.is_empty() {
+        newline(out, depth);
+    }
+    out.push(close);
+}
+
+fn newline(out: &mut String, depth: usize) {
+    out.push('\n');
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+}
+
+fn write_string(out: &mut String, value: &str) {
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
 }
 
 impl From<bool> for Json {
