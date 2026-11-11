@@ -205,6 +205,10 @@ mod tests {
     /// What the six public-address providers say, in ADR order; `None` is one that cannot be
     /// reached. The first speaks the Cloudflare trace format, the others answer a bare address.
     fn providers(answers: [Option<&str>; 6]) -> RouteFetch {
+        providers_failing_with(answers, "connection refused")
+    }
+
+    fn providers_failing_with(answers: [Option<&str>; 6], reason: &str) -> RouteFetch {
         let routes = PROVIDERS
             .iter()
             .zip(answers)
@@ -214,7 +218,7 @@ mod tests {
                         reply(200, "text/plain", &format!("fl=1\nip={ip}\nts=1\n"))
                     }
                     Some(ip) => reply(200, "text/plain", &format!("{ip}\n")),
-                    None => Err(FetchError::Transport("connection refused".to_owned())),
+                    None => Err(FetchError::Transport(reason.to_owned())),
                 };
                 (provider.url, response)
             })
@@ -1310,6 +1314,104 @@ mod tests {
             err.contains("carried by several interfaces (en\\x1b[2J\\n, vip\\x1b[2J\\n)"),
             "{err:?}"
         );
+    }
+
+    /// An error text that tries to end its own line and start the report's headings and results.
+    const FORGED: &str = "boom\n[highlights]\nfoo\r\n[where]\nbar";
+    const FORGED_ESCAPED: &str = "boom\\n[highlights]\\nfoo\\r\\n[where]\\nbar";
+
+    /// The report's own layout: `headings` appear once each, and no line is one the forged
+    /// text would have started.
+    fn assert_layout_is_the_programs_own(out: &str, headings: &[&str], label: &str) {
+        for heading in headings {
+            let count = out.lines().filter(|line| line == heading).count();
+            assert_eq!(count, 1, "{label}: {heading}\n{out}");
+        }
+        for line in out.lines() {
+            assert!(
+                !line.starts_with("foo") && !line.starts_with("bar"),
+                "{label}: forged line {line:?}\n{out}"
+            );
+        }
+        assert!(!out.contains('\r'), "{label}: {out:?}");
+    }
+
+    fn assert_one_json_line(out: &str, label: &str) {
+        assert_eq!(out.matches('\n').count(), 1, "{label}: {out:?}");
+        assert!(out.ends_with('\n'), "{label}: {out:?}");
+    }
+
+    #[test]
+    fn a_hostile_interface_error_cannot_forge_the_layout_on_stdout() {
+        let mut machine = Machine::laptop();
+        machine.interfaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, FORGED);
+
+        let (code, out, _) = run_on(&machine.host(), &no_network(), &["local"]);
+        assert_eq!(code, 1);
+        assert!(
+            !out.contains("[highlights]") && !out.contains("[where]"),
+            "{out}"
+        );
+        assert_layout_is_the_programs_own(&out, &[], "local");
+
+        let headings = ["[public]", "[local]", "[where]", "[highlights]"];
+        for args in [&["all"][..], &["all", "--verify"]] {
+            let (code, out, _) = run_on(&machine.host(), &everyone_says(PUBLIC_IP), args);
+            assert_eq!(code, 0, "{args:?}");
+            assert_layout_is_the_programs_own(&out, &headings, &format!("{args:?}"));
+            assert!(
+                out.contains(&format!(
+                    "  unavailable: cannot list network interfaces: {FORGED_ESCAPED}\n"
+                )),
+                "{args:?}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_interface_error_keeps_the_json_on_one_line() {
+        let mut machine = Machine::laptop();
+        machine.interfaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, FORGED);
+
+        let (code, out, _) = run_on(&machine.host(), &no_network(), &["--json", "local"]);
+        assert_eq!(code, 1);
+        assert_one_json_line(&out, "local");
+        assert!(out.contains(FORGED_ESCAPED), "{out}");
+
+        let (code, out, _) = run_on(
+            &machine.host(),
+            &everyone_says(PUBLIC_IP),
+            &["--json", "all"],
+        );
+        assert_eq!(code, 0);
+        assert_one_json_line(&out, "all");
+        assert!(out.contains(FORGED_ESCAPED), "{out}");
+    }
+
+    #[test]
+    fn a_hostile_provider_error_cannot_forge_the_layout_on_stdout() {
+        let answers = [
+            Some(PUBLIC_IP),
+            Some(OTHER_IP),
+            Some(PUBLIC_IP),
+            None,
+            None,
+            None,
+        ];
+        let fetch = providers_failing_with(answers, FORGED);
+        let headings = ["[public]", "[local]", "[where]", "[highlights]"];
+        let (code, out, _) = run_on(&Machine::laptop().host(), &fetch, &["all", "--verify"]);
+        assert_eq!(code, 3);
+        assert_layout_is_the_programs_own(&out, &headings, "all --verify");
+        assert!(out.contains("no answer:"), "{out}");
+
+        let (code, out, _) = run_on(
+            &Machine::laptop().host(),
+            &fetch,
+            &["--json", "all", "--verify"],
+        );
+        assert_eq!(code, 3);
+        assert_one_json_line(&out, "all --verify");
     }
 
     #[test]

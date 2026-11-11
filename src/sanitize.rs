@@ -56,6 +56,38 @@ fn escape_with(text: &str, keep_newlines: bool) -> String {
     out
 }
 
+/// Test support for the rule that a text layout owns its newlines: free text placed into
+/// it must be escaped per field, so that it can neither start lines of its own nor carry
+/// a control character.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::is_unsafe;
+
+    /// Free text built to forge the layout around it: headings, result lines, line breaks
+    /// of every kind and a terminal escape.
+    pub const FORGERY: &str = "boom\n[highlights]\nforged\r\n[where]\nfoo\u{1b}[2J\u{85}\u{202e}";
+
+    /// Renders once with a harmless value and once with [`FORGERY`] in the same place. Both
+    /// texts must have the same lines, and the hostile one nothing unsafe but its newlines.
+    pub fn assert_forgery_proof(what: &str, render: impl Fn(&str) -> String) {
+        let plain = render("boom");
+        let hostile = render(FORGERY);
+        assert_ne!(
+            plain, hostile,
+            "{what}: the free text never reached the output"
+        );
+        assert_eq!(
+            hostile.lines().count(),
+            plain.lines().count(),
+            "{what}: free text started lines of its own:\n{hostile}"
+        );
+        assert!(
+            hostile.chars().all(|c| c == '\n' || !is_unsafe(c)),
+            "{what}: an unescaped control character:\n{hostile:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

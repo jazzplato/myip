@@ -280,8 +280,10 @@ mod tests {
     use crate::egress::testing::FakeProbe;
     use crate::egress::{PROBE_V4, PROBE_V6};
     use crate::env::testing::FakeEnv;
+    use crate::fact::Value;
     use crate::ifaces::testing::{FakeInterfaces, iface};
     use crate::public::{Attempt, PROVIDERS};
+    use crate::sanitize::testing::{FORGERY, assert_forgery_proof};
     use std::time::Duration;
 
     fn lan() -> FakeInterfaces {
@@ -301,6 +303,10 @@ mod tests {
 
     /// What `PROVIDERS`, in order, answered; `None` is a provider that failed.
     fn report(answers: [Option<&str>; 6], verify: bool) -> PublicReport {
+        report_failing_with(answers, verify, "connection refused")
+    }
+
+    fn report_failing_with(answers: [Option<&str>; 6], verify: bool, reason: &str) -> PublicReport {
         let attempts = PROVIDERS
             .iter()
             .zip(answers)
@@ -308,7 +314,7 @@ mod tests {
                 provider,
                 outcome: answer
                     .map(|ip| ip.parse().unwrap())
-                    .ok_or_else(|| "connection refused".to_owned()),
+                    .ok_or_else(|| reason.to_owned()),
                 latency: answer.map(|_| Duration::from_millis(12)),
             })
             .collect();
@@ -697,5 +703,66 @@ mod tests {
     fn the_text_has_no_kubernetes_line_outside_a_pod() {
         let text = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).render_text();
         assert!(!text.contains("kubernetes  "), "{text}");
+    }
+
+    fn disagreeing_with_failures(reason: &str) -> PublicReport {
+        let (a, b) = (Some("203.0.113.7"), Some("198.51.100.9"));
+        report_failing_with([a, b, a, None, None, None], true, reason)
+    }
+
+    #[test]
+    fn a_provider_failure_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("provider failure", |reason| {
+            let public = disagreeing_with_failures(reason);
+            assert_eq!(public.code(), 3);
+            overview(&FakeEnv::new(), &v4_only(), public).render_text()
+        });
+    }
+
+    #[test]
+    fn a_local_failure_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("local failure", |message| {
+            let ifaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, message);
+            let public = answered("203.0.113.7");
+            gather(&FakeEnv::new(), &ifaces, &v4_only(), Family::Any, public).render_text()
+        });
+    }
+
+    #[test]
+    fn a_pod_address_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("pod addresses", |free_text| {
+            let mut all = overview(&pod(), &v4_only(), answered("203.0.113.7"));
+            let hostile = |var: &str| Some(Fact::declared(Value::Text(free_text.to_owned()), var));
+            all.location.kubernetes.pod_ip = hostile("env:POD_IP");
+            all.location.kubernetes.host_ip = hostile("env:HOST_IP");
+            all.render_text()
+        });
+    }
+
+    #[test]
+    fn hostile_text_in_every_section_leaves_each_heading_once() {
+        let ifaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, FORGERY);
+        let mut all = gather(
+            &pod(),
+            &ifaces,
+            &v4_only(),
+            Family::Any,
+            disagreeing_with_failures(FORGERY),
+        );
+        all.location.kubernetes.pod_ip = Some(Fact::declared(
+            Value::Text(FORGERY.to_owned()),
+            "env:POD_IP",
+        ));
+        let text = all.render_text();
+        for heading in ["[public]", "[local]", "[where]", "[highlights]"] {
+            let count = text.lines().filter(|line| *line == heading).count();
+            assert_eq!(count, 1, "{heading}:\n{text}");
+        }
+        for line in text.lines() {
+            assert!(
+                !line.starts_with("forged") && !line.starts_with("foo"),
+                "{line:?}"
+            );
+        }
     }
 }

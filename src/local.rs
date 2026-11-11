@@ -483,6 +483,7 @@ mod tests {
     use crate::env::RecordingEnv;
     use crate::env::testing::FakeEnv;
     use crate::ifaces::testing::{FakeInterfaces, iface};
+    use crate::sanitize::testing::{FORGERY, assert_forgery_proof};
 
     const DOCKER_ROUTES: &str = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
         eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n\
@@ -1185,5 +1186,99 @@ mod tests {
             &Json::Array(Vec::new())
         );
         assert!(r.render_text().contains("no interfaces"));
+    }
+
+    #[test]
+    fn an_interface_error_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("interface error", |message| {
+            let ifaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, message);
+            report(&container_env(), &ifaces, &container_probe(), Family::Any).render_text()
+        });
+    }
+
+    #[test]
+    fn an_interface_error_is_shown_as_one_visible_line() {
+        let ifaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, FORGERY);
+        let text = report(&FakeEnv::new(), &ifaces, &FakeProbe::new(), Family::Any).render_text();
+        let line = text
+            .lines()
+            .find(|line| line.starts_with("  unavailable: "))
+            .unwrap_or_else(|| panic!("no unavailable line: {text}"));
+        assert_eq!(
+            line,
+            "  unavailable: cannot list network interfaces: boom\\n[highlights]\\nforged\\r\\n[where]\\nfoo\\x1b[2J\\x85\\u{202e}"
+        );
+    }
+
+    #[test]
+    fn an_interface_name_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("interface name", |name| {
+            let ifaces = FakeInterfaces::with(vec![iface(name, 2, &[("10.0.0.1", 8)])]);
+            let probe = FakeProbe::new().route(PROBE_V4, "10.0.0.1");
+            report(&FakeEnv::new(), &ifaces, &probe, Family::V4).render_text()
+        });
+    }
+
+    fn notes_about(r: &Report, text: &str) -> usize {
+        r.notes.iter().filter(|n| n.contains(text)).count()
+    }
+
+    fn no_duplicate_notes(r: &Report) {
+        let mut sorted = r.notes.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), r.notes.len(), "{:?}", r.notes);
+    }
+
+    #[test]
+    fn an_ambiguous_route_on_a_known_interface_is_noted_once() {
+        let env = FakeEnv::new().file(
+            ROUTES_V4,
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+             eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n\
+             eth0\t00000000\t020011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n",
+        );
+        let r = report(&env, &container(), &container_probe(), Family::Any);
+        assert_eq!(r.ipv4.as_ref().unwrap().interface.as_deref(), Some("eth0"));
+        assert_eq!(
+            notes_about(&r, "no single default route"),
+            1,
+            "{:?}",
+            r.notes
+        );
+        no_duplicate_notes(&r);
+    }
+
+    #[test]
+    fn an_unknown_interface_does_not_add_a_default_route_note_to_the_one_that_explains_it() {
+        let r = report(
+            &container_env(),
+            &vip_on_lo_and_eth0(),
+            &container_probe(),
+            Family::Any,
+        );
+        assert_eq!(r.ipv4.as_ref().unwrap().interface, None);
+        assert_eq!(notes_about(&r, "several interfaces"), 1, "{:?}", r.notes);
+        assert_eq!(
+            notes_about(&r, "no single default route"),
+            0,
+            "{:?}",
+            r.notes
+        );
+        no_duplicate_notes(&r);
+    }
+
+    #[test]
+    fn an_egress_address_no_interface_carries_is_not_blamed_on_the_routing_table() {
+        let probe = FakeProbe::new().route(PROBE_V4, "10.9.9.9");
+        let r = report(&container_env(), &container(), &probe, Family::Any);
+        assert_eq!(r.ipv4.as_ref().unwrap().interface, None);
+        assert_eq!(
+            notes_about(&r, "no single default route"),
+            0,
+            "{:?}",
+            r.notes
+        );
+        no_duplicate_notes(&r);
     }
 }

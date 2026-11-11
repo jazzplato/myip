@@ -181,6 +181,7 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+    use crate::sanitize::testing::{FORGERY, assert_forgery_proof};
 
     fn at(provider: usize, outcome: Result<&str, &str>, millis: Option<u64>) -> Attempt {
         Attempt {
@@ -319,5 +320,43 @@ no answer:
             "{json}"
         );
         assert!(!json.contains('\n'));
+    }
+
+    #[test]
+    fn a_failure_reason_cannot_start_lines_of_its_own_in_any_text() {
+        assert_forgery_proof("attempt line", |reason| {
+            attempt_line(&at(0, Err(reason), Some(7)))
+        });
+        assert_forgery_proof("attempt list", |reason| {
+            let report = PublicReport::from_attempts(vec![at(0, Err(reason), Some(7))], false);
+            attempt_list(&report)
+        });
+        assert_forgery_proof("disagreement report", |reason| {
+            let report = PublicReport::from_attempts(
+                vec![
+                    at(0, Ok("1.2.3.4"), Some(1)),
+                    at(1, Ok("5.6.7.8"), Some(1)),
+                    at(2, Err(reason), Some(1)),
+                ],
+                true,
+            );
+            disagreement_report(&report)
+        });
+    }
+
+    #[test]
+    fn the_json_keeps_the_raw_reason_for_the_writer_to_encode() {
+        let report = PublicReport::from_attempts(
+            vec![at(0, Err(FORGERY), Some(1)), at(1, Ok("1.2.3.4"), Some(1))],
+            false,
+        );
+        let json = report.to_json().render(false);
+        assert_eq!(json.lines().count(), 1, "{json}");
+        assert!(
+            json.contains(
+                r#""error":"boom\n[highlights]\nforged\r\n[where]\nfoo\u001b[2J\u0085\u202e""#
+            ),
+            "{json}"
+        );
     }
 }

@@ -750,6 +750,7 @@ mod tests {
     use crate::env::testing::FakeEnv;
     use crate::env::{ALLOWED_PATHS, ALLOWED_VARS, Access, RecordingEnv};
     use crate::fact::{Basis, Value};
+    use crate::sanitize::testing::{FORGERY, assert_forgery_proof};
 
     const CGROUP: &str = "/proc/self/cgroup";
     const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -1782,5 +1783,65 @@ mod tests {
         assert!(!text.contains(&id64()), "{text}");
         assert!(location.to_json().render(true).contains(&id64()));
         assert!(text.contains("observed"), "{text}");
+    }
+
+    /// Every fact and evidence line of a pod, each holding `free_text`: what a hostile
+    /// environment or file could hand to `render_text`, past any validation.
+    fn pod_holding(free_text: &str) -> Location {
+        let declared = |var: &str| Some(Fact::declared(Value::Text(free_text.to_owned()), var));
+        Location {
+            environment: Environment::Kubernetes,
+            container: Container {
+                detected: true,
+                kubepods: true,
+                runtime: Some(Fact::observed(
+                    Value::Text(free_text.to_owned()),
+                    format!("file:{free_text}"),
+                )),
+                id: Some(Fact::observed(Value::Text(free_text.to_owned()), CGROUP)),
+                evidence: vec![free_text.to_owned()],
+            },
+            kubernetes: Kubernetes {
+                detected: true,
+                service_host: declared("env:KUBERNETES_SERVICE_HOST"),
+                service_port: declared("env:KUBERNETES_SERVICE_PORT"),
+                namespace: declared("env:POD_NAMESPACE"),
+                pod_name: declared("env:POD_NAME"),
+                pod_ip: declared("env:POD_IP"),
+                pod_ips: Some(Fact::declared(
+                    Value::List(vec![free_text.to_owned(), free_text.to_owned()]),
+                    "env:POD_IPS",
+                )),
+                node_name: declared("env:NODE_NAME"),
+                host_ip: declared("env:HOST_IP"),
+                host_network: Some(Fact::declared(Value::Flag(false), free_text)),
+                cluster_dns: declared(RESOLV),
+                cluster_domain: declared(RESOLV),
+                evidence: vec![free_text.to_owned(), free_text.to_owned()],
+            },
+        }
+    }
+
+    #[test]
+    fn free_text_in_any_fact_or_evidence_cannot_start_lines_of_its_own() {
+        assert_forgery_proof("location text", |free_text| {
+            pod_holding(free_text).render_text()
+        });
+    }
+
+    #[test]
+    fn each_fact_row_and_evidence_line_stays_one_line_with_its_text_visible() {
+        let text = pod_holding(FORGERY).render_text();
+        let escaped = crate::sanitize::escape(FORGERY);
+        let evidence = text.lines().filter(|l| l.starts_with("  - ")).count();
+        assert_eq!(evidence, 3, "{text}");
+        let source_row = text
+            .lines()
+            .find(|l| l.starts_with("pod name"))
+            .unwrap_or_else(|| panic!("no pod name row: {text}"));
+        assert_eq!(
+            source_row,
+            format!("pod name       {escaped}  (declared: env:POD_NAME)")
+        );
     }
 }
