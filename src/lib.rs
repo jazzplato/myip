@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod http;
+pub mod json;
 pub mod legacy;
 pub mod net;
 pub mod redact;
