@@ -16,3 +16,4 @@ Not needed for bug fixes, refactors or reversible tweaks.
 | # | Title | Status |
 |---|---|---|
 | 0000 | [Template](0000-template.md) | n/a |
+| 0001 | [Product scope and CLI contract for 0.1.0](0001-product-scope-and-cli-contract.md) | accepted |
