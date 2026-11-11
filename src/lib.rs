@@ -8,6 +8,7 @@ pub mod http;
 pub mod ifaces;
 pub mod json;
 pub mod legacy;
+pub mod local;
 pub mod location;
 pub mod net;
 pub mod public;
