@@ -48,3 +48,22 @@ fn an_invalid_field_exits_2_without_touching_the_network() {
     assert!(out.stdout.is_empty());
     assert!(text(&out.stderr).contains("error:"));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_non_unicode_argument_exits_2_and_is_never_echoed() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let secret = OsStr::from_bytes(b"user:S3CR3T@h/\xFF");
+    let out = Command::new(env!("CARGO_BIN_EXE_myip"))
+        .arg("--proxy")
+        .arg(secret)
+        .output()
+        .expect("spawn myip");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not valid UTF-8"), "{stderr}");
+    assert!(!stderr.contains("S3CR3T"), "{stderr}");
+}

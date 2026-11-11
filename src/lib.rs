@@ -279,6 +279,72 @@ mod tests {
         assert_eq!(opts.proxy, ProxyMode::None);
         assert_eq!(opts.family, Family::Any);
         assert_eq!(opts.accept, "application/json");
+        assert_eq!(opts.max_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn proxy_values_are_never_echoed_in_usage_errors() {
+        const SECRET: &str = "S3CR3T";
+        let bad = [
+            "user:S3CR3T@proxy.example:3128",
+            "ftp://user:S3CR3T@h:1",
+            "ftp://user:pa S3CR3T@h:1",
+            "ftp://user:pa\"S3CR3T@h:1",
+            "ftp://user:pa'S3CR3T@h:1",
+            "socks5://user:S3CR3T@h:1",
+            "https://user:S3CR3T@h:1",
+        ];
+        for value in bad {
+            for args in [
+                vec!["--proxy".to_owned(), value.to_owned()],
+                vec![format!("--proxy={value}")],
+            ] {
+                let fetch = no_network();
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                let (code, out, err) = exec(&fetch, &args);
+                assert_eq!(code, 2, "{args:?}");
+                assert!(!format!("{out}{err}").contains(SECRET), "{args:?}: {err}");
+                assert!(err.contains("--proxy"), "{args:?}: {err}");
+                assert!(requested(&fetch).is_empty(), "{args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn flags_before_a_reserved_name_do_not_turn_it_into_a_field() {
+        let cases: [&[&str]; 7] = [
+            &["-v", "public"],
+            &["--json", "local"],
+            &["-4", "where"],
+            &["--timeout", "5", "all"],
+            &["--proxy", "env", "all"],
+            &["public", "-v"],
+            &["-6", "-v", "--json", "local"],
+        ];
+        for args in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            assert!(err.contains("not implemented"), "{args:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{args:?} must not query ipinfo");
+        }
+    }
+
+    #[test]
+    fn a_field_cannot_be_combined_with_another_argument_or_a_reserved_name() {
+        let cases: [&[&str]; 4] = [
+            &["ip", "city"],
+            &["ip", "public"],
+            &["-v", "ip", "all"],
+            &["8.8.8.8/org", "local"],
+        ];
+        for args in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
+            assert!(err.contains("error:"), "{args:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{args:?}");
+        }
     }
 
     #[test]
