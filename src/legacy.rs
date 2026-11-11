@@ -90,7 +90,7 @@ fn answer(response: &Response) -> Result<&str, String> {
     Ok(&response.body)
 }
 
-fn looks_like_html(body: &str) -> bool {
+pub(crate) fn looks_like_html(body: &str) -> bool {
     let mut rest = skip_blank(body);
     while let Some(after) = rest.strip_prefix("<!--") {
         match after.split_once("-->") {
@@ -124,7 +124,7 @@ fn skip_blank(s: &str) -> &str {
 /// The body on one line, bounded, so an error message stays readable. Credentials are
 /// redacted before truncating, otherwise a cut between the userinfo and the `@` would
 /// leave the secret prefix unredactable.
-fn detail(body: &str) -> String {
+pub(crate) fn detail(body: &str) -> String {
     let flat = redact_userinfo(&body.split_whitespace().collect::<Vec<_>>().join(" "));
     let mut chars = flat.chars();
     let shown: String = chars.by_ref().take(MAX_DETAIL_CHARS).collect();

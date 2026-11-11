@@ -2,7 +2,10 @@
 
 pub mod cli;
 pub mod http;
+pub mod json;
 pub mod legacy;
+pub mod net;
+pub mod public;
 pub mod redact;
 
 use std::ffi::OsString;
@@ -38,6 +41,7 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             }
         };
     match (cli.command, cli.field.as_deref()) {
+        (Some(Command::Public(args)), None) => public::run(&cli.options, args.verify, ctx),
         (Some(command), None) => not_implemented(command, ctx),
         (Some(command), Some(_)) => {
             let _ = writeln!(
@@ -99,7 +103,8 @@ mod tests {
     fn requested(fetch: &FakeFetch) -> Vec<String> {
         fetch
             .requests
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .map(|r| r.0.clone())
             .collect()
@@ -361,7 +366,7 @@ mod tests {
     fn defaults_are_a_10s_timeout_no_proxy_and_either_family() {
         let fetch = FakeFetch::new(vec![ok(200, "x")]);
         exec(&fetch, &[]);
-        let (_, opts) = fetch.requests.borrow()[0].clone();
+        let (_, opts) = fetch.requests.lock().unwrap()[0].clone();
         assert_eq!(opts.timeout, Duration::from_secs(10));
         assert_eq!(opts.proxy, ProxyMode::None);
         assert_eq!(opts.family, Family::Any);
@@ -399,13 +404,11 @@ mod tests {
 
     #[test]
     fn flags_before_a_reserved_name_do_not_turn_it_into_a_field() {
-        let cases: [&[&str]; 7] = [
-            &["-v", "public"],
+        let cases: [&[&str]; 5] = [
             &["--json", "local"],
             &["-4", "where"],
             &["--timeout", "5", "all"],
             &["--proxy", "env", "all"],
-            &["public", "-v"],
             &["-6", "-v", "--json", "local"],
         ];
         for args in cases {
@@ -418,6 +421,39 @@ mod tests {
                 "{args:?} must not query ipinfo"
             );
         }
+    }
+
+    #[test]
+    fn verify_and_extra_arguments_are_only_valid_for_public() {
+        let cases: [&[&str]; 6] = [
+            &["--verify"],
+            &["ip", "--verify"],
+            &["local", "--verify"],
+            &["where", "--verify"],
+            &["public", "ip"],
+            &["public", "--verify=yes"],
+        ];
+        for args in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!((code, out.as_str()), (2, ""), "{args:?}");
+            assert!(err.contains("error:"), "{args:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn public_is_documented_in_the_help_and_verify_is_a_flag_of_public_only() {
+        let fetch = no_network();
+        let (code, out, _) = exec(&fetch, &["--help"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("\n  public"), "{out}");
+        assert!(!out.contains("      --verify"), "{out}");
+        let (code, out, _) = exec(&fetch, &["public", "--help"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("--verify"), "{out}");
+        assert!(out.contains("one.one.one.one"), "{out}");
+        assert!(requested(&fetch).is_empty());
     }
 
     #[test]
@@ -446,7 +482,7 @@ mod tests {
             let fetch = FakeFetch::new(vec![ok(200, "x")]);
             let (code, _, err) = exec(&fetch, &args);
             assert_eq!(code, 0, "{args:?}: {err}");
-            let (_, opts) = fetch.requests.borrow()[0].clone();
+            let (_, opts) = fetch.requests.lock().unwrap()[0].clone();
             assert_eq!(opts.timeout, Duration::from_secs(3));
             assert_eq!(opts.family, Family::V4);
             assert_eq!(opts.proxy, ProxyMode::Env);
@@ -457,7 +493,7 @@ mod tests {
     fn an_explicit_proxy_url_and_ipv6_are_forwarded() {
         let fetch = FakeFetch::new(vec![ok(200, "x")]);
         exec(&fetch, &["-6", "--proxy", "http://127.0.0.1:3128"]);
-        let (_, opts) = fetch.requests.borrow()[0].clone();
+        let (_, opts) = fetch.requests.lock().unwrap()[0].clone();
         assert_eq!(opts.family, Family::V6);
         assert_eq!(
             opts.proxy,
@@ -482,8 +518,8 @@ mod tests {
     }
 
     #[test]
-    fn dimension_subcommands_are_reserved_but_not_implemented_yet() {
-        for name in ["public", "local", "where", "all"] {
+    fn the_other_dimension_subcommands_are_reserved_but_not_implemented_yet() {
+        for name in ["local", "where", "all"] {
             let fetch = no_network();
             let (code, out, err) = exec(&fetch, &[name]);
             assert_eq!((code, out.as_str()), (1, ""), "{name}");

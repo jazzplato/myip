@@ -63,7 +63,9 @@ impl std::error::Error for FetchError {}
 
 /// HTTP GET, the only network seam the rest of the crate depends on.
 /// Non-2xx statuses are returned as a `Response`, not an error.
-pub trait Fetch {
+/// Implementations are shared between threads: `myip public --verify` asks every provider
+/// at once.
+pub trait Fetch: Sync {
     fn get(&self, url: &str, opts: &FetchOptions) -> Result<Response, FetchError>;
 }
 
@@ -266,21 +268,23 @@ fn remove_dot_segments(path: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
 
     use super::*;
 
     /// Replays canned answers in order and records every request.
     pub struct FakeFetch {
-        answers: RefCell<Vec<Result<Response, FetchError>>>,
-        pub requests: RefCell<Vec<(String, FetchOptions)>>,
+        answers: Mutex<Vec<Result<Response, FetchError>>>,
+        pub requests: Mutex<Vec<(String, FetchOptions)>>,
     }
 
     impl FakeFetch {
         pub fn new(answers: Vec<Result<Response, FetchError>>) -> Self {
             Self {
-                answers: RefCell::new(answers.into_iter().rev().collect()),
-                requests: RefCell::new(Vec::new()),
+                answers: Mutex::new(answers.into_iter().rev().collect()),
+                requests: Mutex::new(Vec::new()),
             }
         }
     }
@@ -288,12 +292,92 @@ pub(crate) mod testing {
     impl Fetch for FakeFetch {
         fn get(&self, url: &str, opts: &FetchOptions) -> Result<Response, FetchError> {
             self.requests
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push((url.to_owned(), opts.clone()));
             self.answers
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .pop()
                 .expect("unexpected extra request")
+        }
+    }
+
+    /// Answers by URL, so the result does not depend on the order in which concurrent
+    /// callers arrive, and records every request. A URL without a route is a transport error.
+    pub struct RouteFetch {
+        routes: HashMap<String, Result<Response, FetchError>>,
+        pub requests: Mutex<Vec<(String, FetchOptions)>>,
+        rendezvous: Option<Rendezvous>,
+    }
+
+    /// Holds every request until `expected` of them are in flight, which only happens if the
+    /// caller really runs them concurrently. A request that waits too long fails instead of
+    /// hanging the test.
+    struct Rendezvous {
+        expected: usize,
+        patience: Duration,
+        arrived: Mutex<usize>,
+        changed: Condvar,
+    }
+
+    impl RouteFetch {
+        pub fn new(routes: Vec<(&str, Result<Response, FetchError>)>) -> Self {
+            Self {
+                routes: routes
+                    .into_iter()
+                    .map(|(url, answer)| (url.to_owned(), answer))
+                    .collect(),
+                requests: Mutex::new(Vec::new()),
+                rendezvous: None,
+            }
+        }
+
+        pub fn requiring_concurrency(mut self, expected: usize, patience: Duration) -> Self {
+            self.rendezvous = Some(Rendezvous {
+                expected,
+                patience,
+                arrived: Mutex::new(0),
+                changed: Condvar::new(),
+            });
+            self
+        }
+
+        pub fn requested_urls(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(url, _)| url.clone())
+                .collect()
+        }
+    }
+
+    impl Fetch for RouteFetch {
+        fn get(&self, url: &str, opts: &FetchOptions) -> Result<Response, FetchError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push((url.to_owned(), opts.clone()));
+            if let Some(gate) = &self.rendezvous {
+                let mut arrived = gate.arrived.lock().unwrap();
+                *arrived += 1;
+                gate.changed.notify_all();
+                let (_guard, timeout) = gate
+                    .changed
+                    .wait_timeout_while(arrived, gate.patience, |n| *n < gate.expected)
+                    .unwrap();
+                if timeout.timed_out() {
+                    return Err(FetchError::Transport(
+                        "requests were not made concurrently".to_owned(),
+                    ));
+                }
+            }
+            self.routes.get(url).cloned().unwrap_or_else(|| {
+                Err(FetchError::Transport(format!(
+                    "no route to {url} in this test"
+                )))
+            })
         }
     }
 
@@ -781,6 +865,56 @@ mod tests {
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(out.status.success(), "{mode}: {stdout}");
             assert!(stdout.contains(want), "{mode}: {stdout}");
+        }
+    }
+
+    mod route_fetch {
+        use super::super::testing::{RouteFetch, ok};
+        use super::*;
+
+        #[test]
+        fn answers_by_url_whatever_the_order_and_records_requests() {
+            let fetch = RouteFetch::new(vec![("https://a.test", ok(200, "a"))]);
+            assert_eq!(fetch.get("https://a.test", &opts()).unwrap().body, "a");
+            assert_eq!(fetch.get("https://a.test", &opts()).unwrap().body, "a");
+            assert_eq!(fetch.requested_urls(), ["https://a.test"; 2]);
+        }
+
+        #[test]
+        fn an_unrouted_url_is_a_transport_error_naming_it() {
+            let fetch = RouteFetch::new(vec![]);
+            let error = fetch.get("https://b.test", &opts()).unwrap_err();
+            assert_eq!(
+                error,
+                FetchError::Transport("no route to https://b.test in this test".to_owned())
+            );
+        }
+
+        #[test]
+        fn the_gate_opens_only_when_the_requests_overlap() {
+            let routes = || vec![("https://a.test", ok(200, "a"))];
+            let patience = Duration::from_secs(10);
+
+            let overlapping = RouteFetch::new(routes()).requiring_concurrency(3, patience);
+            let bodies: Vec<String> = thread::scope(|scope| {
+                let handles: Vec<_> = (0..3)
+                    .map(|_| scope.spawn(|| overlapping.get("https://a.test", &opts())))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap().unwrap().body)
+                    .collect()
+            });
+            assert_eq!(bodies, ["a", "a", "a"]);
+
+            let one_at_a_time =
+                RouteFetch::new(routes()).requiring_concurrency(2, Duration::from_millis(50));
+            assert_eq!(
+                one_at_a_time.get("https://a.test", &opts()),
+                Err(FetchError::Transport(
+                    "requests were not made concurrently".to_owned()
+                ))
+            );
         }
     }
 }
