@@ -7,16 +7,13 @@
 //! other platforms.
 
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 
 /// Where the egress question is "asked": Cloudflare's resolver, already one of the public
 /// providers. Only the routing decision matters; nothing is sent to it.
-pub const PROBE_V4: SocketAddr =
-    SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)), 53);
+pub const PROBE_V4: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53);
 pub const PROBE_V6: SocketAddr = SocketAddr::new(
-    IpAddr::V6(std::net::Ipv6Addr::new(
-        0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111,
-    )),
+    IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)),
     53,
 );
 
@@ -28,8 +25,14 @@ pub trait EgressProbe {
 pub struct UdpProbe;
 
 impl EgressProbe for UdpProbe {
-    fn local_address_towards(&self, _target: SocketAddr) -> io::Result<IpAddr> {
-        unimplemented!()
+    fn local_address_towards(&self, target: SocketAddr) -> io::Result<IpAddr> {
+        let wildcard: SocketAddr = match target {
+            SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+            SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+        };
+        let socket = UdpSocket::bind(wildcard)?;
+        socket.connect(target)?;
+        Ok(socket.local_addr()?.ip())
     }
 }
 
@@ -41,21 +44,88 @@ pub struct DefaultRoute {
     pub metric: u32,
 }
 
-pub fn parse_ipv4_routes(_content: &str) -> Vec<DefaultRoute> {
-    unimplemented!()
+const RTF_UP: u32 = 0x1;
+const RTF_GATEWAY: u32 = 0x2;
+
+/// `/proc/net/route`: hexadecimal fields printed from native-endian 32-bit words, so the
+/// bytes of an address are in memory order.
+pub fn parse_ipv4_routes(content: &str) -> Vec<DefaultRoute> {
+    let mut routes: Vec<DefaultRoute> = content.lines().filter_map(ipv4_default_route).collect();
+    routes.sort_by_key(|route| route.metric);
+    routes
 }
 
-pub fn parse_ipv6_routes(_content: &str) -> Vec<DefaultRoute> {
-    unimplemented!()
+fn ipv4_default_route(line: &str) -> Option<DefaultRoute> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < 8 {
+        return None;
+    }
+    let word = |text: &str| u32::from_str_radix(text, 16).ok();
+    let (destination, gateway, flags, mask) = (
+        word(fields[1])?,
+        word(fields[2])?,
+        word(fields[3])?,
+        word(fields[7])?,
+    );
+    let metric: u32 = fields[6].parse().ok()?;
+    let is_default = destination == 0 && mask == 0 && gateway != 0;
+    if !is_default || flags & (RTF_UP | RTF_GATEWAY) != (RTF_UP | RTF_GATEWAY) {
+        return None;
+    }
+    Some(DefaultRoute {
+        gateway: IpAddr::V4(Ipv4Addr::from(gateway.to_ne_bytes())),
+        interface: fields[0].to_owned(),
+        metric,
+    })
+}
+
+/// `/proc/net/ipv6_route`: destination, prefix length, source, source prefix length,
+/// next hop, metric, refcount, use count, flags (all hexadecimal) and the interface.
+pub fn parse_ipv6_routes(content: &str) -> Vec<DefaultRoute> {
+    let mut routes: Vec<DefaultRoute> = content.lines().filter_map(ipv6_default_route).collect();
+    routes.sort_by_key(|route| route.metric);
+    routes
+}
+
+fn ipv6_default_route(line: &str) -> Option<DefaultRoute> {
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() < 10 {
+        return None;
+    }
+    let address = |text: &str| {
+        if text.len() == 32 {
+            u128::from_str_radix(text, 16).ok().map(Ipv6Addr::from)
+        } else {
+            None
+        }
+    };
+    let destination = address(fields[0])?;
+    let prefix_len = u32::from_str_radix(fields[1], 16).ok()?;
+    let next_hop = address(fields[4])?;
+    let metric = u32::from_str_radix(fields[5], 16).ok()?;
+    let flags = u32::from_str_radix(fields[8], 16).ok()?;
+    let is_default = destination.is_unspecified() && prefix_len == 0 && !next_hop.is_unspecified();
+    if !is_default || flags & (RTF_UP | RTF_GATEWAY) != (RTF_UP | RTF_GATEWAY) {
+        return None;
+    }
+    Some(DefaultRoute {
+        gateway: IpAddr::V6(next_hop),
+        interface: fields[9].to_owned(),
+        metric,
+    })
 }
 
 /// The default route on `interface`, lowest metric first. With no known egress interface
 /// there is nothing to tie a gateway to, so the answer is `None` rather than a guess.
 pub fn gateway_for<'a>(
-    _routes: &'a [DefaultRoute],
-    _interface: Option<&str>,
+    routes: &'a [DefaultRoute],
+    interface: Option<&str>,
 ) -> Option<&'a DefaultRoute> {
-    unimplemented!()
+    let interface = interface?;
+    routes
+        .iter()
+        .filter(|route| route.interface == interface)
+        .min_by_key(|route| route.metric)
 }
 
 #[cfg(test)]
