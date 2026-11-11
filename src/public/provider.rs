@@ -117,8 +117,44 @@ impl fmt::Display for Reject {
 /// Accepts a response only if it is a successful, small, non-HTML answer holding exactly one
 /// globally routable address of the requested family.
 pub fn read_answer(parser: Parser, response: &Response, wanted: Family) -> Result<IpAddr, Reject> {
-    let _ = (parser, response, wanted);
-    unimplemented!("read_answer")
+    if !(200..300).contains(&response.status) {
+        return Err(Reject::Status(response.status));
+    }
+    if response.body.len() > MAX_ANSWER_BYTES {
+        return Err(Reject::TooLarge);
+    }
+    if response.body.trim().is_empty() {
+        return Err(Reject::Empty);
+    }
+    if looks_like_html(&response.body) {
+        return Err(Reject::Html);
+    }
+    let ip = match parser {
+        Parser::PlainText => response
+            .body
+            .trim()
+            .parse()
+            .map_err(|_| Reject::NotAnAddress)?,
+        Parser::CloudflareTrace => trace_ip(&response.body)?,
+    };
+    if matches!(ip, IpAddr::V6(v6) if v6.to_ipv4_mapped().is_some()) {
+        return Err(Reject::MappedV4);
+    }
+    let got = IpFamily::of(ip);
+    match (wanted, got) {
+        (Family::V4, IpFamily::V6) => Err(Reject::WrongFamily {
+            got,
+            wanted: IpFamily::V4,
+        }),
+        (Family::V6, IpFamily::V4) => Err(Reject::WrongFamily {
+            got,
+            wanted: IpFamily::V6,
+        }),
+        _ => match classify(ip) {
+            Scope::Global => Ok(ip),
+            scope => Err(Reject::NotGlobal(ip, scope)),
+        },
+    }
 }
 
 fn trace_ip(body: &str) -> Result<IpAddr, Reject> {

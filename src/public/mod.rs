@@ -48,8 +48,11 @@ pub struct PublicReport {
 impl PublicReport {
     /// `attempts` must be in provider order.
     pub fn from_attempts(attempts: Vec<Attempt>, verify: bool) -> Self {
-        let _ = (attempts, verify);
-        unimplemented!("from_attempts")
+        if verify {
+            Self::compared(attempts)
+        } else {
+            Self::first_valid(attempts)
+        }
     }
 
     fn first_valid(attempts: Vec<Attempt>) -> Self {
@@ -134,8 +137,25 @@ pub fn lookup(
     verify: bool,
     seen: &mut dyn FnMut(&Attempt),
 ) -> PublicReport {
-    let _ = (fetch, options, verify, seen);
-    unimplemented!("lookup")
+    let query = Query {
+        fetch,
+        timeout_secs: options.timeout,
+        options: FetchOptions {
+            timeout: Duration::from_secs(options.timeout),
+            max_bytes: MAX_ANSWER_BYTES,
+            family: options.family(),
+            proxy: options.proxy.clone(),
+            accept: "text/plain",
+        },
+    };
+    let attempts = if verify {
+        let attempts = query.ask_all();
+        attempts.iter().for_each(&mut *seen);
+        attempts
+    } else {
+        query.ask_in_order(seen)
+    };
+    PublicReport::from_attempts(attempts, verify)
 }
 
 pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {

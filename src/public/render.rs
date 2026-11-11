@@ -10,27 +10,74 @@ use crate::json::Json;
 
 /// `name: 1.2.3.4 (42 ms)` or `name: reason`.
 pub fn attempt_line(attempt: &Attempt) -> String {
-    let _ = attempt;
-    unimplemented!("attempt_line")
+    let what = match &attempt.outcome {
+        Ok(ip) => ip.to_string(),
+        Err(reason) => reason.clone(),
+    };
+    match attempt.latency {
+        Some(latency) => format!(
+            "{}: {what} ({} ms)",
+            attempt.provider.name,
+            latency.as_millis()
+        ),
+        None => format!("{}: {what}", attempt.provider.name),
+    }
 }
 
 /// Every attempt, one indented line each.
 pub fn attempt_list(report: &PublicReport) -> String {
-    let _ = report;
-    unimplemented!("attempt_list")
+    report
+        .attempts()
+        .iter()
+        .map(|attempt| format!("  {}\n", attempt_line(attempt)))
+        .collect()
 }
 
 /// `providers disagree: ipv4 (2 of 3 agree)`, for the stderr note and the JSON `error`.
 pub fn disagreement_summary(verdict: &Verdict) -> String {
-    let _ = verdict;
-    unimplemented!("disagreement_summary")
+    let families: Vec<String> = verdict
+        .disagreements()
+        .map(|f| format!("{} ({} of {} agree)", f.family.as_str(), f.agree, f.total))
+        .collect();
+    format!("providers disagree: {}", families.join(", "))
 }
 
 /// What `--verify` prints on stdout when it exits 3: who said what, per family, with the
 /// answers that differ from a clear majority marked.
 pub fn disagreement_report(report: &PublicReport) -> String {
-    let _ = report;
-    unimplemented!("disagreement_report")
+    let width = PROVIDERS.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    let mut text = String::new();
+    for family in report.verdict().map_or(&[][..], |v| &v.families[..]) {
+        text.push_str(&format!(
+            "{}: {}\n",
+            family.family.as_str(),
+            summary(family)
+        ));
+        let majority = family.majority();
+        for answer in &family.answers {
+            let mark = match majority {
+                Some(m) if family.status == Status::Disagree && m != answer.ip => "  <- differs",
+                _ => "",
+            };
+            text.push_str(&format!(
+                "  {:<width$}  {}{mark}\n",
+                answer.provider.name, answer.ip
+            ));
+        }
+    }
+    let failed: Vec<&Attempt> = report
+        .attempts()
+        .iter()
+        .filter(|a| a.outcome.is_err())
+        .collect();
+    if !failed.is_empty() {
+        text.push_str("no answer:\n");
+        for attempt in failed {
+            let reason = attempt.outcome.as_ref().err().map_or("", String::as_str);
+            text.push_str(&format!("  {:<width$}  {reason}\n", attempt.provider.name));
+        }
+    }
+    text
 }
 
 fn summary(family: &FamilyReport) -> String {
@@ -46,7 +93,36 @@ impl PublicReport {
     /// headline and are null together with it; `error` is non-null exactly then. `families`
     /// is present only for a `--verify` lookup.
     pub fn to_json(&self) -> Json {
-        unimplemented!("to_json")
+        let headline = self.headline();
+        let mut fields = vec![
+            ("schema_version", Json::Int(1)),
+            ("ip", headline.map_or(Json::Null, |h| ip(h.ip))),
+            (
+                "family",
+                headline.map_or(Json::Null, |h| h.family.as_str().into()),
+            ),
+            (
+                "provider",
+                headline.map_or(Json::Null, |h| h.provider.name.into()),
+            ),
+            (
+                "latency_ms",
+                headline.and_then(|h| h.latency).map_or(Json::Null, millis),
+            ),
+            ("verified", headline.map_or(Json::Null, verified)),
+            ("error", self.error().map_or(Json::Null, Json::from)),
+            (
+                "attempts",
+                Json::Array(self.attempts().iter().map(attempt).collect()),
+            ),
+        ];
+        if let Some(verdict) = self.verdict() {
+            fields.push((
+                "families",
+                Json::Array(verdict.families.iter().map(family).collect()),
+            ));
+        }
+        Json::object(fields)
     }
 }
 

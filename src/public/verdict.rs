@@ -120,7 +120,13 @@ impl FamilyReport {
 
     /// The address most answers gave, when exactly one address has the most.
     pub fn majority(&self) -> Option<IpAddr> {
-        unimplemented!("majority")
+        let mut leaders = self
+            .answers
+            .iter()
+            .map(|a| a.ip)
+            .filter(|ip| count(&self.answers, *ip) == self.agree);
+        let first = leaders.next()?;
+        leaders.all(|ip| ip == first).then_some(first)
     }
 }
 
@@ -134,8 +140,28 @@ pub struct Verdict {
 impl Verdict {
     /// `attempts` must be in provider order.
     pub fn from_attempts(attempts: &[Attempt]) -> Self {
-        let _ = attempts;
-        unimplemented!("from_attempts")
+        let mut v4 = Vec::new();
+        let mut v6 = Vec::new();
+        for (rank, attempt) in attempts.iter().enumerate() {
+            if let Ok(ip) = attempt.outcome {
+                let answer = Answer {
+                    rank,
+                    provider: attempt.provider,
+                    ip,
+                    latency: attempt.latency,
+                };
+                match IpFamily::of(ip) {
+                    IpFamily::V4 => v4.push(answer),
+                    IpFamily::V6 => v6.push(answer),
+                }
+            }
+        }
+        Self {
+            families: [(IpFamily::V4, v4), (IpFamily::V6, v6)]
+                .into_iter()
+                .filter_map(|(family, answers)| FamilyReport::new(family, answers))
+                .collect(),
+        }
     }
 
     pub fn disagreements(&self) -> impl Iterator<Item = &FamilyReport> {
@@ -146,13 +172,25 @@ impl Verdict {
 
     /// 3 if any family disagrees (wins over everything), else 0 if any is verified, else 1.
     pub fn exit_code(&self) -> u8 {
-        unimplemented!("exit_code")
+        if self.disagreements().next().is_some() {
+            3
+        } else if self.families.iter().any(|f| f.status == Status::Verified) {
+            0
+        } else {
+            1
+        }
     }
 
     /// Only for exit code 0: the verified family whose first answer came earliest in
     /// provider order.
     pub fn headline(&self) -> Option<&FamilyReport> {
-        unimplemented!("headline")
+        if self.exit_code() != 0 {
+            return None;
+        }
+        self.families
+            .iter()
+            .filter(|f| f.status == Status::Verified)
+            .min_by_key(|f| f.answers[0].rank)
     }
 }
 
