@@ -1468,6 +1468,53 @@ mod tests {
     }
 
     #[test]
+    fn kubepods_on_a_later_cgroup_line_still_makes_this_a_pod() {
+        let cgroup = format!(
+            "12:pids:/\n4:cpu,cpuacct:/\n1:name=systemd:/kubepods/besteffort/pod1c2f/{}\n0::/\n",
+            id64()
+        );
+        let location = detect(&FakeEnv::new().file(CGROUP, &cgroup));
+        assert_eq!(location.environment, Environment::Kubernetes);
+        assert!(location.kubernetes.detected);
+        assert!(location.container.detected);
+        assert_eq!(text(&location.container.id), Some(id64()));
+    }
+
+    #[test]
+    fn kubepods_on_the_first_cgroup_line_only_still_makes_this_a_pod() {
+        let cgroup = format!(
+            "12:pids:/kubepods/besteffort/pod1c2f/{}\n4:cpu,cpuacct:/\n1:name=systemd:/\n0::/\n",
+            id64()
+        );
+        let location = detect(&FakeEnv::new().file(CGROUP, &cgroup));
+        assert_eq!(location.environment, Environment::Kubernetes);
+        assert!(location.kubernetes.detected);
+        assert_eq!(text(&location.container.id), Some(id64()));
+    }
+
+    #[test]
+    fn a_cgroup_without_kubepods_on_any_line_is_not_a_pod() {
+        let cgroup = format!(
+            "12:pids:/docker/{id}\n4:cpu,cpuacct:/docker/{id}\n1:name=systemd:/docker/{id}\n0::/\n",
+            id = id64()
+        );
+        let location = detect(&FakeEnv::new().file(CGROUP, &cgroup));
+        assert_eq!(location.environment, Environment::Container);
+        assert!(!location.kubernetes.detected);
+    }
+
+    #[test]
+    fn a_runtime_line_before_a_kubepods_line_keeps_its_runtime_and_the_pod() {
+        let cgroup = format!(
+            "2:cpu:/docker/{}\n1:name=systemd:/kubepods/besteffort/pod1c2f\n",
+            id64()
+        );
+        let location = detect(&FakeEnv::new().file(CGROUP, &cgroup));
+        assert_eq!(location.environment, Environment::Kubernetes);
+        assert_eq!(text(&location.container.runtime).as_deref(), Some("docker"));
+    }
+
+    #[test]
     fn a_plain_container_cgroup_does_not_make_pod_variables_count() {
         let env = FakeEnv::new()
             .file(CGROUP, &cgroup_v1(&format!("/docker/{}", id64())))
@@ -1559,6 +1606,11 @@ mod tests {
             "pr\nod",
             "pr\0od",
             "prodé",
+            "a\u{1b}cb",
+            "prOd",
+            "pr\u{7f}od",
+            "pr\u{85}od",
+            "pr\u{202e}od",
             too_long.as_str(),
         ] {
             assert!(!valid_label(bad), "{bad:?} should be invalid");
@@ -1566,8 +1618,51 @@ mod tests {
     }
 
     #[test]
+    fn a_domain_is_dot_separated_valid_labels() {
+        let long = ["a"; 127].join(".");
+        assert_eq!(long.len(), 253);
+        for good in ["cluster.local", "a.b.c", "corp-1.example", long.as_str()] {
+            assert!(valid_domain(good), "{good:?} should be valid");
+        }
+        let too_long = format!("{long}a");
+        for bad in [
+            "",
+            ".",
+            "a..b",
+            "cluster.local.",
+            ".cluster.local",
+            "Cluster.local",
+            "clu\u{1b}ster.local",
+            "cluster.lo\u{1b}[2Jcal",
+            "cluster.local\n",
+            too_long.as_str(),
+        ] {
+            assert!(!valid_domain(bad), "{bad:?} should be invalid");
+        }
+    }
+
+    #[test]
+    fn a_label_is_judged_on_its_interior_characters_too() {
+        for interior in ["a\u{1b}cb", "prOd", "a.b", "a_b", "a b", "a\u{e9}b"] {
+            let edges_ok = interior.starts_with(|c: char| c.is_ascii_lowercase())
+                && interior.ends_with(|c: char| c.is_ascii_lowercase());
+            assert!(edges_ok, "{interior:?} must differ only in the interior");
+            assert!(!valid_label(interior), "{interior:?} should be invalid");
+        }
+        assert!(valid_label("a-b"));
+    }
+
+    #[test]
     fn every_namespace_source_requires_a_valid_label() {
-        let bad = ["Prod", "pr.od", "pr\u{1b}[2Jod", "pr_od", "-prod"];
+        let bad = [
+            "Prod",
+            "pr.od",
+            "pr\u{1b}[2Jod",
+            "pr_od",
+            "-prod",
+            "a\u{1b}cb",
+            "prOd",
+        ];
         for ns in bad {
             let from_env = detect(
                 &FakeEnv::new()

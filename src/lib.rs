@@ -1042,7 +1042,7 @@ mod tests {
         "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
 
     /// Every place `local`, `where` and `all` take free text from.
-    const SOURCES: [&str; 24] = [
+    const SOURCES: [&str; 25] = [
         "env KUBERNETES_SERVICE_HOST",
         "env KUBERNETES_SERVICE_PORT",
         "env POD_NAME",
@@ -1063,6 +1063,7 @@ mod tests {
         "systemd container name",
         "dockerenv with hostile cgroup",
         "interface name",
+        "shared address interface names",
         "route table interface",
         "route table gateway",
         "ipv6 route table interface",
@@ -1129,7 +1130,7 @@ mod tests {
                 "/proc/net/ipv6_route",
                 &format!("00000000000000000000000000000000 00 00000000000000000000000000000000 00 {payload} 00000064 00000001 00000000 00450003 en0\n"),
             ),
-            "interface name" => FakeEnv::new(),
+            "interface name" | "shared address interface names" => FakeEnv::new(),
             other => other
                 .strip_prefix("env ")
                 .map_or_else(FakeEnv::new, |var| pod().var(var, payload)),
@@ -1145,12 +1146,21 @@ mod tests {
                 ),
             ]);
         }
+        // The one place interface names reach stderr: the note about an egress address that
+        // two interfaces carry.
+        if source == "shared address interface names" {
+            machine.interfaces = FakeInterfaces::with(vec![
+                iface(&format!("en{payload}"), 2, &[("192.168.1.23", 24)]),
+                iface(&format!("vip{payload}"), 3, &[("192.168.1.23", 32)]),
+            ]);
+        }
         machine
     }
 
     #[test]
     fn no_free_text_reaches_a_terminal_unescaped_in_any_mode() {
         let commands: [&[&str]; 4] = [&["local"], &["where"], &["all"], &["all", "--verify"]];
+        let mut on_stderr = std::collections::BTreeSet::new();
         for source in SOURCES {
             for bad in HOSTILE {
                 let payload = format!("a{bad}INJECT");
@@ -1165,6 +1175,9 @@ mod tests {
                         let (_, out, err) =
                             run_on(&machine.host(), &everyone_says(PUBLIC_IP), &args);
                         let label = format!("{source} / {bad:?} / {args:?}");
+                        if err.contains("INJECT") {
+                            on_stderr.insert((source, bad));
+                        }
                         for forbidden in ['\u{1b}', '\r', '\0', '\u{85}', '\u{202e}'] {
                             assert!(
                                 !out.contains(forbidden) && !err.contains(forbidden),
@@ -1190,6 +1203,13 @@ mod tests {
                 }
             }
         }
+        // The stderr checks above only mean something if hostile text did reach stderr.
+        for bad in HOSTILE {
+            assert!(
+                on_stderr.contains(&("shared address interface names", bad)),
+                "no run put {bad:?} on stderr, so the stderr assertions proved nothing"
+            );
+        }
     }
 
     #[test]
@@ -1208,6 +1228,88 @@ mod tests {
         let (_, _, err) = run_on(&machine.host(), &everyone_says(PUBLIC_IP), &["-v", "all"]);
         assert!(err.contains("myip: read /proc/net/route"), "{err:?}");
         assert!(!err.contains('\u{1b}'), "{err:?}");
+    }
+
+    const WORDED: &str = "a\u{1b}[2J\n\u{202e}b";
+    const WORDED_ESCAPED: &str = "a\\x1b[2J\\n\\u{202e}b";
+
+    fn assert_stderr_is_only_escaped_lines(err: &str, label: &str) {
+        assert!(!err.is_empty(), "{label}: nothing on stderr");
+        for forbidden in ['\u{1b}', '\r', '\0', '\u{85}', '\u{202e}'] {
+            assert!(!err.contains(forbidden), "{label}: {err:?}");
+        }
+        for line in err.lines() {
+            assert!(line.starts_with("myip: "), "{label}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_interface_error_reaches_stderr_only_as_visible_escapes() {
+        let mut machine = Machine::laptop();
+        machine.interfaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, WORDED);
+        for args in [&["local"][..], &["--json", "local"]] {
+            let (code, out, err) = run_on(&machine.host(), &no_network(), args);
+            assert_eq!(code, 1, "{args:?}");
+            assert_eq!(
+                err,
+                format!("myip: cannot list network interfaces: {WORDED_ESCAPED}\n"),
+                "{args:?}"
+            );
+            assert!(!out.contains('\u{1b}'), "{args:?}: {out:?}");
+        }
+        for args in [&["all"][..], &["--json", "all"]] {
+            let (code, out, err) = run_on(&machine.host(), &everyone_says(PUBLIC_IP), args);
+            assert_eq!(code, 0, "{args:?}");
+            assert_eq!(
+                err,
+                format!("myip: local: cannot list network interfaces: {WORDED_ESCAPED}\n"),
+                "{args:?}"
+            );
+            assert!(!out.contains('\u{1b}'), "{args:?}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_provider_error_reaches_stderr_only_as_visible_escapes() {
+        let routes = PROVIDERS
+            .iter()
+            .map(|provider| {
+                (
+                    provider.url,
+                    Err(FetchError::Transport(format!(
+                        "{WORDED} ({})",
+                        provider.name
+                    ))),
+                )
+            })
+            .collect();
+        let fetch = RouteFetch::new(routes);
+        let (code, _, err) = run_on(&Machine::laptop().host(), &fetch, &["-v", "all"]);
+        assert_eq!(code, 0);
+        assert_stderr_is_only_escaped_lines(&err, "-v all");
+        for provider in PROVIDERS.iter() {
+            let prefix = format!("myip: {}: a\\x1b[2J", provider.name);
+            let line = err
+                .lines()
+                .find(|line| line.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("{}: {err:?}", provider.name));
+            assert!(line.contains("\\u{202e}b"), "{line:?}");
+        }
+        let (code, _, err) = run_on(&Machine::laptop().host(), &fetch, &["all"]);
+        assert_eq!(code, 0);
+        assert_stderr_is_only_escaped_lines(&err, "all");
+    }
+
+    #[test]
+    fn a_verbose_note_that_names_interfaces_shows_their_control_characters_visibly() {
+        let machine = machine_with("shared address interface names", "\u{1b}[2J\n");
+        let (code, _, err) = run_on(&machine.host(), &everyone_says(PUBLIC_IP), &["-v", "local"]);
+        assert_eq!(code, 0);
+        assert_stderr_is_only_escaped_lines(&err, "-v local");
+        assert!(
+            err.contains("carried by several interfaces (en\\x1b[2J\\n, vip\\x1b[2J\\n)"),
+            "{err:?}"
+        );
     }
 
     #[test]

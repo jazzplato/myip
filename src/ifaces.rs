@@ -140,7 +140,7 @@ pub(crate) mod testing {
 
     /// A canned interface list, or a canned enumeration failure.
     pub struct FakeInterfaces {
-        result: Result<Vec<Interface>, io::ErrorKind>,
+        result: Result<Vec<Interface>, (io::ErrorKind, Option<String>)>,
     }
 
     impl FakeInterfaces {
@@ -151,7 +151,16 @@ pub(crate) mod testing {
         }
 
         pub fn failing(kind: io::ErrorKind) -> Self {
-            Self { result: Err(kind) }
+            Self {
+                result: Err((kind, None)),
+            }
+        }
+
+        /// A failure whose message is chosen by the test, like an OS error text.
+        pub fn failing_with(kind: io::ErrorKind, message: &str) -> Self {
+            Self {
+                result: Err((kind, Some(message.to_owned()))),
+            }
         }
     }
 
@@ -159,7 +168,8 @@ pub(crate) mod testing {
         fn list(&self) -> io::Result<Vec<Interface>> {
             match &self.result {
                 Ok(interfaces) => Ok(interfaces.clone()),
-                Err(kind) => Err(io::Error::from(*kind)),
+                Err((kind, None)) => Err(io::Error::from(*kind)),
+                Err((kind, Some(message))) => Err(io::Error::new(*kind, message.clone())),
             }
         }
     }
@@ -347,5 +357,9 @@ mod tests {
             failing.list().unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
+        let worded = testing::FakeInterfaces::failing_with(io::ErrorKind::Other, "no netlink");
+        let error = worded.list().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "no netlink");
     }
 }

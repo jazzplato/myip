@@ -58,6 +58,8 @@ mod tests {
 
     use super::*;
     use crate::cli::Cli;
+    use crate::env::Env;
+    use crate::env::testing::FakeEnv;
 
     fn options(args: &[&str]) -> Options {
         Cli::try_parse_from(std::iter::once("myip").chain(args.iter().copied()))
@@ -84,6 +86,52 @@ mod tests {
     fn ordinary_text_including_non_ascii_is_printed_as_is() {
         let text = "interfaces (observed)\n  h\u{e9}llo \u{4e16}\u{754c} \u{1f980}\n";
         assert_eq!(printed(&[], &Json::Null, Some(text)), text);
+    }
+
+    fn diagnosed(message: &str) -> String {
+        let mut err = Vec::new();
+        diagnostic(&mut err, message);
+        String::from_utf8(err).unwrap()
+    }
+
+    fn traced(args: &[&str], notes: &[String]) -> String {
+        let fake = FakeEnv::new().var("POD_NAME", "web");
+        let env = RecordingEnv::new(&fake);
+        let _ = env.var("POD_NAME");
+        let mut err = Vec::new();
+        trace(&options(args), &env, notes, &mut err);
+        String::from_utf8(err).unwrap()
+    }
+
+    #[test]
+    fn a_diagnostic_is_one_prefixed_line_with_visible_escapes() {
+        assert_eq!(diagnosed("a\u{1b}[2J\n"), "myip: a\\x1b[2J\\n\n");
+        assert_eq!(
+            diagnosed("\r\0\u{85}\u{7f}\u{202e}\t"),
+            "myip: \\r\\x00\\x85\\x7f\\u{202e}\\t\n"
+        );
+        assert_eq!(diagnosed("plain h\u{e9}llo"), "myip: plain h\u{e9}llo\n");
+    }
+
+    #[test]
+    fn verbose_trace_notes_show_control_characters_visibly() {
+        let notes = [
+            "read /etc/resolv.conf: a\u{1b}[2J\n".to_owned(),
+            "interface en\u{202e}0: \r".to_owned(),
+        ];
+        let err = traced(&["-v"], &notes);
+        assert_eq!(
+            err,
+            "myip: env POD_NAME\n\
+             myip: read /etc/resolv.conf: a\\x1b[2J\\n\n\
+             myip: interface en\\u{202e}0: \\r\n"
+        );
+    }
+
+    #[test]
+    fn trace_without_verbose_writes_nothing() {
+        let notes = ["a\u{1b}[2J".to_owned()];
+        assert_eq!(traced(&[], &notes), "");
     }
 
     #[test]
