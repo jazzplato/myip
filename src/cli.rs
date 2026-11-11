@@ -82,11 +82,17 @@ impl Options {
     }
 }
 
-// Not implemented yet; the names are reserved so scripts cannot grow to depend on them as fields.
+// `public` is implemented; the other names are reserved so scripts cannot grow to depend on
+// them as fields.
 #[derive(Subcommand, Debug, Clone, Copy)]
 pub enum Command {
-    #[command(hide = true)]
-    Public,
+    /// Print your public IP address, as seen by independent providers
+    ///
+    /// Asks cloudflare (one.one.one.one), ipify (api64.ipify.org), checkip.amazonaws.com,
+    /// icanhazip.com, ident.me and ipinfo.io in that order and prints the first valid
+    /// answer. With --verify it asks all of them at once and compares the answers per
+    /// address family. The providers see your public address; that is the point.
+    Public(PublicArgs),
     #[command(hide = true)]
     Local,
     #[command(hide = true)]
@@ -95,10 +101,17 @@ pub enum Command {
     All,
 }
 
+#[derive(Args, Debug, Clone, Copy)]
+pub struct PublicArgs {
+    /// Ask every provider and require at least two answers per family to agree; exit 3 if they differ
+    #[arg(long)]
+    pub verify: bool,
+}
+
 impl Command {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Public => "public",
+            Self::Public(_) => "public",
             Self::Local => "local",
             Self::Where => "where",
             Self::All => "all",
