@@ -97,7 +97,18 @@ pub enum Command {
     /// Whether this process runs on a host, in a container or in a Kubernetes pod
     Where,
     /// Public address, local interfaces and location together, with NAT and pod highlights
-    All,
+    ///
+    /// The public address comes from the same providers as `myip public`. A section that
+    /// cannot be produced is reported in place and the exit code stays 0; only a
+    /// --verify disagreement exits 3.
+    All(AllArgs),
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+pub struct AllArgs {
+    /// Ask every provider for the public address and require at least two answers per family to agree; exit 3 if they differ
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Args, Debug, Clone, Copy)]
@@ -113,7 +124,7 @@ impl Command {
             Self::Public(_) => "public",
             Self::Local => "local",
             Self::Where => "where",
-            Self::All => "all",
+            Self::All(_) => "all",
         }
     }
 }

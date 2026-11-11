@@ -74,7 +74,7 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
         (Some(Command::Public(args)), None) => public::run(&cli.options, args.verify, ctx),
         (Some(Command::Local), None) => local::run(&cli.options, ctx),
         (Some(Command::Where), None) => location::run(&cli.options, ctx),
-        (Some(Command::All), None) => all::run(&cli.options, ctx),
+        (Some(Command::All(args)), None) => all::run(&cli.options, args.verify, ctx),
         (Some(command), Some(_)) => {
             let _ = writeln!(
                 ctx.err,

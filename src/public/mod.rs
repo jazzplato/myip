@@ -10,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub use provider::{PROVIDERS, Provider, Reject, read_answer};
+pub use render::{attempt_line, disagreement_report};
 pub use verdict::{Answer, Attempt, FamilyReport, IpFamily, Status, Verdict};
 
 use crate::Context;

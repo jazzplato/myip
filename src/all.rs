@@ -4,7 +4,7 @@
 //! the pod's, the node's and the internet's.
 //!
 //! It is a report, not a gate: a section that fails is reported in-band and never makes the
-//! run exit 1.
+//! run exit 1. The one failure that is not in-band is a `--verify` disagreement, exit 3.
 
 use std::net::IpAddr;
 
@@ -19,38 +19,11 @@ use crate::json::Json;
 use crate::local::{self, EgressInfo, Report};
 use crate::location::{self, Environment, Location};
 use crate::output;
-
-/// The internet's view of this machine, as `all` needs it. The `public` module fills it in;
-/// the seam keeps this module testable without a network.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PublicSection {
-    /// The public address, when a provider gave one.
-    pub ip: Option<IpAddr>,
-    pub provider: Option<String>,
-    /// Why there is no `ip`.
-    pub error: Option<String>,
-    /// `--verify` found providers disagreeing: `all` then exits 3.
-    pub disagree: bool,
-    /// The section as the `public` command renders it.
-    pub json: Json,
-}
-
-impl PublicSection {
-    /// A section for a lookup that produced no answer.
-    pub fn unavailable(error: &str) -> Self {
-        Self {
-            ip: None,
-            provider: None,
-            error: Some(error.to_owned()),
-            disagree: false,
-            json: Json::object([("ip", Json::Null), ("error", Json::from(error))]),
-        }
-    }
-}
+use crate::public::{self, PublicReport};
 
 #[derive(Debug)]
 pub struct Overview {
-    pub public: PublicSection,
+    pub public: PublicReport,
     pub local: Report,
     pub location: Location,
 }
@@ -62,7 +35,7 @@ pub fn gather(
     interfaces: &dyn Interfaces,
     probe: &dyn EgressProbe,
     family: Family,
-    public: PublicSection,
+    public: PublicReport,
 ) -> Overview {
     Overview {
         public,
@@ -73,9 +46,14 @@ pub fn gather(
 
 /// Prints the overview. A section that failed is reported on stderr and in the document;
 /// the exit code is `0` (or `3` for a `--verify` disagreement), never `1`.
-pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
+pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
     let env = RecordingEnv::new(ctx.host.env);
-    let public = PublicSection::unavailable("myip public is not implemented yet");
+    let verbose = options.verbose;
+    let public = public::lookup(ctx.fetch, options, verify, &mut |attempt| {
+        if verbose {
+            let _ = writeln!(ctx.err, "myip: {}", public::attempt_line(attempt));
+        }
+    });
     let overview = gather(
         &env,
         ctx.host.interfaces,
@@ -111,13 +89,13 @@ impl Nat<'_> {
 impl Overview {
     /// `0`, or `3` when `--verify` found the providers disagreeing. Never `1`.
     pub fn exit_code(&self) -> u8 {
-        if self.public.disagree { 3 } else { 0 }
+        if self.public.code() == 3 { 3 } else { 0 }
     }
 
     pub fn to_json(&self) -> Json {
         Json::object([
             ("schema_version", Json::from(SCHEMA_VERSION)),
-            ("public", without_schema_version(self.public.json.clone())),
+            ("public", without_schema_version(self.public.to_json())),
             ("local", without_schema_version(self.local.to_json())),
             ("where", without_schema_version(self.location.to_json())),
             (
@@ -132,20 +110,7 @@ impl Overview {
 
     pub fn render_text(&self) -> String {
         let mut out = String::from("[public]\n");
-        match self.public.ip {
-            Some(ip) => out.push_str(&format!(
-                "  {ip} ({}, observed by {})\n",
-                family_label(ip),
-                self.public
-                    .provider
-                    .as_deref()
-                    .unwrap_or("an external provider")
-            )),
-            None => out.push_str(&format!(
-                "  unavailable: {}\n",
-                self.public.error.as_deref().unwrap_or("no answer")
-            )),
-        }
+        out.push_str(&self.public_lines());
         out.push_str("\n[local]\n");
         out.push_str(&self.local.render_text());
         out.push_str("\n[where]\n");
@@ -161,7 +126,7 @@ impl Overview {
     /// One line per section that could not be produced, for stderr.
     pub fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
-        if let Some(error) = &self.public.error {
+        if let Some(error) = self.public.error() {
             notes.push(format!("public: {error}"));
         }
         if let Some(error) = self.local.error() {
@@ -170,8 +135,38 @@ impl Overview {
         notes
     }
 
+    fn public_ip(&self) -> Option<IpAddr> {
+        self.public.headline().map(|headline| headline.ip)
+    }
+
+    fn public_lines(&self) -> String {
+        if let Some(headline) = self.public.headline() {
+            let verified = headline
+                .verified
+                .map_or_else(String::new, |(agree, total)| {
+                    format!(", verified: {agree} of {total} providers agree")
+                });
+            return format!(
+                "  {} ({}, observed by {}{verified})\n",
+                headline.ip,
+                family_label(headline.ip),
+                headline.provider.name
+            );
+        }
+        let mut lines = format!(
+            "  unavailable: {}\n",
+            self.public.error().unwrap_or("no answer")
+        );
+        if self.public.code() == 3 {
+            for line in public::disagreement_report(&self.public).lines() {
+                lines.push_str(&format!("  {line}\n"));
+            }
+        }
+        lines
+    }
+
     fn nat(&self) -> Option<Nat<'_>> {
-        let public = self.public.ip?;
+        let public = self.public_ip()?;
         let local = match public {
             IpAddr::V4(_) => self.local.ipv4.as_ref(),
             IpAddr::V6(_) => self.local.ipv6.as_ref(),
@@ -224,7 +219,7 @@ impl Overview {
             ("egress_ipv6", Json::from(egress_text(&self.local.ipv6))),
             (
                 "public_ip",
-                Json::from(self.public.ip.map(|ip| ip.to_string())),
+                Json::from(self.public_ip().map(|ip| ip.to_string())),
             ),
         ])
     }
@@ -245,7 +240,7 @@ impl Overview {
             "  kubernetes  pod {}, node {}, egress {egress}, public {}\n  (pod and node addresses are declared by the Pod spec; egress and public are observed)\n",
             fact_text(&k.pod_ip).unwrap_or_else(unknown),
             fact_text(&k.host_ip).unwrap_or_else(unknown),
-            self.public.ip.map_or_else(unknown, |ip| ip.to_string()),
+            self.public_ip().map_or_else(unknown, |ip| ip.to_string()),
         )
     }
 }
@@ -286,6 +281,8 @@ mod tests {
     use crate::egress::{PROBE_V4, PROBE_V6};
     use crate::env::testing::FakeEnv;
     use crate::ifaces::testing::{FakeInterfaces, iface};
+    use crate::public::{Attempt, PROVIDERS};
+    use std::time::Duration;
 
     fn lan() -> FakeInterfaces {
         FakeInterfaces::with(vec![
@@ -302,18 +299,33 @@ mod tests {
         v4_only().route(PROBE_V6, "fd00::5")
     }
 
-    fn answered(ip: &str) -> PublicSection {
-        PublicSection {
-            ip: Some(ip.parse().unwrap()),
-            provider: Some("ipify".to_owned()),
-            error: None,
-            disagree: false,
-            json: Json::object([
-                ("schema_version", 1u32.into()),
-                ("ip", ip.into()),
-                ("provider", "ipify".into()),
-            ]),
-        }
+    /// What `PROVIDERS`, in order, answered; `None` is a provider that failed.
+    fn report(answers: [Option<&str>; 6], verify: bool) -> PublicReport {
+        let attempts = PROVIDERS
+            .iter()
+            .zip(answers)
+            .map(|(provider, answer)| Attempt {
+                provider,
+                outcome: answer
+                    .map(|ip| ip.parse().unwrap())
+                    .ok_or_else(|| "connection refused".to_owned()),
+                latency: answer.map(|_| Duration::from_millis(12)),
+            })
+            .collect();
+        PublicReport::from_attempts(attempts, verify)
+    }
+
+    fn answered(ip: &str) -> PublicReport {
+        report([Some(ip), None, None, None, None, None], false)
+    }
+
+    fn unavailable() -> PublicReport {
+        report([None; 6], false)
+    }
+
+    fn disagreeing() -> PublicReport {
+        let (a, b) = (Some("203.0.113.7"), Some("198.51.100.9"));
+        report([a, b, a, None, None, None], true)
     }
 
     fn pod() -> FakeEnv {
@@ -323,7 +335,7 @@ mod tests {
             .var("HOST_IP", "192.168.49.2")
     }
 
-    fn overview(env: &FakeEnv, probe: &FakeProbe, public: PublicSection) -> Overview {
+    fn overview(env: &FakeEnv, probe: &FakeProbe, public: PublicReport) -> Overview {
         gather(env, &lan(), probe, Family::Any, public)
     }
 
@@ -413,8 +425,7 @@ mod tests {
 
     #[test]
     fn nat_is_null_without_a_public_answer() {
-        let public = PublicSection::unavailable("no provider answered");
-        let json = overview(&FakeEnv::new(), &v4_only(), public).to_json();
+        let json = overview(&FakeEnv::new(), &v4_only(), unavailable()).to_json();
         assert_eq!(at(&json, &["highlights", "nat"]), &Json::Null);
     }
 
@@ -453,8 +464,7 @@ mod tests {
 
     #[test]
     fn a_failed_public_lookup_is_in_band_and_does_not_fail_the_run() {
-        let public = PublicSection::unavailable("no provider returned a valid public address");
-        let all = overview(&FakeEnv::new(), &v4_only(), public);
+        let all = overview(&FakeEnv::new(), &v4_only(), unavailable());
         assert_eq!(all.exit_code(), 0);
         let json = all.to_json();
         assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
@@ -491,10 +501,14 @@ mod tests {
 
     #[test]
     fn a_verify_disagreement_exits_3_whatever_else_failed() {
-        let mut public = answered("203.0.113.7");
-        public.disagree = true;
         let failing = FakeInterfaces::failing(std::io::ErrorKind::PermissionDenied);
-        let all = gather(&FakeEnv::new(), &failing, &v4_only(), Family::Any, public);
+        let all = gather(
+            &FakeEnv::new(),
+            &failing,
+            &v4_only(),
+            Family::Any,
+            disagreeing(),
+        );
         assert_eq!(all.exit_code(), 3);
     }
 
@@ -521,12 +535,99 @@ mod tests {
 
     #[test]
     fn unavailable_public_json_has_a_null_ip_and_the_reason() {
-        let section = PublicSection::unavailable("timed out");
-        assert_eq!(section.ip, None);
-        assert_eq!(section.error.as_deref(), Some("timed out"));
-        assert!(!section.disagree);
-        assert_eq!(at(&section.json, &["ip"]), &Json::Null);
-        assert_eq!(at(&section.json, &["error"]), &s("timed out"));
+        let json = overview(&FakeEnv::new(), &v4_only(), unavailable()).to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert_eq!(at(&json, &["public", "provider"]), &Json::Null);
+        assert_eq!(
+            at(&json, &["public", "error"]),
+            &s("no provider returned a valid public address")
+        );
+    }
+
+    #[test]
+    fn the_public_section_is_the_public_commands_document_without_its_version() {
+        let public = answered("203.0.113.7");
+        let json = overview(&FakeEnv::new(), &v4_only(), public.clone()).to_json();
+        assert_eq!(
+            at(&json, &["public"]),
+            &without_schema_version(public.to_json())
+        );
+        assert_eq!(
+            keys(at(&json, &["public"])),
+            [
+                "ip",
+                "family",
+                "provider",
+                "latency_ms",
+                "verified",
+                "error",
+                "attempts"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_disagreement_has_no_headline_address_and_no_nat() {
+        let all = overview(&FakeEnv::new(), &v4_only(), disagreeing());
+        assert_eq!(all.exit_code(), 3);
+        let json = all.to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert_eq!(at(&json, &["highlights", "nat"]), &Json::Null);
+        assert_eq!(all.notes().len(), 1);
+        assert!(
+            all.notes()[0].starts_with("public: providers disagree: ipv4 ("),
+            "{:?}",
+            all.notes()
+        );
+    }
+
+    #[test]
+    fn a_disagreement_prints_who_said_what_under_the_public_heading() {
+        let text = overview(&FakeEnv::new(), &v4_only(), disagreeing()).render_text();
+        let public = &text[..text.find("[local]").unwrap()];
+        assert!(
+            public.contains("unavailable: providers disagree"),
+            "{public}"
+        );
+        assert!(
+            public.contains("  ipv4: DISAGREE, 2 of 3 agree"),
+            "{public}"
+        );
+        assert!(public.contains("198.51.100.9  <- differs"), "{public}");
+        assert!(public.contains("no answer:"), "{public}");
+    }
+
+    #[test]
+    fn a_verified_answer_says_how_many_providers_agreed() {
+        let same = Some("203.0.113.7");
+        let all = overview(&FakeEnv::new(), &v4_only(), report([same; 6], true));
+        assert_eq!(all.exit_code(), 0);
+        assert!(
+            all.render_text().contains(
+                "203.0.113.7 (IPv4, observed by one.one.one.one, verified: 6 of 6 providers agree)"
+            ),
+            "{}",
+            all.render_text()
+        );
+        assert_eq!(all.notes(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_unverifiable_answer_is_reported_in_band_with_exit_0() {
+        let one = report([Some("203.0.113.7"), None, None, None, None, None], true);
+        let all = overview(&FakeEnv::new(), &v4_only(), one);
+        assert_eq!(all.exit_code(), 0, "all never exits 1");
+        let json = all.to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert!(
+            matches!(at(&json, &["public", "error"]), Json::Str(e) if e.contains("could not be verified"))
+        );
+        assert!(
+            all.render_text()
+                .contains("[public]\n  unavailable: the address could not be verified"),
+            "{}",
+            all.render_text()
+        );
     }
 
     #[test]
@@ -569,8 +670,7 @@ mod tests {
 
     #[test]
     fn the_text_says_when_nat_cannot_be_judged() {
-        let public = PublicSection::unavailable("offline");
-        let text = overview(&FakeEnv::new(), &v4_only(), public).render_text();
+        let text = overview(&FakeEnv::new(), &v4_only(), unavailable()).render_text();
         let highlights = &text[text.find("[highlights]").unwrap()..];
         assert!(highlights.contains("NAT: unknown"), "{highlights}");
     }
@@ -586,7 +686,7 @@ mod tests {
         assert!(highlights.contains("public 203.0.113.7"), "{highlights}");
 
         let bare = FakeEnv::new().var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
-        let text = overview(&bare, &probe, PublicSection::unavailable("x")).render_text();
+        let text = overview(&bare, &probe, unavailable()).render_text();
         let highlights = &text[text.find("[highlights]").unwrap()..];
         assert!(highlights.contains("pod unknown"), "{highlights}");
         assert!(highlights.contains("node unknown"), "{highlights}");
