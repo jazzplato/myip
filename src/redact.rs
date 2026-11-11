@@ -54,6 +54,32 @@ mod tests {
     }
 
     #[test]
+    fn quotes_inside_the_password_do_not_end_the_authority() {
+        for (input, want) in [
+            (
+                "proxy http://user:pa'ss@proxy.example:3128 refused",
+                "proxy http://***@proxy.example:3128 refused",
+            ),
+            (
+                "proxy http://user:pa\"ss@h:1 refused",
+                "proxy http://***@h:1 refused",
+            ),
+            (
+                "proxy http://user:pa`ss@h:1 refused",
+                "proxy http://***@h:1 refused",
+            ),
+            (
+                "proxy 'http://user:pa'ss@h:1' refused",
+                "proxy 'http://***@h:1' refused",
+            ),
+        ] {
+            let got = redact_userinfo(input);
+            assert_eq!(got, want, "{input}");
+            assert!(!got.contains("ss@"), "{got}");
+        }
+    }
+
+    #[test]
     fn text_without_userinfo_is_unchanged() {
         for input in [
             "",

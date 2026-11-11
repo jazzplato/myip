@@ -250,6 +250,36 @@ mod tests {
         assert!(err.contains("HTML"), "{err}");
     }
 
+    #[test]
+    fn a_portal_page_hidden_behind_a_bom_or_comment_is_still_an_error() {
+        for page in [
+            "\u{feff}<!DOCTYPE html><html>Sign in</html>",
+            "<!-- portal -->\n<html>Sign in</html>",
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, page)]);
+            let (code, out, err) = exec(&fetch, &["ip"]);
+            assert_eq!((code, out.as_str()), (1, ""), "{page:?}");
+            assert!(err.contains("HTML"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_proxy_url_is_a_usage_error_not_a_transport_error() {
+        for value in [
+            "http://host:not-a-port",
+            "http://host:99999",
+            "http://user:S3CR3T@host:not-a-port",
+            "http://",
+        ] {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, &["--proxy", value, "ip"]);
+            assert_eq!((code, out.as_str()), (2, ""), "{value}");
+            assert!(err.contains("--proxy"), "{value}: {err}");
+            assert!(!err.contains("S3CR3T"), "{value}: {err}");
+            assert!(requested(&fetch).is_empty(), "{value}");
+        }
+    }
+
     // ipinfo.io labels plain-text answers such as `city` as text/html.
     #[test]
     fn a_plain_answer_labelled_text_html_is_still_an_answer() {

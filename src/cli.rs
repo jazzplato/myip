@@ -135,7 +135,7 @@ fn proxy_mode(raw: &str) -> Option<ProxyMode> {
     match raw {
         "none" => Some(ProxyMode::None),
         "env" => Some(ProxyMode::Env),
-        url if url.starts_with("http://") && url.len() > "http://".len() => {
+        url if url.starts_with("http://") && ureq::Proxy::new(url).is_ok() => {
             Some(ProxyMode::Url(url.to_owned()))
         }
         _ => None,

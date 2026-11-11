@@ -91,13 +91,25 @@ fn answer(response: &Response) -> Result<&str, String> {
 }
 
 fn looks_like_html(body: &str) -> bool {
-    let head: String = body
-        .trim_start()
+    let mut rest = skip_blank(body);
+    while let Some(after) = rest.strip_prefix("<!--") {
+        match after.split_once("-->") {
+            Some((_, next)) => rest = skip_blank(next),
+            // A comment that never closes is not a plain answer either.
+            None => return true,
+        }
+    }
+    let head: String = rest
         .chars()
         .take(15)
         .collect::<String>()
         .to_ascii_lowercase();
     head.starts_with("<!doctype html") || head.starts_with("<html")
+}
+
+/// Drops leading whitespace and byte-order marks.
+fn skip_blank(s: &str) -> &str {
+    s.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
 }
 
 /// The body on one line, bounded, so an error message stays readable.
@@ -124,6 +136,23 @@ mod tests {
         assert!(!looks_like_html(
             "<note>xml is not a captive portal page</note>"
         ));
+    }
+
+    #[test]
+    fn html_detection_skips_a_bom_and_leading_comments() {
+        for page in [
+            "\u{feff}<!DOCTYPE html><html></html>",
+            "\u{feff}\n <html>",
+            "<!-- portal -->\n<html><body>Sign in</body></html>",
+            "<!-- a --><!-- b -->\n  <!doctype html>",
+            "\u{feff}<!-- a -->\u{feff}\n<HTML>",
+            "<!-- never closed <html>",
+        ] {
+            assert!(looks_like_html(page), "{page:?}");
+        }
+        for answer in ["<!-- note -->\nChicago", "\u{feff}Chicago", "<!-- x -->"] {
+            assert!(!looks_like_html(answer), "{answer:?}");
+        }
     }
 
     #[test]

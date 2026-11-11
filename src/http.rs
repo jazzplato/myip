@@ -158,9 +158,10 @@ fn map_error(e: ureq::Error) -> FetchError {
 const MAX_REDIRECTS: usize = 5;
 
 /// Resolves a `Location` against `base`, accepting only a target on the same scheme
-/// and authority (ADR 0001: no cross-host redirects, no downgrade to http). The
-/// target is deliberately not echoed in the error: it is server-controlled and may
-/// carry credentials.
+/// and authority (ADR 0001: no cross-host redirects, no downgrade to http). Relative
+/// references are resolved per RFC 3986 section 5; the origin of the result is always
+/// `base`'s, so a path can never change the host. The target is deliberately not
+/// echoed in the error: it is server-controlled and may carry credentials.
 fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> {
     let refused = || FetchError::Transport("refused a redirect to a different host".to_owned());
     let base: ureq::http::Uri = base.parse().map_err(|_| refused())?;
@@ -168,8 +169,17 @@ fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> 
         (Some(s), Some(a)) => (s, a),
         _ => return Err(refused()),
     };
-    if location.starts_with('/') && !location.starts_with("//") {
+    if location.starts_with("//") || location.is_empty() {
+        return Err(refused());
+    }
+    if location.starts_with('/') {
         return Ok(format!("{scheme}://{authority}{location}"));
+    }
+    if !has_scheme(location) {
+        return Ok(format!(
+            "{scheme}://{authority}{}",
+            resolve_relative(&base, location)
+        ));
     }
     let target: ureq::http::Uri = location.parse().map_err(|_| refused())?;
     let same = target.scheme_str() == Some(scheme)
@@ -181,6 +191,57 @@ fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> 
     } else {
         Err(refused())
     }
+}
+
+/// Whether `s` starts with `scheme:` (RFC 3986 section 3.1).
+fn has_scheme(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            == Some(':')
+}
+
+/// The path and query of a scheme-less, authority-less reference resolved against `base`.
+fn resolve_relative(base: &ureq::http::Uri, reference: &str) -> String {
+    let cut = reference.find(['?', '#']).unwrap_or(reference.len());
+    let (path_ref, tail) = reference.split_at(cut);
+    let base_path = base.path();
+    let path = if path_ref.is_empty() {
+        base_path.to_owned()
+    } else {
+        let dir_end = base_path.rfind('/').map_or(0, |i| i + 1);
+        remove_dot_segments(&format!("{}{path_ref}", &base_path[..dir_end]))
+    };
+    // A fragment-only reference keeps the base query; anything else replaces it.
+    let query = match base.query() {
+        Some(q) if path_ref.is_empty() && !tail.starts_with('?') => format!("?{q}"),
+        _ => String::new(),
+    };
+    format!("{path}{query}{tail}")
+}
+
+/// RFC 3986 section 5.2.4 for a path that starts with `/`.
+fn remove_dot_segments(path: &str) -> String {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut out: Vec<&str> = Vec::new();
+    for (i, segment) in segments.iter().enumerate().skip(1) {
+        let last = i == segments.len() - 1;
+        match *segment {
+            "." => {
+                if last {
+                    out.push("");
+                }
+            }
+            ".." => {
+                out.pop();
+                if last {
+                    out.push("");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 #[cfg(test)]
@@ -409,7 +470,7 @@ mod tests {
             ("https://ipinfo.io:8443/x", None),
             ("https://user@ipinfo.io/x", None),
             ("//evil.example/x", None),
-            ("x", None),
+            ("x", Some("https://ipinfo.io/x")),
             ("", None),
         ] {
             assert_eq!(
@@ -418,6 +479,52 @@ mod tests {
                 "{location:?}"
             );
         }
+    }
+
+    #[test]
+    fn relative_references_resolve_against_the_current_url() {
+        let base = "https://ipinfo.io/a/b/c?z=1";
+        for (location, want) in [
+            ("d", Some("https://ipinfo.io/a/b/d")),
+            ("./d", Some("https://ipinfo.io/a/b/d")),
+            ("../d", Some("https://ipinfo.io/a/d")),
+            ("../../../d", Some("https://ipinfo.io/d")),
+            ("d/", Some("https://ipinfo.io/a/b/d/")),
+            ("..", Some("https://ipinfo.io/a/")),
+            ("?q=2", Some("https://ipinfo.io/a/b/c?q=2")),
+            ("d?q=2#f", Some("https://ipinfo.io/a/b/d?q=2#f")),
+            ("#f", Some("https://ipinfo.io/a/b/c?z=1#f")),
+            ("/abs", Some("https://ipinfo.io/abs")),
+            // The origin is always ours, whatever the path looks like.
+            (
+                "../..//evil.example/x",
+                Some("https://ipinfo.io//evil.example/x"),
+            ),
+            (
+                "x@evil.example",
+                Some("https://ipinfo.io/a/b/x@evil.example"),
+            ),
+            ("//evil.example/x", None),
+            ("city:80", None),
+            ("mailto:a@b", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                same_origin_target(base, location).ok().as_deref(),
+                want,
+                "{location:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_relative_redirect_is_followed() {
+        let base = serve(vec![
+            http_response("302 Found", "Location: x\r\n", b""),
+            http_response("200 OK", "", b"final"),
+        ]);
+        let resp = UreqFetch.get(&base, &opts()).unwrap();
+        assert_eq!(resp.body, "final");
     }
 
     #[test]
