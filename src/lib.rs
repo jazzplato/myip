@@ -5,6 +5,7 @@ pub mod egress;
 pub mod env;
 pub mod fact;
 pub mod http;
+pub mod ifaces;
 pub mod json;
 pub mod legacy;
 pub mod location;
