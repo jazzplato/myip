@@ -1,0 +1,769 @@
+//! `myip all`: what the internet sees (`public`), which addresses this machine has (`local`)
+//! and where it runs (`where`), side by side, with the two comparisons people actually want:
+//! does the egress address differ from the public one (NAT), and for a pod, which address is
+//! the pod's, the node's and the internet's.
+//!
+//! It is a report, not a gate: a section that fails is reported in-band and never makes the
+//! run exit 1. The one failure that is not in-band is a `--verify` disagreement, exit 3.
+
+use std::net::IpAddr;
+
+use crate::Context;
+use crate::cli::Options;
+use crate::egress::EgressProbe;
+use crate::env::{Env, RecordingEnv};
+use crate::fact::{Fact, SCHEMA_VERSION};
+use crate::http::Family;
+use crate::ifaces::Interfaces;
+use crate::json::Json;
+use crate::local::{self, EgressInfo, Report};
+use crate::location::{self, Environment, Location};
+use crate::output;
+use crate::public::{self, PublicReport};
+use crate::sanitize;
+
+#[derive(Debug)]
+pub struct Overview {
+    pub public: PublicReport,
+    pub local: Report,
+    pub location: Location,
+}
+
+/// Looks at this machine through the given seams and combines it with the public answer.
+/// `family` limits the `local` section, like `-4`/`-6`; `where` ignores it.
+pub fn gather(
+    env: &dyn Env,
+    interfaces: &dyn Interfaces,
+    probe: &dyn EgressProbe,
+    family: Family,
+    public: PublicReport,
+) -> Overview {
+    Overview {
+        public,
+        local: local::gather(env, interfaces, probe, family),
+        location: location::detect(env),
+    }
+}
+
+/// Prints the overview. A section that failed is reported on stderr and in the document;
+/// the exit code is `0` (or `3` for a `--verify` disagreement), never `1`.
+pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
+    let env = RecordingEnv::new(ctx.host.env);
+    let verbose = options.verbose;
+    let public = public::lookup(ctx.fetch, options, verify, &mut |attempt| {
+        if verbose {
+            output::diagnostic(ctx.err, &public::attempt_line(attempt));
+        }
+    });
+    let overview = gather(
+        &env,
+        ctx.host.interfaces,
+        ctx.host.probe,
+        options.family(),
+        public,
+    );
+    output::trace(options, &env, &overview.local.notes, ctx.err);
+    for note in overview.notes() {
+        output::diagnostic(ctx.err, &note);
+    }
+    let written = output::emit(
+        options,
+        &overview.to_json(),
+        Some(&overview.render_text()),
+        ctx.out,
+    );
+    output::exit_code(written, overview.exit_code())
+}
+
+/// The local egress address and the public address of one IP family, side by side.
+struct Nat<'a> {
+    public: IpAddr,
+    local: &'a EgressInfo,
+}
+
+impl Nat<'_> {
+    fn translated(&self) -> bool {
+        self.local.address != self.public
+    }
+}
+
+impl Overview {
+    /// `0`, or `3` when `--verify` found the providers disagreeing. Never `1`.
+    pub fn exit_code(&self) -> u8 {
+        if self.public.code() == 3 { 3 } else { 0 }
+    }
+
+    pub fn to_json(&self) -> Json {
+        Json::object([
+            ("schema_version", Json::from(SCHEMA_VERSION)),
+            ("public", without_schema_version(self.public.to_json())),
+            ("local", without_schema_version(self.local.to_json())),
+            ("where", without_schema_version(self.location.to_json())),
+            (
+                "highlights",
+                Json::object([
+                    ("nat", self.nat_json()),
+                    ("kubernetes", self.kubernetes_json()),
+                ]),
+            ),
+        ])
+    }
+
+    pub fn render_text(&self) -> String {
+        let mut out = String::from("[public]\n");
+        out.push_str(&self.public_lines());
+        out.push_str("\n[local]\n");
+        out.push_str(&self.local.render_text());
+        out.push_str("\n[where]\n");
+        out.push_str(&self.location.render_text());
+        out.push_str("\n[highlights]\n");
+        out.push_str(&self.nat_line());
+        if self.location.environment == Environment::Kubernetes {
+            out.push_str(&self.kubernetes_lines());
+        }
+        out
+    }
+
+    /// One line per section that could not be produced, for stderr.
+    pub fn notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(error) = self.public.error() {
+            notes.push(format!("public: {error}"));
+        }
+        if let Some(error) = self.local.error() {
+            notes.push(format!("local: {error}"));
+        }
+        notes
+    }
+
+    fn public_ip(&self) -> Option<IpAddr> {
+        self.public.headline().map(|headline| headline.ip)
+    }
+
+    fn public_lines(&self) -> String {
+        if let Some(headline) = self.public.headline() {
+            let verified = headline
+                .verified
+                .map_or_else(String::new, |(agree, total)| {
+                    format!(", verified: {agree} of {total} providers agree")
+                });
+            return format!(
+                "  {} ({}, observed by {}{verified})\n",
+                headline.ip,
+                family_label(headline.ip),
+                headline.provider.name
+            );
+        }
+        let mut lines = format!(
+            "  unavailable: {}\n",
+            sanitize::escape(self.public.error().unwrap_or("no answer"))
+        );
+        if self.public.code() == 3 {
+            for line in public::disagreement_report(&self.public).lines() {
+                lines.push_str(&format!("  {line}\n"));
+            }
+        }
+        lines
+    }
+
+    fn nat(&self) -> Option<Nat<'_>> {
+        let public = self.public_ip()?;
+        let local = match public {
+            IpAddr::V4(_) => self.local.ipv4.as_ref(),
+            IpAddr::V6(_) => self.local.ipv6.as_ref(),
+        }?;
+        Some(Nat { public, local })
+    }
+
+    fn nat_json(&self) -> Json {
+        let Some(nat) = self.nat() else {
+            return Json::Null;
+        };
+        Json::object([
+            ("family", Json::from(family_name(nat.public))),
+            ("local", Json::from(nat.local.address.to_string())),
+            ("public", Json::from(nat.public.to_string())),
+            ("translated", Json::from(nat.translated())),
+        ])
+    }
+
+    fn nat_line(&self) -> String {
+        let Some(nat) = self.nat() else {
+            return "  NAT: unknown (needs a public answer and a local egress address of the same IP family)\n"
+                .to_owned();
+        };
+        let family = family_label(nat.public);
+        if nat.translated() {
+            format!(
+                "  NAT: this machine sends from {} ({}) but the internet sees {} ({family}); something in between (NAT, a proxy or a VPN) rewrites the address\n",
+                nat.local.address,
+                nat.local.scope.as_str(),
+                nat.public
+            )
+        } else {
+            format!(
+                "  no NAT: the egress address {} is the address the internet sees ({family})\n",
+                nat.public
+            )
+        }
+    }
+
+    fn kubernetes_json(&self) -> Json {
+        if self.location.environment != Environment::Kubernetes {
+            return Json::Null;
+        }
+        let k = &self.location.kubernetes;
+        Json::object([
+            ("pod_ip", Json::from(fact_text(&k.pod_ip))),
+            ("node_ip", Json::from(fact_text(&k.host_ip))),
+            ("egress_ipv4", Json::from(egress_text(&self.local.ipv4))),
+            ("egress_ipv6", Json::from(egress_text(&self.local.ipv6))),
+            (
+                "public_ip",
+                Json::from(self.public_ip().map(|ip| ip.to_string())),
+            ),
+        ])
+    }
+
+    fn kubernetes_lines(&self) -> String {
+        let k = &self.location.kubernetes;
+        let unknown = || "unknown".to_owned();
+        let egress: Vec<String> = [&self.local.ipv4, &self.local.ipv6]
+            .into_iter()
+            .filter_map(egress_text)
+            .collect();
+        let egress = if egress.is_empty() {
+            unknown()
+        } else {
+            egress.join(", ")
+        };
+        format!(
+            "  kubernetes  pod {}, node {}, egress {egress}, public {}\n  (pod and node addresses are declared by the Pod spec; egress and public are observed)\n",
+            fact_text(&k.pod_ip).map_or_else(unknown, |text| sanitize::escape(&text)),
+            fact_text(&k.host_ip).map_or_else(unknown, |text| sanitize::escape(&text)),
+            self.public_ip().map_or_else(unknown, |ip| ip.to_string()),
+        )
+    }
+}
+
+fn fact_text(fact: &Option<Fact>) -> Option<String> {
+    fact.as_ref().map(Fact::text)
+}
+
+fn egress_text(egress: &Option<EgressInfo>) -> Option<String> {
+    egress.as_ref().map(|e| e.address.to_string())
+}
+
+fn family_name(ip: IpAddr) -> &'static str {
+    if ip.is_ipv4() { "ipv4" } else { "ipv6" }
+}
+
+fn family_label(ip: IpAddr) -> &'static str {
+    if ip.is_ipv4() { "IPv4" } else { "IPv6" }
+}
+
+/// The embedded sections share the document's version instead of repeating it.
+fn without_schema_version(json: Json) -> Json {
+    match json {
+        Json::Object(fields) => Json::Object(
+            fields
+                .into_iter()
+                .filter(|(name, _)| name != "schema_version")
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egress::testing::FakeProbe;
+    use crate::egress::{PROBE_V4, PROBE_V6};
+    use crate::env::testing::FakeEnv;
+    use crate::fact::Value;
+    use crate::ifaces::testing::{FakeInterfaces, iface};
+    use crate::public::{Attempt, PROVIDERS};
+    use crate::sanitize::testing::{FORGERY, assert_forgery_proof};
+    use std::time::Duration;
+
+    fn lan() -> FakeInterfaces {
+        FakeInterfaces::with(vec![
+            iface("lo", 1, &[("127.0.0.1", 8)]),
+            iface("en0", 2, &[("192.168.1.23", 24), ("fd00::5", 64)]),
+        ])
+    }
+
+    fn v4_only() -> FakeProbe {
+        FakeProbe::new().route(PROBE_V4, "192.168.1.23")
+    }
+
+    fn dual_stack() -> FakeProbe {
+        v4_only().route(PROBE_V6, "fd00::5")
+    }
+
+    /// What `PROVIDERS`, in order, answered; `None` is a provider that failed.
+    fn report(answers: [Option<&str>; 6], verify: bool) -> PublicReport {
+        report_failing_with(answers, verify, "connection refused")
+    }
+
+    fn report_failing_with(answers: [Option<&str>; 6], verify: bool, reason: &str) -> PublicReport {
+        let attempts = PROVIDERS
+            .iter()
+            .zip(answers)
+            .map(|(provider, answer)| Attempt {
+                provider,
+                outcome: answer
+                    .map(|ip| ip.parse().unwrap())
+                    .ok_or_else(|| reason.to_owned()),
+                latency: answer.map(|_| Duration::from_millis(12)),
+            })
+            .collect();
+        PublicReport::from_attempts(attempts, verify)
+    }
+
+    fn answered(ip: &str) -> PublicReport {
+        report([Some(ip), None, None, None, None, None], false)
+    }
+
+    fn unavailable() -> PublicReport {
+        report([None; 6], false)
+    }
+
+    fn disagreeing() -> PublicReport {
+        let (a, b) = (Some("203.0.113.7"), Some("198.51.100.9"));
+        report([a, b, a, None, None, None], true)
+    }
+
+    fn pod() -> FakeEnv {
+        FakeEnv::new()
+            .var("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+            .var("POD_IP", "10.244.1.7")
+            .var("HOST_IP", "192.168.49.2")
+    }
+
+    fn overview(env: &FakeEnv, probe: &FakeProbe, public: PublicReport) -> Overview {
+        gather(env, &lan(), probe, Family::Any, public)
+    }
+
+    fn at<'a>(json: &'a Json, path: &[&str]) -> &'a Json {
+        path.iter().fold(json, |node, key| match node {
+            Json::Object(fields) => {
+                &fields
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .unwrap_or_else(|| panic!("no key {key:?} in {node:?}"))
+                    .1
+            }
+            other => panic!("{other:?} has no key {key:?}"),
+        })
+    }
+
+    fn keys(json: &Json) -> Vec<&str> {
+        match json {
+            Json::Object(fields) => fields.iter().map(|(name, _)| name.as_str()).collect(),
+            other => panic!("{other:?} is not an object"),
+        }
+    }
+
+    fn s(text: &str) -> Json {
+        Json::Str(text.to_owned())
+    }
+
+    #[test]
+    fn the_document_has_the_schema_version_then_the_three_sections_then_highlights() {
+        let json = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).to_json();
+        assert_eq!(
+            keys(&json),
+            ["schema_version", "public", "local", "where", "highlights"]
+        );
+        assert_eq!(at(&json, &["schema_version"]), &Json::Int(1));
+    }
+
+    #[test]
+    fn sections_do_not_repeat_the_schema_version() {
+        let json = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).to_json();
+        for section in ["public", "local", "where"] {
+            assert!(
+                !keys(at(&json, &[section])).contains(&"schema_version"),
+                "{section}"
+            );
+        }
+        assert_eq!(at(&json, &["public", "ip"]), &s("203.0.113.7"));
+    }
+
+    #[test]
+    fn the_local_and_where_sections_are_the_standalone_reports() {
+        let json = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).to_json();
+        assert_eq!(
+            at(&json, &["local", "egress", "ipv4", "address"]),
+            &s("192.168.1.23")
+        );
+        assert_eq!(at(&json, &["where", "environment"]), &s("host"));
+    }
+
+    #[test]
+    fn nat_is_reported_when_the_egress_address_differs_from_the_public_one() {
+        let json = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).to_json();
+        let nat = at(&json, &["highlights", "nat"]);
+        assert_eq!(at(nat, &["family"]), &s("ipv4"));
+        assert_eq!(at(nat, &["local"]), &s("192.168.1.23"));
+        assert_eq!(at(nat, &["public"]), &s("203.0.113.7"));
+        assert_eq!(at(nat, &["translated"]), &Json::Bool(true));
+    }
+
+    #[test]
+    fn no_nat_when_the_egress_address_is_the_public_one() {
+        let json = overview(&FakeEnv::new(), &v4_only(), answered("192.168.1.23")).to_json();
+        assert_eq!(
+            at(&json, &["highlights", "nat", "translated"]),
+            &Json::Bool(false)
+        );
+    }
+
+    #[test]
+    fn nat_follows_the_family_of_the_public_answer() {
+        let json = overview(&FakeEnv::new(), &dual_stack(), answered("2606:4700::1")).to_json();
+        let nat = at(&json, &["highlights", "nat"]);
+        assert_eq!(at(nat, &["family"]), &s("ipv6"));
+        assert_eq!(at(nat, &["local"]), &s("fd00::5"));
+        assert_eq!(at(nat, &["translated"]), &Json::Bool(true));
+    }
+
+    #[test]
+    fn nat_is_null_without_a_public_answer() {
+        let json = overview(&FakeEnv::new(), &v4_only(), unavailable()).to_json();
+        assert_eq!(at(&json, &["highlights", "nat"]), &Json::Null);
+    }
+
+    #[test]
+    fn nat_is_null_without_a_local_egress_address_in_the_public_family() {
+        let json = overview(&FakeEnv::new(), &v4_only(), answered("2606:4700::1")).to_json();
+        assert_eq!(at(&json, &["highlights", "nat"]), &Json::Null);
+    }
+
+    #[test]
+    fn a_pod_gets_its_pod_node_egress_and_public_addresses_side_by_side() {
+        let probe = FakeProbe::new().route(PROBE_V4, "10.244.1.7");
+        let json = overview(&pod(), &probe, answered("203.0.113.7")).to_json();
+        let k8s = at(&json, &["highlights", "kubernetes"]);
+        assert_eq!(at(k8s, &["pod_ip"]), &s("10.244.1.7"));
+        assert_eq!(at(k8s, &["node_ip"]), &s("192.168.49.2"));
+        assert_eq!(at(k8s, &["egress_ipv4"]), &s("10.244.1.7"));
+        assert_eq!(at(k8s, &["egress_ipv6"]), &Json::Null);
+        assert_eq!(at(k8s, &["public_ip"]), &s("203.0.113.7"));
+    }
+
+    #[test]
+    fn the_kubernetes_highlight_is_null_outside_a_pod() {
+        let json = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).to_json();
+        assert_eq!(at(&json, &["highlights", "kubernetes"]), &Json::Null);
+    }
+
+    #[test]
+    fn a_pod_without_the_downward_api_has_null_pod_and_node_addresses() {
+        let env = FakeEnv::new().var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
+        let json = overview(&env, &v4_only(), answered("203.0.113.7")).to_json();
+        let k8s = at(&json, &["highlights", "kubernetes"]);
+        assert_eq!(at(k8s, &["pod_ip"]), &Json::Null);
+        assert_eq!(at(k8s, &["node_ip"]), &Json::Null);
+    }
+
+    #[test]
+    fn a_failed_public_lookup_is_in_band_and_does_not_fail_the_run() {
+        let all = overview(&FakeEnv::new(), &v4_only(), unavailable());
+        assert_eq!(all.exit_code(), 0);
+        let json = all.to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert_eq!(
+            at(&json, &["public", "error"]),
+            &s("no provider returned a valid public address")
+        );
+        assert_eq!(
+            all.notes(),
+            ["public: no provider returned a valid public address"]
+        );
+        assert!(all.render_text().contains("unavailable"));
+    }
+
+    #[test]
+    fn a_failed_interface_listing_is_in_band_and_does_not_fail_the_run() {
+        let failing = FakeInterfaces::failing(std::io::ErrorKind::PermissionDenied);
+        let all = gather(
+            &FakeEnv::new(),
+            &failing,
+            &v4_only(),
+            Family::Any,
+            answered("203.0.113.7"),
+        );
+        assert_eq!(all.exit_code(), 0, "all never exits 1");
+        let json = all.to_json();
+        assert_eq!(at(&json, &["local", "interfaces"]), &Json::Null);
+        assert!(matches!(at(&json, &["local", "error"]), Json::Str(_)));
+        assert_eq!(at(&json, &["where", "environment"]), &s("host"));
+        let notes = all.notes();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("local: cannot list network interfaces"));
+    }
+
+    #[test]
+    fn a_verify_disagreement_exits_3_whatever_else_failed() {
+        let failing = FakeInterfaces::failing(std::io::ErrorKind::PermissionDenied);
+        let all = gather(
+            &FakeEnv::new(),
+            &failing,
+            &v4_only(),
+            Family::Any,
+            disagreeing(),
+        );
+        assert_eq!(all.exit_code(), 3);
+    }
+
+    #[test]
+    fn a_complete_report_has_no_notes() {
+        let all = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7"));
+        assert_eq!(all.notes(), Vec::<String>::new());
+        assert_eq!(all.exit_code(), 0);
+    }
+
+    #[test]
+    fn the_family_filter_reaches_the_local_section_only() {
+        let all = gather(
+            &pod(),
+            &lan(),
+            &dual_stack(),
+            Family::V4,
+            answered("203.0.113.7"),
+        );
+        let json = all.to_json();
+        assert_eq!(keys(at(&json, &["local", "egress"])), ["ipv4"]);
+        assert_eq!(at(&json, &["where", "environment"]), &s("kubernetes"));
+    }
+
+    #[test]
+    fn unavailable_public_json_has_a_null_ip_and_the_reason() {
+        let json = overview(&FakeEnv::new(), &v4_only(), unavailable()).to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert_eq!(at(&json, &["public", "provider"]), &Json::Null);
+        assert_eq!(
+            at(&json, &["public", "error"]),
+            &s("no provider returned a valid public address")
+        );
+    }
+
+    #[test]
+    fn the_public_section_is_the_public_commands_document_without_its_version() {
+        let public = answered("203.0.113.7");
+        let json = overview(&FakeEnv::new(), &v4_only(), public.clone()).to_json();
+        assert_eq!(
+            at(&json, &["public"]),
+            &without_schema_version(public.to_json())
+        );
+        assert_eq!(
+            keys(at(&json, &["public"])),
+            [
+                "ip",
+                "family",
+                "provider",
+                "latency_ms",
+                "verified",
+                "error",
+                "attempts"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_disagreement_has_no_headline_address_and_no_nat() {
+        let all = overview(&FakeEnv::new(), &v4_only(), disagreeing());
+        assert_eq!(all.exit_code(), 3);
+        let json = all.to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert_eq!(at(&json, &["highlights", "nat"]), &Json::Null);
+        assert_eq!(all.notes().len(), 1);
+        assert!(
+            all.notes()[0].starts_with("public: providers disagree: ipv4 ("),
+            "{:?}",
+            all.notes()
+        );
+    }
+
+    #[test]
+    fn a_disagreement_prints_who_said_what_under_the_public_heading() {
+        let text = overview(&FakeEnv::new(), &v4_only(), disagreeing()).render_text();
+        let public = &text[..text.find("[local]").unwrap()];
+        assert!(
+            public.contains("unavailable: providers disagree"),
+            "{public}"
+        );
+        assert!(
+            public.contains("  ipv4: DISAGREE, 2 of 3 agree"),
+            "{public}"
+        );
+        assert!(public.contains("198.51.100.9  <- differs"), "{public}");
+        assert!(public.contains("no answer:"), "{public}");
+    }
+
+    #[test]
+    fn a_verified_answer_says_how_many_providers_agreed() {
+        let same = Some("203.0.113.7");
+        let all = overview(&FakeEnv::new(), &v4_only(), report([same; 6], true));
+        assert_eq!(all.exit_code(), 0);
+        assert!(
+            all.render_text().contains(
+                "203.0.113.7 (IPv4, observed by one.one.one.one, verified: 6 of 6 providers agree)"
+            ),
+            "{}",
+            all.render_text()
+        );
+        assert_eq!(all.notes(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_unverifiable_answer_is_reported_in_band_with_exit_0() {
+        let one = report([Some("203.0.113.7"), None, None, None, None, None], true);
+        let all = overview(&FakeEnv::new(), &v4_only(), one);
+        assert_eq!(all.exit_code(), 0, "all never exits 1");
+        let json = all.to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert!(
+            matches!(at(&json, &["public", "error"]), Json::Str(e) if e.contains("could not be verified"))
+        );
+        assert!(
+            all.render_text()
+                .contains("[public]\n  unavailable: the address could not be verified"),
+            "{}",
+            all.render_text()
+        );
+    }
+
+    #[test]
+    fn the_text_has_one_heading_per_section_in_order() {
+        let text = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).render_text();
+        let at_heading = |heading: &str| {
+            text.find(heading)
+                .unwrap_or_else(|| panic!("no {heading} in\n{text}"))
+        };
+        let order = [
+            at_heading("[public]"),
+            at_heading("[local]"),
+            at_heading("[where]"),
+            at_heading("[highlights]"),
+        ];
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{text}");
+        assert!(text.contains("203.0.113.7"), "{text}");
+        assert!(text.contains("192.168.1.23"), "{text}");
+    }
+
+    #[test]
+    fn the_text_explains_nat_with_both_addresses() {
+        let text = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).render_text();
+        let highlights = &text[text.find("[highlights]").unwrap()..];
+        assert!(highlights.contains("NAT"), "{highlights}");
+        assert!(!highlights.contains("no NAT"), "{highlights}");
+        assert!(
+            highlights.contains("192.168.1.23 (private)"),
+            "{highlights}"
+        );
+        assert!(highlights.contains("203.0.113.7"), "{highlights}");
+    }
+
+    #[test]
+    fn the_text_says_when_there_is_no_nat() {
+        let text = overview(&FakeEnv::new(), &v4_only(), answered("192.168.1.23")).render_text();
+        let highlights = &text[text.find("[highlights]").unwrap()..];
+        assert!(highlights.contains("no NAT"), "{highlights}");
+    }
+
+    #[test]
+    fn the_text_says_when_nat_cannot_be_judged() {
+        let text = overview(&FakeEnv::new(), &v4_only(), unavailable()).render_text();
+        let highlights = &text[text.find("[highlights]").unwrap()..];
+        assert!(highlights.contains("NAT: unknown"), "{highlights}");
+    }
+
+    #[test]
+    fn the_text_for_a_pod_names_pod_node_and_public_and_marks_the_unknown() {
+        let probe = FakeProbe::new().route(PROBE_V4, "10.244.1.7");
+        let text = overview(&pod(), &probe, answered("203.0.113.7")).render_text();
+        let highlights = &text[text.find("[highlights]").unwrap()..];
+        assert!(highlights.contains("pod 10.244.1.7"), "{highlights}");
+        assert!(highlights.contains("node 192.168.49.2"), "{highlights}");
+        assert!(highlights.contains("egress 10.244.1.7"), "{highlights}");
+        assert!(highlights.contains("public 203.0.113.7"), "{highlights}");
+
+        let bare = FakeEnv::new().var("KUBERNETES_SERVICE_HOST", "10.96.0.1");
+        let text = overview(&bare, &probe, unavailable()).render_text();
+        let highlights = &text[text.find("[highlights]").unwrap()..];
+        assert!(highlights.contains("pod unknown"), "{highlights}");
+        assert!(highlights.contains("node unknown"), "{highlights}");
+        assert!(highlights.contains("public unknown"), "{highlights}");
+    }
+
+    #[test]
+    fn the_text_has_no_kubernetes_line_outside_a_pod() {
+        let text = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).render_text();
+        assert!(!text.contains("kubernetes  "), "{text}");
+    }
+
+    fn disagreeing_with_failures(reason: &str) -> PublicReport {
+        let (a, b) = (Some("203.0.113.7"), Some("198.51.100.9"));
+        report_failing_with([a, b, a, None, None, None], true, reason)
+    }
+
+    #[test]
+    fn a_provider_failure_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("provider failure", |reason| {
+            let public = disagreeing_with_failures(reason);
+            assert_eq!(public.code(), 3);
+            overview(&FakeEnv::new(), &v4_only(), public).render_text()
+        });
+    }
+
+    #[test]
+    fn a_local_failure_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("local failure", |message| {
+            let ifaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, message);
+            let public = answered("203.0.113.7");
+            gather(&FakeEnv::new(), &ifaces, &v4_only(), Family::Any, public).render_text()
+        });
+    }
+
+    #[test]
+    fn a_pod_address_cannot_start_lines_of_its_own_in_the_text() {
+        assert_forgery_proof("pod addresses", |free_text| {
+            let mut all = overview(&pod(), &v4_only(), answered("203.0.113.7"));
+            let hostile = |var: &str| Some(Fact::declared(Value::Text(free_text.to_owned()), var));
+            all.location.kubernetes.pod_ip = hostile("env:POD_IP");
+            all.location.kubernetes.host_ip = hostile("env:HOST_IP");
+            all.render_text()
+        });
+    }
+
+    #[test]
+    fn hostile_text_in_every_section_leaves_each_heading_once() {
+        let ifaces = FakeInterfaces::failing_with(std::io::ErrorKind::Other, FORGERY);
+        let mut all = gather(
+            &pod(),
+            &ifaces,
+            &v4_only(),
+            Family::Any,
+            disagreeing_with_failures(FORGERY),
+        );
+        all.location.kubernetes.pod_ip = Some(Fact::declared(
+            Value::Text(FORGERY.to_owned()),
+            "env:POD_IP",
+        ));
+        let text = all.render_text();
+        for heading in ["[public]", "[local]", "[where]", "[highlights]"] {
+            let count = text.lines().filter(|line| *line == heading).count();
+            assert_eq!(count, 1, "{heading}:\n{text}");
+        }
+        for line in text.lines() {
+            assert!(
+                !line.starts_with("forged") && !line.starts_with("foo"),
+                "{line:?}"
+            );
+        }
+    }
+}

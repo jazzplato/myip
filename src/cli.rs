@@ -82,8 +82,7 @@ impl Options {
     }
 }
 
-// `public` is implemented; the other names are reserved so scripts cannot grow to depend on
-// them as fields.
+// All four commands are implemented; `Public` carries its own flags.
 #[derive(Subcommand, Debug, Clone, Copy)]
 pub enum Command {
     /// Print your public IP address, as seen by independent providers
@@ -93,12 +92,23 @@ pub enum Command {
     /// answer. With --verify it asks all of them at once and compares the answers per
     /// address family. The providers see your public address; that is the point.
     Public(PublicArgs),
-    #[command(hide = true)]
+    /// Interfaces with their scope, and the address used to reach the internet
     Local,
-    #[command(hide = true)]
+    /// Whether this process runs on a host, in a container or in a Kubernetes pod
     Where,
-    #[command(hide = true)]
-    All,
+    /// Public address, local interfaces and location together, with NAT and pod highlights
+    ///
+    /// The public address comes from the same providers as `myip public`. A section that
+    /// cannot be produced is reported in place and the exit code stays 0; only a
+    /// --verify disagreement exits 3.
+    All(AllArgs),
+}
+
+#[derive(Args, Debug, Clone, Copy)]
+pub struct AllArgs {
+    /// Ask every provider for the public address and require at least two answers per family to agree; exit 3 if they differ
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Args, Debug, Clone, Copy)]
@@ -114,7 +124,7 @@ impl Command {
             Self::Public(_) => "public",
             Self::Local => "local",
             Self::Where => "where",
-            Self::All => "all",
+            Self::All(_) => "all",
         }
     }
 }

@@ -1,6 +1,8 @@
 //! A tiny ordered JSON writer for the `--json` documents of the dimension subcommands.
 //! Output only: nothing in `myip` parses JSON, so a full serializer would be dead weight.
 
+use crate::sanitize;
+
 /// A JSON value whose object keys keep insertion order, so `schema_version` stays first.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Json {
@@ -98,7 +100,7 @@ fn write_string(out: &mut String, value: &str) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if sanitize::is_unsafe(c) => out.push_str(&format!("\\u{:04x}", u32::from(c))),
             c => out.push(c),
         }
     }
@@ -231,7 +233,9 @@ mod tests {
             ("line\nbreak\r\ttab", r#""line\nbreak\r\ttab""#),
             ("\u{8}\u{c}", r#""\b\f""#),
             ("\u{0}\u{1}\u{1f}", r#""\u0000\u0001\u001f""#),
-            ("\u{7f}", "\"\u{7f}\""),
+            ("\u{7f}", r#""\u007f""#),
+            ("\u{85}\u{9b}", r#""\u0085\u009b""#),
+            ("\u{202e}\u{2028}\u{feff}", r#""\u202e\u2028\ufeff""#),
             (
                 "h\u{e9}llo \u{4e16}\u{754c} \u{1f980}",
                 "\"h\u{e9}llo \u{4e16}\u{754c} \u{1f980}\"",

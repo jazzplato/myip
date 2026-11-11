@@ -7,12 +7,14 @@ use super::provider::PROVIDERS;
 use super::verdict::{Attempt, FamilyReport, Status, Verdict};
 use super::{Headline, PublicReport};
 use crate::json::Json;
+use crate::sanitize;
 
-/// `name: 1.2.3.4 (42 ms)` or `name: reason`.
+/// `name: 1.2.3.4 (42 ms)` or `name: reason`; a reason is text from the network, shown
+/// with its control characters escaped.
 pub fn attempt_line(attempt: &Attempt) -> String {
     let what = match &attempt.outcome {
         Ok(ip) => ip.to_string(),
-        Err(reason) => reason.clone(),
+        Err(reason) => sanitize::escape(reason),
     };
     match attempt.latency {
         Some(latency) => format!(
@@ -74,7 +76,11 @@ pub fn disagreement_report(report: &PublicReport) -> String {
         text.push_str("no answer:\n");
         for attempt in failed {
             let reason = attempt.outcome.as_ref().err().map_or("", String::as_str);
-            text.push_str(&format!("  {:<width$}  {reason}\n", attempt.provider.name));
+            text.push_str(&format!(
+                "  {:<width$}  {}\n",
+                attempt.provider.name,
+                sanitize::escape(reason)
+            ));
         }
     }
     text
@@ -181,6 +187,7 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+    use crate::sanitize::testing::{FORGERY, assert_forgery_proof};
 
     fn at(provider: usize, outcome: Result<&str, &str>, millis: Option<u64>) -> Attempt {
         Attempt {
@@ -319,5 +326,43 @@ no answer:
             "{json}"
         );
         assert!(!json.contains('\n'));
+    }
+
+    #[test]
+    fn a_failure_reason_cannot_start_lines_of_its_own_in_any_text() {
+        assert_forgery_proof("attempt line", |reason| {
+            attempt_line(&at(0, Err(reason), Some(7)))
+        });
+        assert_forgery_proof("attempt list", |reason| {
+            let report = PublicReport::from_attempts(vec![at(0, Err(reason), Some(7))], false);
+            attempt_list(&report)
+        });
+        assert_forgery_proof("disagreement report", |reason| {
+            let report = PublicReport::from_attempts(
+                vec![
+                    at(0, Ok("1.2.3.4"), Some(1)),
+                    at(1, Ok("5.6.7.8"), Some(1)),
+                    at(2, Err(reason), Some(1)),
+                ],
+                true,
+            );
+            disagreement_report(&report)
+        });
+    }
+
+    #[test]
+    fn the_json_keeps_the_raw_reason_for_the_writer_to_encode() {
+        let report = PublicReport::from_attempts(
+            vec![at(0, Err(FORGERY), Some(1)), at(1, Ok("1.2.3.4"), Some(1))],
+            false,
+        );
+        let json = report.to_json().render(false);
+        assert_eq!(json.lines().count(), 1, "{json}");
+        assert!(
+            json.contains(
+                r#""error":"boom\n[highlights]\nforged\r\n[where]\nfoo\u001b[2J\u0085\u202e""#
+            ),
+            "{json}"
+        );
     }
 }
