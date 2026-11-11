@@ -4,6 +4,8 @@ use std::fmt;
 
 use crate::json::Json;
 
+/// `schema_version` of every `--json` document the dimension subcommands print.
+pub const SCHEMA_VERSION: u32 = 1;
 /// How `myip` came to know a value.
 ///
 /// - `Declared`: handed to the process by configuration someone set (environment

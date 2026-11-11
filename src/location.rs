@@ -7,8 +7,10 @@
 //! *observed* (the cgroup, a mount or a marker file we looked at ourselves). Anything
 //! that cannot be established is `None`, never a guess.
 
+use std::net::IpAddr;
+
 use crate::env::Env;
-use crate::fact::Fact;
+use crate::fact::{Fact, SCHEMA_VERSION, Value};
 use crate::json::Json;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,17 +62,633 @@ pub struct Location {
     pub kubernetes: Kubernetes,
 }
 
-pub fn detect(_env: &dyn Env) -> Location {
-    unimplemented!()
+const CGROUP: &str = "/proc/self/cgroup";
+const MOUNTINFO: &str = "/proc/self/mountinfo";
+const RESOLV_CONF: &str = "/etc/resolv.conf";
+const NAMESPACE_FILE: &str = "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
+const DOCKERENV: &str = "/.dockerenv";
+const CONTAINERENV: &str = "/run/.containerenv";
+const SYSTEMD_CONTAINER: &str = "/run/systemd/container";
+
+/// Variables a Pod spec can fill from the Downward API. None of these names is a Kubernetes
+/// standard: they are the convention the README's Pod snippet uses.
+const DOWNWARD_VARS: &[&str] = &[
+    "POD_NAME",
+    "POD_NAMESPACE",
+    "POD_IP",
+    "POD_IPS",
+    "NODE_NAME",
+    "HOST_IP",
+];
+
+pub fn detect(env: &dyn Env) -> Location {
+    let container = detect_container(env);
+    let kubernetes = detect_kubernetes(env);
+    let environment = if kubernetes.detected {
+        Environment::Kubernetes
+    } else if container.detected {
+        Environment::Container
+    } else {
+        Environment::Host
+    };
+    Location {
+        environment,
+        container,
+        kubernetes,
+    }
+}
+
+struct Signal {
+    source: String,
+    runtime: Option<String>,
+    id: Option<String>,
+    evidence: String,
+}
+
+fn detect_container(env: &dyn Env) -> Container {
+    let signals: Vec<Signal> = [
+        cgroup_signal(env),
+        systemd_signal(env),
+        mountinfo_signal(env),
+        containerenv_signal(env),
+        dockerenv_signal(env),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let pick = |value: fn(&Signal) -> Option<&String>| {
+        signals.iter().find_map(|signal| {
+            value(signal)
+                .map(|text| Fact::observed(Value::Text(text.clone()), signal.source.clone()))
+        })
+    };
+    Container {
+        detected: !signals.is_empty(),
+        runtime: pick(|s| s.runtime.as_ref()),
+        id: pick(|s| s.id.as_ref()),
+        evidence: signals.iter().map(|s| s.evidence.clone()).collect(),
+    }
+}
+
+#[derive(Default)]
+struct CgroupHit {
+    runtime: Option<&'static str>,
+    id: Option<String>,
+    kubepods: bool,
+}
+
+fn cgroup_signal(env: &dyn Env) -> Option<Signal> {
+    let content = env.read_to_string(CGROUP).ok()?;
+    let hit = content
+        .lines()
+        .filter_map(|line| line.splitn(3, ':').nth(2))
+        .map(cgroup_hit)
+        .find(|hit| hit.runtime.is_some() || hit.id.is_some() || hit.kubepods)?;
+    let evidence = match (&hit.runtime, &hit.id) {
+        (Some(runtime), _) => {
+            format!("{CGROUP} places this process in a {runtime} container cgroup")
+        }
+        (None, Some(_)) => {
+            format!("{CGROUP} places this process in a container cgroup under kubepods")
+        }
+        (None, None) => format!("{CGROUP} places this process under the kubepods cgroup"),
+    };
+    Some(Signal {
+        source: format!("file:{CGROUP}"),
+        runtime: hit.runtime.map(str::to_owned),
+        id: hit.id,
+        evidence,
+    })
+}
+
+/// Scans one cgroup path; the deepest (last) match wins so nested containers report the
+/// innermost one.
+fn cgroup_hit(path: &str) -> CgroupHit {
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut hit = CgroupHit::default();
+    for (i, segment) in segments.iter().enumerate() {
+        hit.kubepods |= segment.starts_with("kubepods");
+        let scoped = [
+            ("docker-", "docker"),
+            ("cri-containerd-", "containerd"),
+            ("crio-", "cri-o"),
+            ("libpod-", "podman"),
+        ]
+        .into_iter()
+        .find_map(|(prefix, runtime)| scope_id(segment, prefix).map(|id| (runtime, id)));
+        let next = segments.get(i + 1).copied();
+        if let Some((runtime, id)) = scoped {
+            hit.runtime = Some(runtime);
+            hit.id = Some(id);
+        } else if *segment == "docker" && next.is_some_and(is_container_id) {
+            hit.runtime = Some("docker");
+            hit.id = next.map(str::to_owned);
+        } else if *segment == "lxc" && next.is_some_and(valid_name) {
+            hit.runtime = Some("lxc");
+            hit.id = next.map(str::to_owned);
+        } else if let Some(name) = segment
+            .strip_prefix("lxc.payload.")
+            .filter(|n| valid_name(n))
+        {
+            hit.runtime = Some("lxc");
+            hit.id = Some(name.to_owned());
+        }
+    }
+    if hit.id.is_none() && hit.kubepods {
+        hit.id = segments
+            .last()
+            .filter(|last| is_container_id(last))
+            .map(|last| (*last).to_owned());
+    }
+    hit
+}
+
+fn scope_id(segment: &str, prefix: &str) -> Option<String> {
+    let id = segment.strip_prefix(prefix)?.strip_suffix(".scope")?;
+    is_container_id(id).then(|| id.to_owned())
+}
+
+fn is_container_id(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn systemd_signal(env: &dyn Env) -> Option<Signal> {
+    if !env.exists(SYSTEMD_CONTAINER) {
+        return None;
+    }
+    let content = env.read_to_string(SYSTEMD_CONTAINER).unwrap_or_default();
+    let name = content.trim();
+    let valid = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.'));
+    Some(Signal {
+        source: format!("file:{SYSTEMD_CONTAINER}"),
+        runtime: valid.then(|| name.to_owned()),
+        id: None,
+        evidence: if valid {
+            format!("{SYSTEMD_CONTAINER} names the container manager {name}")
+        } else {
+            format!("{SYSTEMD_CONTAINER} exists but names no recognizable container manager")
+        },
+    })
+}
+
+/// Under a private cgroup namespace `/proc/self/cgroup` is just `0::/`, but the runtime's
+/// bind mounts of `hostname`, `hosts` and `resolv.conf` still carry the container id in
+/// their source path (field 4 of each mountinfo line).
+fn mountinfo_signal(env: &dyn Env) -> Option<Signal> {
+    let content = env.read_to_string(MOUNTINFO).ok()?;
+    let (runtime, id) = content
+        .lines()
+        .filter_map(|line| line.split(' ').nth(3))
+        .find_map(container_mount)?;
+    Some(Signal {
+        source: format!("file:{MOUNTINFO}"),
+        runtime: Some(runtime.to_owned()),
+        id: Some(id),
+        evidence: format!("{MOUNTINFO} shows {runtime} bind-mounting this container's files"),
+    })
+}
+
+fn container_mount(root: &str) -> Option<(&'static str, String)> {
+    const FILES: [&str; 3] = ["hostname", "hosts", "resolv.conf"];
+    let after = |marker: &str, tail: &str| {
+        root.match_indices(marker).find_map(|(at, _)| {
+            let rest = &root[at + marker.len()..];
+            let id = rest.get(..64).filter(|id| is_container_id(id))?;
+            let file = rest[64..].strip_prefix(tail)?;
+            FILES.contains(&file).then(|| id.to_owned())
+        })
+    };
+    after("/containers/", "/")
+        .map(|id| ("docker", id))
+        .or_else(|| after("/overlay-containers/", "/userdata/").map(|id| ("podman", id)))
+}
+
+fn containerenv_signal(env: &dyn Env) -> Option<Signal> {
+    if !env.exists(CONTAINERENV) {
+        return None;
+    }
+    let id = env
+        .read_to_string(CONTAINERENV)
+        .ok()
+        .and_then(|content| containerenv_id(&content));
+    Some(Signal {
+        source: format!("file:{CONTAINERENV}"),
+        runtime: Some("podman".to_owned()),
+        id,
+        evidence: format!("{CONTAINERENV} exists (Podman creates it in its containers)"),
+    })
+}
+
+fn containerenv_id(content: &str) -> Option<String> {
+    let value = content
+        .lines()
+        .find_map(|line| line.strip_prefix("id=\""))?
+        .strip_suffix('"')?;
+    (12..=64)
+        .contains(&value.len())
+        .then_some(value)
+        .filter(|v| v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+        .map(str::to_owned)
+}
+
+fn dockerenv_signal(env: &dyn Env) -> Option<Signal> {
+    env.exists(DOCKERENV).then(|| Signal {
+        source: format!("file:{DOCKERENV}"),
+        runtime: Some("docker".to_owned()),
+        id: None,
+        evidence: format!("{DOCKERENV} exists (Docker creates it in its containers)"),
+    })
+}
+
+struct ClusterDns {
+    namespace: String,
+    domain: String,
+    nameservers: Vec<String>,
+}
+
+/// A kubelet writes `search <ns>.svc.<domain> svc.<domain> <domain>`. Both the namespaced
+/// and the bare `svc.` entry must be present, so a single corporate `*.svc.example.com`
+/// search domain is not mistaken for a cluster.
+fn parse_resolv(content: &str) -> Option<ClusterDns> {
+    let mut search: Vec<&str> = Vec::new();
+    let mut nameservers: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let line = line.split(['#', ';']).next().unwrap_or_default();
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("search") => search = words.collect(),
+            Some("nameserver") => {
+                if let Some(ip) = words.next().and_then(|w| w.parse::<IpAddr>().ok()) {
+                    nameservers.push(ip.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let (namespace, domain) = search.iter().find_map(|entry| {
+        let (namespace, domain) = entry.split_once(".svc.")?;
+        let bare = format!("svc.{domain}");
+        (valid_label(namespace) && !domain.is_empty() && search.contains(&bare.as_str()))
+            .then(|| (namespace.to_owned(), domain.to_owned()))
+    })?;
+    Some(ClusterDns {
+        namespace,
+        domain,
+        nameservers,
+    })
+}
+
+fn valid_name(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 253
+        && !text.contains("..")
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+}
+
+fn valid_label(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 63
+        && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn clean(value: Option<String>) -> Option<String> {
+    value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
+}
+
+fn parse_ip(text: &str) -> Option<Value> {
+    text.parse::<IpAddr>()
+        .ok()
+        .map(|ip| Value::Text(ip.to_string()))
+}
+
+fn parse_ip_list(text: &str) -> Option<Value> {
+    let ips: Option<Vec<String>> = text
+        .split(',')
+        .map(|part| part.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string()))
+        .collect();
+    ips.map(Value::List)
+}
+
+fn parse_name(text: &str) -> Option<Value> {
+    valid_name(text).then(|| Value::Text(text.to_owned()))
+}
+
+fn parse_label(text: &str) -> Option<Value> {
+    valid_label(text).then(|| Value::Text(text.to_owned()))
+}
+
+fn parse_port(text: &str) -> Option<Value> {
+    text.parse::<u16>().ok().map(|p| Value::Text(p.to_string()))
+}
+
+fn parse_host(text: &str) -> Option<Value> {
+    if text.parse::<IpAddr>().is_ok() || valid_name(text) {
+        Some(Value::Text(text.to_owned()))
+    } else {
+        None
+    }
+}
+
+/// A declared value from the environment. A non-empty value that fails validation is
+/// dropped (never echoed) and noted in `evidence`.
+fn declared_env(
+    env: &dyn Env,
+    evidence: &mut Vec<String>,
+    var: &str,
+    parse: fn(&str) -> Option<Value>,
+    expected: &str,
+) -> Option<Fact> {
+    let raw = clean(env.var(var))?;
+    match parse(&raw) {
+        Some(value) => Some(Fact::declared(value, format!("env:{var}"))),
+        None => {
+            evidence.push(format!("env {var} ignored: not {expected}"));
+            None
+        }
+    }
+}
+
+fn detect_kubernetes(env: &dyn Env) -> Kubernetes {
+    let mut k = Kubernetes::default();
+    let service_host = clean(env.var("KUBERNETES_SERVICE_HOST"));
+    let namespace_file_present = env.exists(NAMESPACE_FILE);
+    let namespace_file = if namespace_file_present {
+        env.read_to_string(NAMESPACE_FILE).ok()
+    } else {
+        None
+    };
+    let resolv = env
+        .read_to_string(RESOLV_CONF)
+        .ok()
+        .and_then(|content| parse_resolv(&content));
+
+    if service_host.is_some() {
+        k.evidence
+            .push("env KUBERNETES_SERVICE_HOST is set".to_owned());
+    }
+    if namespace_file_present {
+        k.evidence.push(format!("{NAMESPACE_FILE} exists"));
+    }
+    if let Some(dns) = &resolv {
+        k.evidence.push(format!(
+            "{RESOLV_CONF} searches {}.svc.{} and svc.{}",
+            dns.namespace, dns.domain, dns.domain
+        ));
+    }
+    k.detected = !k.evidence.is_empty();
+    if !k.detected {
+        let set: Vec<&str> = DOWNWARD_VARS
+            .iter()
+            .copied()
+            .filter(|name| clean(env.var(name)).is_some())
+            .collect();
+        if !set.is_empty() {
+            k.evidence.push(format!(
+                "{} set, but no other Kubernetes signal was found; ignored",
+                set.join(", ")
+            ));
+        }
+        return k;
+    }
+
+    k.service_host = declared_env(
+        env,
+        &mut k.evidence,
+        "KUBERNETES_SERVICE_HOST",
+        parse_host,
+        "an address or host name",
+    );
+    k.service_port = declared_env(
+        env,
+        &mut k.evidence,
+        "KUBERNETES_SERVICE_PORT",
+        parse_port,
+        "a port number",
+    );
+    k.pod_name = declared_env(env, &mut k.evidence, "POD_NAME", parse_name, "a valid name");
+    k.pod_ip = declared_env(env, &mut k.evidence, "POD_IP", parse_ip, "an IP address");
+    k.pod_ips = declared_env(
+        env,
+        &mut k.evidence,
+        "POD_IPS",
+        parse_ip_list,
+        "a comma-separated list of IP addresses",
+    );
+    k.node_name = declared_env(
+        env,
+        &mut k.evidence,
+        "NODE_NAME",
+        parse_name,
+        "a valid name",
+    );
+    k.host_ip = declared_env(env, &mut k.evidence, "HOST_IP", parse_ip, "an IP address");
+
+    k.namespace = declared_env(
+        env,
+        &mut k.evidence,
+        "POD_NAMESPACE",
+        parse_label,
+        "a valid namespace name",
+    );
+    if k.namespace.is_none() {
+        let from_file = namespace_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        match from_file {
+            Some(text) if valid_label(text) => {
+                k.namespace = Some(Fact::declared(
+                    Value::Text(text.to_owned()),
+                    format!("file:{NAMESPACE_FILE}"),
+                ));
+            }
+            Some(_) => k.evidence.push(format!(
+                "{NAMESPACE_FILE} ignored: not a valid namespace name"
+            )),
+            None => {}
+        }
+    }
+    if let Some(dns) = &resolv {
+        let source = format!("file:{RESOLV_CONF}");
+        if k.namespace.is_none() {
+            k.namespace = Some(Fact::declared(
+                Value::Text(dns.namespace.clone()),
+                source.clone(),
+            ));
+        }
+        k.cluster_domain = Some(Fact::declared(
+            Value::Text(dns.domain.clone()),
+            source.clone(),
+        ));
+        if !dns.nameservers.is_empty() {
+            k.cluster_dns = Some(Fact::declared(Value::List(dns.nameservers.clone()), source));
+        }
+    }
+    k.host_network = host_network(&k);
+    k
+}
+
+/// True when the node address is one of the pod's own addresses, which is what
+/// `hostNetwork: true` looks like. Derived purely from declared values.
+fn host_network(k: &Kubernetes) -> Option<Fact> {
+    let host: IpAddr = k.host_ip.as_ref()?.text().parse().ok()?;
+    let mut pod: Vec<IpAddr> = Vec::new();
+    let mut sources = vec!["env:HOST_IP"];
+    if let Some(fact) = &k.pod_ip {
+        pod.extend(fact.text().parse::<IpAddr>().ok());
+        sources.push("env:POD_IP");
+    }
+    if let Some(Fact {
+        value: Value::List(items),
+        ..
+    }) = &k.pod_ips
+    {
+        pod.extend(items.iter().filter_map(|item| item.parse::<IpAddr>().ok()));
+        sources.push("env:POD_IPS");
+    }
+    if pod.is_empty() {
+        return None;
+    }
+    Some(Fact::declared(
+        Value::Flag(pod.contains(&host)),
+        sources.join(","),
+    ))
 }
 
 impl Location {
     pub fn to_json(&self) -> Json {
-        unimplemented!()
+        let c = &self.container;
+        let k = &self.kubernetes;
+        Json::object([
+            ("schema_version", SCHEMA_VERSION.into()),
+            ("environment", self.environment.as_str().into()),
+            (
+                "container",
+                Json::object([
+                    ("detected", c.detected.into()),
+                    ("runtime", Json::from(&c.runtime)),
+                    ("id", Json::from(&c.id)),
+                    ("evidence", c.evidence.clone().into()),
+                ]),
+            ),
+            (
+                "kubernetes",
+                Json::object([
+                    ("detected", k.detected.into()),
+                    ("service_host", Json::from(&k.service_host)),
+                    ("service_port", Json::from(&k.service_port)),
+                    ("namespace", Json::from(&k.namespace)),
+                    ("pod_name", Json::from(&k.pod_name)),
+                    ("pod_ip", Json::from(&k.pod_ip)),
+                    ("pod_ips", Json::from(&k.pod_ips)),
+                    ("node_name", Json::from(&k.node_name)),
+                    ("host_ip", Json::from(&k.host_ip)),
+                    ("host_network", Json::from(&k.host_network)),
+                    ("cluster_dns", Json::from(&k.cluster_dns)),
+                    ("cluster_domain", Json::from(&k.cluster_domain)),
+                    ("evidence", k.evidence.clone().into()),
+                ]),
+            ),
+        ])
     }
 
+    /// Human-readable report. Not a stable format; `--json` is the contract.
     pub fn render_text(&self) -> String {
-        unimplemented!()
+        let mut out = String::new();
+        let headline = match self.environment {
+            Environment::Host => "host (no container or Kubernetes signals found)",
+            Environment::Container => "container",
+            Environment::Kubernetes => "kubernetes (a pod)",
+        };
+        row(&mut out, "environment", headline.to_owned());
+        let c = &self.container;
+        if c.detected {
+            row(&mut out, "runtime", fact_or(&c.runtime, "unknown", whole));
+            row(
+                &mut out,
+                "container id",
+                fact_or(&c.id, "unknown", short_id),
+            );
+        }
+        let k = &self.kubernetes;
+        if k.detected {
+            let downward = |var: &str| format!("unknown (expose {var} with the Downward API)");
+            let rows = [
+                ("namespace", &k.namespace, downward("POD_NAMESPACE")),
+                ("pod name", &k.pod_name, downward("POD_NAME")),
+                ("pod ip", &k.pod_ip, downward("POD_IP")),
+                ("pod ips", &k.pod_ips, downward("POD_IPS")),
+                ("node name", &k.node_name, downward("NODE_NAME")),
+                ("host ip", &k.host_ip, downward("HOST_IP")),
+                (
+                    "host network",
+                    &k.host_network,
+                    "unknown (needs both HOST_IP and POD_IP)".to_owned(),
+                ),
+                ("service host", &k.service_host, "unknown".to_owned()),
+                ("service port", &k.service_port, "unknown".to_owned()),
+                (
+                    "cluster dns",
+                    &k.cluster_dns,
+                    "unknown (resolv.conf has no cluster search path)".to_owned(),
+                ),
+                (
+                    "cluster domain",
+                    &k.cluster_domain,
+                    "unknown (resolv.conf has no cluster search path)".to_owned(),
+                ),
+            ];
+            for (label, fact, missing) in rows {
+                row(&mut out, label, fact_or(fact, &missing, whole));
+            }
+        }
+        let evidence: Vec<&String> = c.evidence.iter().chain(&k.evidence).collect();
+        if !evidence.is_empty() {
+            out.push_str("evidence\n");
+            for line in evidence {
+                out.push_str(&format!("  - {line}\n"));
+            }
+        }
+        out.push_str(
+            "\"declared\" values were handed to this process (environment, files an orchestrator wrote); \"observed\" ones were measured here.\n",
+        );
+        out
+    }
+}
+
+fn row(out: &mut String, label: &str, value: String) {
+    out.push_str(&format!("{label:<15}{value}\n"));
+}
+
+fn short_id(text: &str) -> String {
+    let short: String = text.chars().take(12).collect();
+    if short.len() < text.len() {
+        format!("{short}...")
+    } else {
+        short
+    }
+}
+
+fn whole(text: &str) -> String {
+    text.to_owned()
+}
+
+fn fact_or(fact: &Option<Fact>, missing: &str, shorten: fn(&str) -> String) -> String {
+    match fact {
+        Some(fact) => format!(
+            "{}  ({}: {})",
+            shorten(&fact.text()),
+            fact.basis.as_str(),
+            fact.source
+        ),
+        None => missing.to_owned(),
     }
 }
 
