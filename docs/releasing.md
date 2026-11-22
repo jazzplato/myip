@@ -19,7 +19,7 @@ A release is built by [`release.yml`](../.github/workflows/release.yml) from a `
        --source-ref "refs/tags/v$VERSION" --deny-self-hosted-runners
    done
    ```
-5. Edit the notes from `CHANGELOG.md`, then publish the draft. Then run `cargo publish` yourself, from the tagged commit (`git switch --detach "v$VERSION"`).
+5. Edit the notes from `CHANGELOG.md`, then publish the draft. Then run `cargo publish` yourself from your checkout (step 4 left you in the download directory), on the tagged commit: `cd <your checkout> && git switch --detach "v$VERSION" && cargo publish --locked`.
 6. After publishing: check that `cargo install myip --version "$VERSION" --locked` works in a clean container, close the release issue and the milestone, and leave `Cargo.toml` alone (there is no `-dev` bump; the next release PR sets the next version).
 
 ## Dry run

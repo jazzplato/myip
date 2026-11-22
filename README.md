@@ -5,11 +5,11 @@ A small command line tool that answers "where am I on the network, and what will
 
 ## Install
 
-Download the archive for your platform from the [latest release](https://github.com/jazzplato/myip/releases/latest): Linux x86_64 and aarch64 (static musl), macOS x86_64 and aarch64, Windows x86_64. Check it before you run it:
+Download the archive for your platform from the [latest release](https://github.com/jazzplato/myip/releases/latest) together with `SHA256SUMS`: Linux x86_64 and aarch64 (static musl), macOS x86_64 and aarch64, Windows x86_64. Check the archive before you run it (the file name below is an example; use the one you downloaded):
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS     # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
-gh attestation verify myip-v*-<target>.tar.gz -R jazzplato/myip
+gh attestation verify myip-v0.1.0-x86_64-unknown-linux-musl.tar.gz -R jazzplato/myip
 ```
 
 The binaries are not notarized. If macOS refuses one that a browser downloaded, run `xattr -d com.apple.quarantine myip`; `gh release download` and `curl` do not set that flag. Or build from crates.io (needs Rust 1.85 or newer):
