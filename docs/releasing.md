@@ -3,7 +3,7 @@
 A release is built by [`release.yml`](../.github/workflows/release.yml) from a `v*` tag. The workflow only ever creates a **draft** GitHub Release; publishing it, and `cargo publish`, are maintainer actions.
 
 ## Cut a release
-1. Merge the release PR: it bumps `version` in `Cargo.toml` and updates `CHANGELOG.md`. The tag must be on `master`.
+1. Merge the release PR: it sets `version` in `Cargo.toml` (and the matching `Cargo.lock` entry) and gives `CHANGELOG.md` a `## [X.Y.Z] - YYYY-MM-DD` section (the day you tag) plus the compare links at the bottom, with `## [Unreleased]` left empty above it. The tag must be on `master`. Before you tag, check that `ci-gate` is green on master, that no Dependabot PR you want in this release is still open, and that `cargo package --locked --list` shows what you expect.
 2. Tag the merge commit and push the tag (the `release-tags` ruleset makes it immutable, so check the version first):
    ```sh
    git tag "v$VERSION" <commit-on-master> && git push origin "v$VERSION"
@@ -19,7 +19,8 @@ A release is built by [`release.yml`](../.github/workflows/release.yml) from a `
        --source-ref "refs/tags/v$VERSION" --deny-self-hosted-runners
    done
    ```
-5. Edit the notes from `CHANGELOG.md`, then publish the draft. Then run `cargo publish` yourself.
+5. Edit the notes from `CHANGELOG.md`, then publish the draft. Then run `cargo publish` yourself, from the tagged commit (`git switch --detach "v$VERSION"`).
+6. After publishing: check that `cargo install myip --version "$VERSION" --locked` works in a clean container, close the release issue and the milestone, and leave `Cargo.toml` alone (there is no `-dev` bump; the next release PR sets the next version).
 
 ## Dry run
 Actions -> Release -> Run workflow on any branch. It verifies the tag/version rule and `cargo publish --dry-run --locked`, builds all five targets, and produces `SHA256SUMS`, then stops: no release and no attestation are created. The optional `tag` input simulates a tag; anything but `v<Cargo.toml version>` must fail the run.

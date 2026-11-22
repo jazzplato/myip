@@ -4,10 +4,12 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-11
+## [0.1.0] - 2026-11-22
 
 ### Changed (behavior differences from 0.0.1)
 
+- HTTPS uses [ureq](https://crates.io/crates/ureq) with rustls and the operating system's trust store instead of reqwest 0.9 with the platform TLS library (OpenSSL on Linux), so the Linux release binaries are static. `SSL_CERT_FILE` and `SSL_CERT_DIR` are honored. As with 0.0.1, an image without a CA bundle (`scratch`, a slim image without `ca-certificates`) cannot make HTTPS requests.
+- Builds with Rust 1.85 or newer (edition 2024); 0.0.1 used edition 2018.
 - Errors go to stderr with a non-zero exit code; stdout carries only the answer. Previously some failures printed an error body to stdout and exited 0.
 - A non-2xx answer from ipinfo.io is an error (exit 1), including 404 for an unknown field.
 - An HTML response (a captive portal or proxy page) is an error instead of being printed.
@@ -21,6 +23,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
+- Release binaries for Linux (x86_64 and aarch64, static musl), macOS (x86_64 and aarch64) and Windows (x86_64) on the GitHub Releases page, with `SHA256SUMS` and a build provenance attestation for each file (see [docs/releasing.md](docs/releasing.md)).
 - `myip public`: the public address from six providers in a fixed order (one.one.one.one, api64.ipify.org, checkip.amazonaws.com, icanhazip.com, ident.me, ipinfo.io). A timeout, a non-2xx answer, a body over 4 KiB, an HTML page, or an answer that is not exactly one public address of the requested family is an error and the next provider is asked; if all fail the exit code is 1 and every attempt is listed on stderr.
 - `myip public --verify`: asks all providers concurrently and cross-checks them per address family. At least two agreeing answers in a family verify it (exit 0); a split exits 3 and lists who said what on stdout; fewer than two answers in every family exits 1.
 - `myip --json public`: one compact JSON line (`schema_version` 1) with the headline answer, every attempt and, with `--verify`, the per-family result.
@@ -41,8 +44,14 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Library plus thin binary, with the HTTP layer behind a trait so every behavior above is tested without the network. The trait is now `Sync` and the test double `RouteFetch` answers per URL, which lets the concurrent `--verify` path be tested. The interfaces, the environment and the egress probe are traits too, so `local`, `where` and `all` are tested against fixtures.
 - A pure address classifier (`net::classify`, `Scope`) that tells loopback, link-local, private, CGNAT, unique-local, multicast, unspecified, documentation and global addresses apart; `public` uses it to reject non-public answers and `local` to label interface addresses.
 - A small dependency-free JSON writer (`json::Json`) with insertion-ordered objects.
-- CI on Linux, macOS and Windows, plus a minimum-supported-Rust-version check, clippy, rustfmt, cargo-deny, CodeQL and a package check.
+- CI on Linux, macOS and Windows, plus a minimum-supported-Rust-version check, clippy, rustfmt, cargo-deny, CodeQL, dependency review and a package check.
+- The toolchain is pinned in `rust-toolchain.toml` (1.100.0 at this release) and Dependabot keeps it, the cargo dependencies and the GitHub Actions up to date.
+- A tag-triggered release workflow that builds the five binaries, checks that the tag equals the `Cargo.toml` version and that `cargo publish --dry-run` passes, and creates a draft release; a maintainer publishes it.
 
 ## [0.0.1] - 2019
 
 - Initial version: prints the body of `https://ipinfo.io/<FIELD>`.
+
+[Unreleased]: https://github.com/jazzplato/myip/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jazzplato/myip/compare/v0.0.1...v0.1.0
+[0.0.1]: https://github.com/jazzplato/myip/releases/tag/v0.0.1

@@ -9,8 +9,8 @@ readme = "README.md"
 homepage = "https://github.com/jazzplato/myip"
 repository = "https://github.com/jazzplato/myip"
 documentation = "https://github.com/jazzplato/myip"
-description = "A simple command line tool to get the ip related information for your host."
-keywords = ["ip", "cli", "network"]
+description = "Where am I on the network, and what will others see? Public IP from several providers, local interfaces, and container or Kubernetes identity."
+keywords = ["ip", "cli", "network", "kubernetes", "container"]
 categories = ["command-line-utilities", "network-programming"]
 exclude = [".github/", "deny.toml", "rust-toolchain.toml"]
 
