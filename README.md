@@ -124,7 +124,7 @@ myip 8.8.8.8/org
 myip 'json?token=YOUR_TOKEN'
 ```
 
-A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v` and error messages show `?token=***`. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
+A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
 
 > To get full information in JSON format
 

@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn a_query_value_is_never_echoed_in_usage_errors() {
         const SECRET: &str = "S3CR3T";
-        let cases: [&[&str]; 9] = [
+        let cases: [&[&str]; 8] = [
             &["json?token=S3CR3T\"x"],
             &["json?token=S3CR3T#f"],
             &["json?token=S3CR3T x"],
@@ -629,7 +629,6 @@ mod tests {
             &["local", "json?token=S3CR3T"],
             &["--timeout", "x?token=S3CR3T"],
             &["--timeout=x?token=S3CR3T"],
-            &["--no-such-flag?token=S3CR3T"],
         ];
         for args in cases {
             let fetch = no_network();
@@ -639,6 +638,10 @@ mod tests {
             assert!(err.contains("?token=***"), "{args:?}: {err}");
             assert!(requested(&fetch).is_empty(), "{args:?}");
         }
+        // clap cuts an unknown long flag at `=`, so only the name is echoed.
+        let (code, out, err) = exec(&no_network(), &["--no-such-flag?token=S3CR3T"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(!format!("{out}{err}").contains(SECRET), "{err}");
     }
 
     #[test]
