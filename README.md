@@ -3,6 +3,21 @@ A small command line tool that answers "where am I on the network, and what will
 
 `myip public` asks several independent providers for your public address, falls back when one is down, and can cross-check them. `myip local` lists this machine's network interfaces and says which address is which, and `myip where` tells you whether the process runs on a host, in a container or in a Kubernetes pod. `myip all` shows the three together. Without a subcommand `myip` still prints what [ipinfo.io](https://ipinfo.io) says about your address. The contract these commands follow is [ADR 0001](docs/adr/0001-product-scope-and-cli-contract.md).
 
+## Install
+
+Download the archive for your platform from the [latest release](https://github.com/jazzplato/myip/releases/latest) together with `SHA256SUMS`: Linux x86_64 and aarch64 (static musl), macOS x86_64 and aarch64, Windows x86_64. Check the archive before you run it (the file name below is an example; use the one you downloaded):
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS     # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+gh attestation verify myip-v0.1.0-x86_64-unknown-linux-musl.tar.gz -R jazzplato/myip
+```
+
+The binaries are not notarized. If macOS refuses one that a browser downloaded, run `xattr -d com.apple.quarantine myip`; `gh release download` and `curl` do not set that flag. Or build from crates.io (needs Rust 1.85 or newer):
+
+```sh
+cargo install myip --locked
+```
+
 ## Usage
 
 ```
