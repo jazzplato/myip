@@ -92,7 +92,7 @@ myip --json public
 
 ### ipinfo.io lookup
 
-`FIELD` is an ipinfo.io path: `ip`, `city`, `region`, `country`, `loc`, `org`, `postal`, `timezone`, `8.8.8.8/org`, and so on. Without it you get the full JSON.
+`FIELD` is an ipinfo.io path, optionally followed by a `?query`: `ip`, `city`, `region`, `country`, `loc`, `org`, `postal`, `timezone`, `8.8.8.8/org`, `json?token=...`, and so on. Without it you get the full JSON.
 
 > To get your public ip
 
@@ -117,6 +117,14 @@ Chicago
 ```bash
 myip 8.8.8.8/org
 ```
+
+> To use an ipinfo.io access token
+
+```bash
+myip 'json?token=YOUR_TOKEN'
+```
+
+A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
 
 > To get full information in JSON format
 

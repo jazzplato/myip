@@ -49,6 +49,35 @@ fn an_invalid_field_exits_2_without_touching_the_network() {
     assert!(text(&out.stderr).contains("error:"));
 }
 
+#[test]
+fn a_query_is_accepted_but_its_value_is_never_printed() {
+    // A proxy that hangs up on every connection makes the real transport fail without
+    // leaving the machine, whatever else listens on this host.
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in proxy.incoming() {
+            drop(stream);
+        }
+    });
+    let out = myip(&[
+        "-v",
+        "--timeout",
+        "2",
+        "--proxy",
+        &proxy_url,
+        "json?token=S3CR3T",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("https://ipinfo.io/json?token=***"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("S3CR3T"), "{stderr}");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_non_unicode_argument_exits_2_and_is_never_echoed() {

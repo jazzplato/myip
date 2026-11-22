@@ -5,12 +5,16 @@ use std::time::Duration;
 use crate::Context;
 use crate::cli::Options;
 use crate::http::{FetchError, FetchOptions, Response};
-use crate::redact::redact_userinfo;
+use crate::redact::{redact_query, redact_userinfo};
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
 const DEFAULT_FIELD: &str = "json";
 const MAX_BODY_BYTES: usize = 1 << 20;
 const MAX_DETAIL_CHARS: usize = 200;
+
+fn redact_credentials(text: &str) -> String {
+    redact_query(&redact_userinfo(text))
+}
 
 pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 {
     let fetch_options = FetchOptions {
@@ -22,7 +26,8 @@ pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 
     };
     let url = format!("{URL_IPINFO}{}", field.unwrap_or(DEFAULT_FIELD));
     if options.verbose {
-        let _ = writeln!(ctx.err, "myip: GET {url}");
+        // FIELD may carry an access token as a query parameter.
+        let _ = writeln!(ctx.err, "myip: GET {}", redact_query(&url));
     }
 
     let response = match ctx.fetch.get(&url, &fetch_options) {
@@ -52,7 +57,7 @@ fn print_line(ctx: &mut Context<'_>, body: &str) -> u8 {
 }
 
 fn fail(ctx: &mut Context<'_>, message: &str) -> u8 {
-    let _ = writeln!(ctx.err, "myip: {}", redact_userinfo(message));
+    let _ = writeln!(ctx.err, "myip: {}", redact_credentials(message));
     1
 }
 
@@ -122,10 +127,10 @@ fn skip_blank(s: &str) -> &str {
 }
 
 /// The body on one line, bounded, so an error message stays readable. Credentials are
-/// redacted before truncating, otherwise a cut between the userinfo and the `@` would
-/// leave the secret prefix unredactable.
+/// redacted before truncating, otherwise a cut between the userinfo and the `@` (or
+/// inside a query value) would leave the secret prefix unredactable.
 pub(crate) fn detail(body: &str) -> String {
-    let flat = redact_userinfo(&body.split_whitespace().collect::<Vec<_>>().join(" "));
+    let flat = redact_credentials(&body.split_whitespace().collect::<Vec<_>>().join(" "));
     let mut chars = flat.chars();
     let shown: String = chars.by_ref().take(MAX_DETAIL_CHARS).collect();
     if chars.next().is_some() {

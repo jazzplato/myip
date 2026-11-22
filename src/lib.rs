@@ -61,7 +61,10 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             Ok(cli) => cli,
             Err(e) => {
                 // `--help` and `--version` arrive here too; clap says which stream they belong on.
-                let rendered = redact::redact_userinfo(&e.render().to_string());
+                let rendered = redact::redact_arg_queries(
+                    &redact::redact_userinfo(&e.render().to_string()),
+                    args,
+                );
                 let sink = if e.use_stderr() {
                     &mut ctx.err
                 } else {
@@ -297,15 +300,27 @@ mod tests {
             "foo bar",
             "a/../b",
             "..",
-            "x?y=1",
             "x#f",
             "caf\u{e9}",
             "a\nb",
             "a\\b",
-            "/city",
             "//example.com",
+            "///x",
             "a//b",
+            "/",
+            "?",
+            "ip?x=1#f",
+            "ip??x=1",
+            "ip?x=1?y=2",
+            "ip?x=a b",
+            "ip?x=\"1\"",
+            "ip?x=a/b",
+            "ip?x=\u{e9}",
+            "a/../b?x=1",
+            "..?x=1",
+            "//evil.example?x=1",
             "https://example.com",
+            "https://evil.example?x=1",
             "file:///etc/passwd",
         ];
         for field in cases {
@@ -354,6 +369,18 @@ mod tests {
             ("8.8.8.8/org", "https://ipinfo.io/8.8.8.8/org"),
             ("2001:db8::1", "https://ipinfo.io/2001:db8::1"),
             (" 8.8.8.8\n", "https://ipinfo.io/8.8.8.8"),
+            ("/ip", "https://ipinfo.io/ip"),
+            ("json?token=abc123", "https://ipinfo.io/json?token=abc123"),
+            (
+                "8.8.8.8/org?token=abc",
+                "https://ipinfo.io/8.8.8.8/org?token=abc",
+            ),
+            ("?token=abc", "https://ipinfo.io/?token=abc"),
+            ("ip?", "https://ipinfo.io/ip"),
+            (
+                "ip?a=1&b=x%20y+z,w:v~._-",
+                "https://ipinfo.io/ip?a=1&b=x%20y+z,w:v~._-",
+            ),
         ];
         for (field, url) in cases {
             let fetch = FakeFetch::new(vec![ok(200, "x")]);
@@ -361,6 +388,56 @@ mod tests {
             assert_eq!(code, 0, "{field:?}: {err}");
             assert_eq!(requested(&fetch), [url], "{field:?}");
         }
+    }
+
+    #[test]
+    fn a_query_value_is_never_printed() {
+        const SECRET: &str = "tok3n-S3CRET";
+
+        // The verbose request line shows the parameter names only.
+        let fetch = FakeFetch::new(vec![ok(200, "1.2.3.4\n")]);
+        let (code, out, err) = exec(&fetch, &["-v", &format!("ip?token={SECRET}&x=1")]);
+        assert_eq!((code, out.as_str()), (0, "1.2.3.4\n"));
+        assert!(
+            err.contains("https://ipinfo.io/ip?token=***&x=***"),
+            "{err}"
+        );
+        assert!(!err.contains(SECRET), "{err}");
+
+        // So does a bare token.
+        let fetch = FakeFetch::new(vec![ok(200, "1.2.3.4\n")]);
+        let (_, _, err) = exec(&fetch, &["-v", &format!("?{SECRET}")]);
+        assert!(err.contains("https://ipinfo.io/?***"), "{err}");
+        assert!(!err.contains(SECRET), "{err}");
+
+        // A transport error may quote the URL it was fetching.
+        let url = format!("https://ipinfo.io/json?token={SECRET}");
+        let fetch = FakeFetch::new(vec![Err(FetchError::Transport(format!(
+            "GET {url} failed"
+        )))]);
+        let (code, out, err) = exec(&fetch, &[&format!("json?token={SECRET}")]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(
+            err.contains("GET https://ipinfo.io/json?token=***"),
+            "{err}"
+        );
+        assert!(!err.contains(SECRET), "{err}");
+
+        // An error body may quote it too.
+        let body = format!("{{\"error\":\"bad {url}\"}}");
+        let fetch = FakeFetch::new(vec![ok(403, &body)]);
+        let (code, out, err) = exec(&fetch, &[&format!("json?token={SECRET}")]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTTP 403"), "{err}");
+        assert!(!err.contains(SECRET), "{err}");
+    }
+
+    #[test]
+    fn a_successful_body_is_passed_through_even_if_it_contains_a_url_query() {
+        let body = "{\"readme\":\"https://ipinfo.io/missingauth?a=b\"}\n";
+        let fetch = FakeFetch::new(vec![ok(200, body)]);
+        let (code, out, _) = exec(&fetch, &["json?token=abc"]);
+        assert_eq!((code, out.as_str()), (0, body));
     }
 
     #[test]
@@ -538,6 +615,33 @@ mod tests {
                 assert!(requested(&fetch).is_empty(), "{args:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_query_value_is_never_echoed_in_usage_errors() {
+        const SECRET: &str = "S3CR3T";
+        let cases: [&[&str]; 8] = [
+            &["json?token=S3CR3T\"x"],
+            &["json?token=S3CR3T#f"],
+            &["json?token=S3CR3T x"],
+            &["json?token=S3CR3T/x"],
+            &["ip", "json?token=S3CR3T"],
+            &["local", "json?token=S3CR3T"],
+            &["--timeout", "x?token=S3CR3T"],
+            &["--timeout=x?token=S3CR3T"],
+        ];
+        for args in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!(code, 2, "{args:?}: {err}");
+            assert!(!format!("{out}{err}").contains(SECRET), "{args:?}: {err}");
+            assert!(err.contains("?token=***"), "{args:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{args:?}");
+        }
+        // clap cuts an unknown long flag at `=`, so only the name is echoed.
+        let (code, out, err) = exec(&no_network(), &["--no-such-flag?token=S3CR3T"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(!format!("{out}{err}").contains(SECRET), "{err}");
     }
 
     #[test]
