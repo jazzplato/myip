@@ -51,13 +51,21 @@ fn an_invalid_field_exits_2_without_touching_the_network() {
 
 #[test]
 fn a_query_is_accepted_but_its_value_is_never_printed() {
-    // A refused local proxy makes the real transport fail without leaving the machine.
+    // A proxy that hangs up on every connection makes the real transport fail without
+    // leaving the machine, whatever else listens on this host.
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in proxy.incoming() {
+            drop(stream);
+        }
+    });
     let out = myip(&[
         "-v",
         "--timeout",
         "2",
         "--proxy",
-        "http://127.0.0.1:9",
+        &proxy_url,
         "json?token=S3CR3T",
     ]);
     assert_eq!(out.status.code(), Some(1));

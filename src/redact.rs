@@ -127,6 +127,24 @@ mod tests {
     }
 
     #[test]
+    fn a_fragment_does_not_hide_a_later_url_in_the_same_word() {
+        for (input, want) in [
+            (
+                r#"{"help":"https://ipinfo.io/?page=1#auth","url":"https://ipinfo.io/json?token=S3CR3T"}"#,
+                r#"{"help":"https://ipinfo.io/?page=***#auth","url":"https://ipinfo.io/json?token=***"#,
+            ),
+            (
+                "https://a/?x=1#f1,https://b/?y=2#f2,https://c/?z=S3CR3T",
+                "https://a/?x=***#f1,https://b/?y=***#f2,https://c/?z=***",
+            ),
+        ] {
+            let got = redact_query(input);
+            assert_eq!(got, want, "{input}");
+            assert!(!got.contains("S3CR3T"), "{got}");
+        }
+    }
+
+    #[test]
     fn text_without_a_url_query_is_unchanged_by_redact_query() {
         for input in [
             "",
