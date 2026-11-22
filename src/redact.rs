@@ -26,8 +26,52 @@ pub fn redact_userinfo(text: &str) -> String {
     out
 }
 
+/// Replaces the value of every query parameter of every `scheme://...?query` in `text`
+/// with `***`; a parameter without `=` is replaced whole.
+///
+/// Like `redact_userinfo`, the URL is taken to extend to the next whitespace, so a
+/// closing quote after it is swallowed: over-redacting is the safe direction. A
+/// `#fragment` ends the query and is kept. Text outside a `scheme://` URL is untouched.
 pub fn redact_query(text: &str) -> String {
-    text.to_owned()
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        out.push_str(head);
+        let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+        let (url, after) = tail.split_at(end);
+        match url.split_once('?') {
+            Some((path, query_and_fragment)) => {
+                let (query, fragment) = match query_and_fragment.find('#') {
+                    Some(i) => query_and_fragment.split_at(i),
+                    None => (query_and_fragment, ""),
+                };
+                out.push_str(path);
+                out.push('?');
+                let mut pairs = query.split('&').map(redact_pair);
+                if let Some(first) = pairs.next() {
+                    out.push_str(&first);
+                    for pair in pairs {
+                        out.push('&');
+                        out.push_str(&pair);
+                    }
+                }
+                out.push_str(fragment);
+            }
+            None => out.push_str(url),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn redact_pair(pair: &str) -> String {
+    match pair.split_once('=') {
+        Some((name, _)) => format!("{name}=***"),
+        None if pair.is_empty() => String::new(),
+        None => "***".to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -28,7 +28,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// ipinfo.io path to print, e.g. ip, city, 8.8.8.8/org
+    /// ipinfo.io path to print, e.g. ip, city, 8.8.8.8/org, json?token=TOKEN
     #[arg(value_name = "FIELD", value_parser = parse_field)]
     pub field: Option<String>,
 }
@@ -130,20 +130,28 @@ impl Command {
 }
 
 /// A FIELD is appended to `https://ipinfo.io/`, so it must stay a relative path: only
-/// characters that need no escaping, never a leading `/` or a `//` (which would turn
-/// the host into whatever follows), and no `..`.
+/// characters that need no escaping, never more than one leading `/` (which is dropped,
+/// as 0.0.1 sent it to the same effect) or a `//` (which would turn the host into
+/// whatever follows), and no `..`. It may end in a `?query`, such as ipinfo's
+/// `?token=...`: the query follows the first `?`, so it cannot change the host or the
+/// path, and a second `?`, a `#` and every other unescaped character are rejected.
 fn parse_field(raw: &str) -> Result<String, String> {
     let field = raw.trim();
-    if field.is_empty() {
+    let (path, query) = match field.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (field, ""),
+    };
+    let path = path.strip_prefix('/').unwrap_or(path);
+    if path.is_empty() && query.is_empty() {
         return Err("must not be empty".to_owned());
     }
-    if field.contains("..") {
+    if path.contains("..") {
         return Err("must not contain `..`".to_owned());
     }
-    if field.starts_with('/') || field.contains("//") {
-        return Err("must be a relative path without a leading `/` or `//`".to_owned());
+    if path.starts_with('/') || path.contains("//") {
+        return Err("must be a relative path without a leading `//` or any `//`".to_owned());
     }
-    if let Some(bad) = field
+    if let Some(bad) = path
         .chars()
         .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '-')))
     {
@@ -151,7 +159,19 @@ fn parse_field(raw: &str) -> Result<String, String> {
             "unsupported character {bad:?}; allowed: letters, digits and . _ : / -"
         ));
     }
-    Ok(field.to_owned())
+    if let Some(bad) = query.chars().find(|c| {
+        !(c.is_ascii_alphanumeric()
+            || matches!(c, '.' | '_' | '~' | '-' | '%' | '=' | '&' | '+' | ',' | ':'))
+    }) {
+        return Err(format!(
+            "unsupported character {bad:?} in the query; allowed: letters, digits and . _ ~ - % = & + , :"
+        ));
+    }
+    Ok(if query.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{query}")
+    })
 }
 
 fn proxy_mode(raw: &str) -> Option<ProxyMode> {

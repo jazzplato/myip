@@ -11,7 +11,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 - Errors go to stderr with a non-zero exit code; stdout carries only the answer. Previously some failures printed an error body to stdout and exited 0.
 - A non-2xx answer from ipinfo.io is an error (exit 1), including 404 for an unknown field.
 - An HTML response (a captive portal or proxy page) is an error instead of being printed.
-- `FIELD` is validated: letters, digits and `. _ : / -` only, not empty, no `..`, no leading `/`, no `//`. Anything else is a usage error (exit 2) and no request is made. `myip ip city` (two fields) is now a usage error; run `myip city`.
+- `FIELD` is validated: the path may use letters, digits and `. _ : / -` only, no `..`, no `//`; one leading `/` is accepted and dropped, and a `?query` of letters, digits and `. _ ~ - % = & + , :` may follow (ipinfo.io's `?token=...`). Query values are never printed: `-v` and error messages show `?token=***`. Anything else, including an empty FIELD, is a usage error (exit 2) and no request is made. `myip ip city` (two fields) is now a usage error; run `myip city`.
 - The output always ends with a newline.
 - The default timeout is 10 seconds (was 30) and is configurable with `--timeout`.
 - The response size cap is 1 MiB (was 10 MiB).
