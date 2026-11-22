@@ -31,7 +31,9 @@ pub fn redact_userinfo(text: &str) -> String {
 ///
 /// Like `redact_userinfo`, the URL is taken to extend to the next whitespace, so a
 /// closing quote after it is swallowed: over-redacting is the safe direction. A
-/// `#fragment` ends the query and is kept. Text outside a `scheme://` URL is untouched.
+/// `#fragment` ends the query and is kept, but it is scanned again because compact
+/// JSON can put another URL behind it in the same word. Text outside a `scheme://` URL
+/// is untouched.
 pub fn redact_query(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -39,8 +41,8 @@ pub fn redact_query(text: &str) -> String {
         let (head, tail) = rest.split_at(at + 3);
         out.push_str(head);
         let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
-        let (url, after) = tail.split_at(end);
-        match url.split_once('?') {
+        let url = &tail[..end];
+        let resume = match url.split_once('?') {
             Some((path, query_and_fragment)) => {
                 let (query, fragment) = match query_and_fragment.find('#') {
                     Some(i) => query_and_fragment.split_at(i),
@@ -56,11 +58,14 @@ pub fn redact_query(text: &str) -> String {
                         out.push_str(&pair);
                     }
                 }
-                out.push_str(fragment);
+                end - fragment.len()
             }
-            None => out.push_str(url),
-        }
-        rest = after;
+            None => {
+                out.push_str(url);
+                end
+            }
+        };
+        rest = &tail[resume..];
     }
     out.push_str(rest);
     out
