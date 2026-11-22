@@ -61,7 +61,10 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             Ok(cli) => cli,
             Err(e) => {
                 // `--help` and `--version` arrive here too; clap says which stream they belong on.
-                let rendered = redact::redact_userinfo(&e.render().to_string());
+                let rendered = redact::redact_arg_queries(
+                    &redact::redact_userinfo(&e.render().to_string()),
+                    args,
+                );
                 let sink = if e.use_stderr() {
                     &mut ctx.err
                 } else {
@@ -611,6 +614,30 @@ mod tests {
                 assert!(err.contains("--proxy"), "{args:?}: {err}");
                 assert!(requested(&fetch).is_empty(), "{args:?}");
             }
+        }
+    }
+
+    #[test]
+    fn a_query_value_is_never_echoed_in_usage_errors() {
+        const SECRET: &str = "S3CR3T";
+        let cases: [&[&str]; 9] = [
+            &["json?token=S3CR3T\"x"],
+            &["json?token=S3CR3T#f"],
+            &["json?token=S3CR3T x"],
+            &["json?token=S3CR3T/x"],
+            &["ip", "json?token=S3CR3T"],
+            &["local", "json?token=S3CR3T"],
+            &["--timeout", "x?token=S3CR3T"],
+            &["--timeout=x?token=S3CR3T"],
+            &["--no-such-flag?token=S3CR3T"],
+        ];
+        for args in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!(code, 2, "{args:?}: {err}");
+            assert!(!format!("{out}{err}").contains(SECRET), "{args:?}: {err}");
+            assert!(err.contains("?token=***"), "{args:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{args:?}");
         }
     }
 

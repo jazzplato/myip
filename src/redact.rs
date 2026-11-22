@@ -74,6 +74,32 @@ fn redact_pair(pair: &str) -> String {
     }
 }
 
+/// Replaces the query of every `?query` that one of `args` carries, wherever `text`
+/// quotes it, with the same masking as `redact_query`.
+///
+/// clap echoes a rejected or unexpected argument verbatim and without a `scheme://`,
+/// so `redact_query` cannot see it. Longer queries go first so that one that is a prefix
+/// of another cannot leave the tail of the longer one behind.
+pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
+    let mut queries: Vec<&str> = args
+        .iter()
+        .filter_map(|arg| arg.split_once('?'))
+        .map(|(_, query)| query)
+        .filter(|query| !query.is_empty())
+        .collect();
+    queries.sort_by_key(|query| std::cmp::Reverse(query.len()));
+    let mut out = text.to_owned();
+    for query in queries {
+        let masked = query
+            .split('&')
+            .map(redact_pair)
+            .collect::<Vec<_>>()
+            .join("&");
+        out = out.replace(&format!("?{query}"), &format!("?{masked}"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +140,61 @@ mod tests {
             "://",
         ] {
             assert_eq!(redact_query(input), input, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_query_an_argument_carries_is_masked_wherever_the_text_quotes_it() {
+        fn args(list: &[&str]) -> Vec<String> {
+            list.iter().map(|a| (*a).to_owned()).collect()
+        }
+        for (text, list, want) in [
+            (
+                "error: invalid value 'json?token=abc' for '[FIELD]'",
+                &["json?token=abc"][..],
+                "error: invalid value 'json?token=***' for '[FIELD]'",
+            ),
+            (
+                "unexpected argument 'x?a=1&b=2' found",
+                &["ip", "x?a=1&b=2"],
+                "unexpected argument 'x?a=***&b=***' found",
+            ),
+            ("bad 'x?abc'", &["x?abc"], "bad 'x?***'"),
+            ("bad 'x?abc\"d'", &["x?abc\"d"], "bad 'x?***'"),
+            ("bad 'x?t=1#f'", &["x?t=1#f"], "bad 'x?t=***'"),
+            (
+                "'--timeout=x?t=abc' and 'a?t=abc'",
+                &["--timeout=x?t=abc", "a?t=abc"],
+                "'--timeout=x?t=***' and 'a?t=***'",
+            ),
+            // One query a prefix of another: the longer one is masked first.
+            (
+                "'a?t=ab' 'a?t=abc'",
+                &["a?t=ab", "a?t=abc"],
+                "'a?t=***' 'a?t=***'",
+            ),
+            (
+                "'a?t=abc' 'a?t=ab'",
+                &["a?t=ab", "a?t=abc"],
+                "'a?t=***' 'a?t=***'",
+            ),
+        ] {
+            let got = redact_arg_queries(text, &args(list));
+            assert_eq!(got, want, "{text}");
+        }
+    }
+
+    #[test]
+    fn text_is_unchanged_when_no_argument_carries_a_query() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        for (text, list) in [
+            ("usage: myip [OPTIONS] [FIELD]", &["--help"][..]),
+            ("a ? b", &["ip", "city"]),
+            ("'ip?' is fine", &["ip?"]),
+            ("'?' is fine", &["?"]),
+            ("", &[]),
+        ] {
+            assert_eq!(redact_arg_queries(text, &args(list)), text, "{text}");
         }
     }
 
