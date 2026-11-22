@@ -26,9 +26,52 @@ pub fn redact_userinfo(text: &str) -> String {
     out
 }
 
+pub fn redact_query(text: &str) -> String {
+    text.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_values_are_replaced_and_the_rest_is_kept() {
+        for (input, want) in [
+            (
+                "https://ipinfo.io/json?token=abc123",
+                "https://ipinfo.io/json?token=***",
+            ),
+            ("https://h/x?a=1&b=2", "https://h/x?a=***&b=***"),
+            ("https://h/x?abc", "https://h/x?***"),
+            ("https://h/x?a=&b", "https://h/x?a=***&***"),
+            ("https://h/x?a=1#frag", "https://h/x?a=***#frag"),
+            ("GET https://h/x?a=1 failed", "GET https://h/x?a=*** failed"),
+            (
+                "a https://h/?t=1 b http://i/p?u=2&v=3 c",
+                "a https://h/?t=*** b http://i/p?u=***&v=*** c",
+            ),
+            ("https://u:p@h/x?a=1", "https://u:p@h/x?a=***"),
+        ] {
+            assert_eq!(redact_query(input), want, "{input}");
+        }
+    }
+
+    #[test]
+    fn text_without_a_url_query_is_unchanged_by_redact_query() {
+        for input in [
+            "",
+            "plain text",
+            "https://ipinfo.io/ip",
+            "https://h/x?",
+            "https://h/x#frag",
+            "what? yes",
+            "no url ?t=1",
+            "scheme:// then ?t=1",
+            "://",
+        ] {
+            assert_eq!(redact_query(input), input, "{input}");
+        }
+    }
 
     #[test]
     fn userinfo_is_replaced_and_the_rest_is_kept() {
