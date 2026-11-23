@@ -268,7 +268,7 @@ impl Query<'_> {
         match error {
             FetchError::Timeout(_) => format!("timed out after {}s", self.timeout_secs),
             FetchError::TooLarge(_) => format!("answer larger than {MAX_ANSWER_BYTES} bytes"),
-            FetchError::Transport(message) => detail(message),
+            FetchError::Resolve(message) | FetchError::Transport(message) => detail(message),
         }
     }
 }
@@ -304,8 +304,16 @@ mod tests {
         TooBig,
         Timeout,
         Fail(&'static str),
+        /// The host name cannot be resolved, as in a container without a network.
+        Dns,
     }
     use Slot::*;
+
+    /// What `myip public` printed for each provider in a `docker run --network none` run
+    /// (glibc, Debian 13).
+    const NO_DNS: &str =
+        "io: failed to lookup address information: Temporary failure in name resolution";
+    const NOT_ASKED: &str = "not asked: two lookups in a row could not resolve a host name";
 
     /// One slot per provider, in ADR order. Provider 1 speaks the Cloudflare trace format.
     fn board(slots: [Slot; 6]) -> RouteFetch {
@@ -323,6 +331,7 @@ mod tests {
                     TooBig => Err(FetchError::TooLarge(5000)),
                     Timeout => Err(FetchError::Timeout("deadline".to_owned())),
                     Fail(message) => Err(FetchError::Transport(message.to_owned())),
+                    Dns => Err(FetchError::Resolve(NO_DNS.to_owned())),
                 };
                 (provider.url, answer)
             })
@@ -521,6 +530,156 @@ mod tests {
         assert!(!err.contains('\u{1b}') && !err.contains("pwned"), "{err}");
         let (_, out, err) = go(&fetch, &["--json", "public"]);
         assert!(!format!("{out}{err}").contains("pwned"));
+    }
+
+    // ---- no name resolution: stop after two lookups (#38) ----
+
+    #[test]
+    fn two_resolution_failures_in_a_row_stop_the_run_and_list_the_rest_as_not_asked() {
+        let fetch = board(all(Dns));
+        let (code, out, err) = go(&fetch, &["public"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1]));
+        let lines: Vec<&str> = err.lines().collect();
+        assert_eq!(
+            lines[0],
+            "myip: no provider returned a valid public address"
+        );
+        assert_eq!(lines.len(), 7, "{err}");
+        for (line, provider) in lines[1..3].iter().zip(&PROVIDERS) {
+            let want = format!("  {}: {NO_DNS} (", provider.name);
+            assert!(line.starts_with(&want), "{line}");
+        }
+        for (line, provider) in lines[3..].iter().zip(&PROVIDERS[2..]) {
+            assert_eq!(*line, format!("  {}: {NOT_ASKED}", provider.name));
+        }
+    }
+
+    #[test]
+    fn verbose_and_json_also_list_every_provider_the_early_stop_skipped() {
+        let (code, out, err) = go(&board(all(Dns)), &["-v", "public"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        let lines: Vec<&str> = err.lines().collect();
+        assert_eq!(lines.len(), 7, "{err}");
+        assert!(
+            lines[..6].iter().all(|line| line.starts_with("myip: ")),
+            "{err}"
+        );
+        assert!(lines[5].ends_with(&format!(" {NOT_ASKED}")), "{err}");
+
+        let (code, out, _) = go(&board(all(Dns)), &["--json", "public"]);
+        assert_eq!(code, 1);
+        assert!(
+            out.contains(&format!(
+                concat!(
+                    r#"{{"provider":"ipinfo.io","url":"https://ipinfo.io/ip","ip":null,"#,
+                    r#""latency_ms":null,"error":"{}"}}"#
+                ),
+                NOT_ASKED
+            )),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_resolution_failure_followed_by_an_answer_is_printed() {
+        let fetch = board([Dns, Ip(A), Ip(B), Ip(B), Ip(B), Ip(B)]);
+        assert_eq!(
+            go(&fetch, &["public"]),
+            (0, format!("{A}\n"), String::new())
+        );
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1]));
+    }
+
+    #[test]
+    fn a_timeout_between_resolution_failures_resets_the_streak() {
+        let fetch = board([Dns, Timeout, Dns, Timeout, Dns, Timeout]);
+        let (code, out, err) = go(&fetch, &["public"]);
+        assert_eq!((code, out.as_str()), (1, ""), "{err}");
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2, 3, 4, 5]));
+        assert!(!err.contains("not asked"), "{err}");
+    }
+
+    #[test]
+    fn a_timeout_is_not_a_response_so_two_resolution_failures_after_it_still_stop() {
+        let fetch = board([Timeout, Dns, Dns, Ip(A), Ip(A), Ip(A)]);
+        let (code, _, err) = go(&fetch, &["public"]);
+        assert_eq!(code, 1, "{err}");
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2]));
+    }
+
+    #[test]
+    fn other_failures_and_http_answers_never_trigger_the_early_stop() {
+        let others = [
+            Status(503),
+            Fail("tls: peer is incompatible"),
+            Fail("io: Connection refused (os error 111)"),
+            Raw("<html>portal</html>"),
+        ];
+        for other in others {
+            let fetch = board(all(other));
+            assert_eq!(go(&fetch, &["public"]).0, 1);
+            assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2, 3, 4, 5]));
+
+            let fetch = board([Dns, other, Dns, other, Dns, other]);
+            assert_eq!(go(&fetch, &["public"]).0, 1);
+            assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2, 3, 4, 5]));
+        }
+    }
+
+    #[test]
+    fn once_any_provider_has_responded_resolution_failures_no_longer_stop_the_run() {
+        let fetch = board([Status(500), Dns, Dns, Dns, Dns, Ip(A)]);
+        assert_eq!(
+            go(&fetch, &["public"]),
+            (0, format!("{A}\n"), String::new())
+        );
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn under_ipv6_the_providers_without_ipv6_keep_their_own_reason_and_do_not_count() {
+        let fetch = board(all(Dns));
+        let (code, _, err) = go(&fetch, &["-6", "public"]);
+        assert_eq!(code, 1);
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1]));
+        assert!(
+            err.contains("  checkip.amazonaws.com: has no IPv6 address, not asked\n"),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("  icanhazip.com: {NOT_ASKED}\n")),
+            "{err}"
+        );
+
+        // The provider between the two failures was never asked, so it does not break the streak.
+        let fetch = board([Fail("down"), Dns, Dns, Dns, Ip(V6), Ip(V6)]);
+        go(&fetch, &["-6", "public"]);
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1, 3]));
+    }
+
+    #[test]
+    fn verify_still_asks_every_provider_without_name_resolution() {
+        let fetch = board(all(Dns));
+        let (code, out, err) = go(&fetch, &["public", "--verify"]);
+        assert_eq!((code, out.as_str()), (1, ""), "{err}");
+        assert_eq!(
+            sorted(fetch.requested_urls()),
+            sorted(urls(&[0, 1, 2, 3, 4, 5]))
+        );
+        assert!(!err.contains("not asked"), "{err}");
+    }
+
+    #[test]
+    fn all_reports_public_as_unavailable_in_band_after_two_lookups() {
+        let fetch = board(all(Dns));
+        let (code, out, _) = go(&fetch, &["all"]);
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("[public]\n  unavailable: no provider returned a valid public address"),
+            "{out}"
+        );
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1]));
     }
 
     // ---- transport options (AC2) ----

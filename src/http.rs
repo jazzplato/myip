@@ -45,13 +45,16 @@ pub enum FetchError {
     /// Carries the transport's own message (for ureq, `timeout: global`).
     Timeout(String),
     TooLarge(usize),
+    /// The host name could not be resolved: no working DNS, or no such name. Carries the
+    /// transport's own message.
+    Resolve(String),
     Transport(String),
 }
 
 impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Timeout(msg) | Self::Transport(msg) => f.write_str(msg),
+            Self::Timeout(msg) | Self::Resolve(msg) | Self::Transport(msg) => f.write_str(msg),
             Self::TooLarge(limit) => {
                 write!(f, "the response body is larger than request limit: {limit}")
             }
@@ -789,6 +792,62 @@ mod tests {
         });
         let err = UreqFetch
             .get(&format!("http://{addr}"), &opts())
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+    }
+
+    /// std reports a failed `getaddrinfo` as an `io::Error` without an OS code: its own prefix
+    /// and then libc's wording. The first reason is what `docker run --network none` printed.
+    #[test]
+    fn a_failed_name_lookup_is_a_resolution_failure_whatever_libc_says() {
+        for reason in [
+            "Temporary failure in name resolution",
+            "Name or service not known",
+        ] {
+            let text = format!("failed to lookup address information: {reason}");
+            let error = ureq::Error::Io(std::io::Error::other(text.clone()));
+            assert_eq!(map_error(error), FetchError::Resolve(format!("io: {text}")));
+        }
+    }
+
+    #[test]
+    fn other_transport_errors_are_not_resolution_failures() {
+        let not_at_the_start = "read failed: failed to lookup address information: x";
+        for error in [
+            ureq::Error::Io(std::io::Error::from_raw_os_error(111)),
+            ureq::Error::Io(std::io::Error::other(not_at_the_start)),
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+        ] {
+            let mapped = map_error(error);
+            assert!(matches!(mapped, FetchError::Transport(_)), "{mapped:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_connection_is_a_transport_error_not_a_resolution_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = UreqFetch
+            .get(&format!("http://{addr}"), &opts())
+            .unwrap_err();
+        match err {
+            FetchError::Transport(msg) => assert!(msg.contains("refused"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tls_failure_is_a_transport_error_not_a_resolution_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+        });
+        let err = UreqFetch
+            .get(&format!("https://{addr}"), &opts())
             .unwrap_err();
         assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
     }
