@@ -265,6 +265,28 @@ attempts:
 
 In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read as a boolean or a number), `null`, `true`, `false` and integers are bare, and no control character is ever printed raw. `--format` cannot be combined with `--json` (use one of them), and it is a usage error with the ipinfo.io lookup (a FIELD, `public FIELD`, or no command): that answer is ipinfo.io's own body, passed through unchanged. Like the other options, a `--format` given after the command replaces one given before it.
 
+### Colour
+
+`--color auto|always|never` (default `auto`) colours the text of `local`, `where`, `all` and the `--verify` disagreement report. Colour only adds codes around words that are printed anyway: with the codes removed the text is exactly what `--color never` prints, so nothing is said by colour alone.
+
+| Colour | Used for |
+|--------|----------|
+| Bold | Block names (`[public]`, `[local]`, `[where]`, `[highlights]`), field names, interface names, address families in a disagreement report |
+| Dim | Provenance (`(declared: env:POD_IP)`), explanations and footnotes |
+| Green | A verified answer, and the "no NAT" verdict |
+| Yellow | Something unknown, an unverified answer, a guess (`likely virtual`), a translated address (NAT) |
+| Red | A failure (`unavailable`), no answer, and the answer that differs in a disagreement |
+
+`auto` colours only when stdout is a terminal, decided in this order (the first match wins):
+
+1. `NO_COLOR` set to anything non-empty: no colour ([no-color.org](https://no-color.org)).
+2. `CLICOLOR_FORCE` set to anything non-empty but `0`: colour, even into a pipe or a file.
+3. `CLICOLOR=0`: no colour.
+4. `TERM=dumb`: no colour.
+5. Otherwise colour exactly when stdout is a terminal. On Windows that also needs a console known to understand the codes (`WT_SESSION`, `ANSICON`, `ConEmuANSI=ON` or a `TERM`), because `myip` does not switch the console mode.
+
+`--color always` and `--color never` skip all of this and win over the environment; `always` also colours on a Windows console that `auto` would leave plain. The `public` headline (the bare address), the ipinfo.io lookup, every JSON and YAML document, `--help`, `-v` traces and stderr are never coloured, so `myip public` in `$(...)` and pipes always get the plain text. A `--color` given after the command replaces one given before it.
+
 ### Options
 
 | Option | Meaning |
@@ -274,6 +296,7 @@ In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read 
 | `--proxy none\|env\|URL` | `none` (default) ignores proxy environment variables; `env` honors `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`; or give an `http://HOST:PORT` URL |
 | `--json` | With `public`, `local`, `where` and `all`: one line of JSON (see above); the same as `--format json`. For the ipinfo.io lookup it changes nothing, the ipinfo.io body is already passed through unchanged |
 | `--format <FORMAT>` | With `public`, `local`, `where` and `all`: `text` (default), `json`, `json-pretty` or `yaml` (see [Output formats](#output-formats)). Not with `--json`, and not with the ipinfo.io lookup |
+| `--color <WHEN>` | With `local`, `where`, `all` and a `--verify` disagreement report: `auto` (default; a terminal, `NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE` apply), `always` or `never` (see [Colour](#colour)). Never colours a document, the `public` headline, the ipinfo.io lookup, `-v` or stderr |
 | `-v`, `--verbose` | Log requests to stderr; with `local`, `where` and `all`, also log what was read |
 | `--verify` | Only after `public` or `all`: ask all providers and cross-check them |
 Credentials in a proxy URL are never printed. They are visible to other local users on the command line, so prefer `--proxy env`.

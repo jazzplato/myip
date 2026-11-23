@@ -2,6 +2,8 @@
 //! (ADR 0002). Colour is cosmetic: with the codes removed the text is the plain text, byte
 //! for byte, so every span here wraps words that stay.
 
+use std::io::{self, IsTerminal};
+
 use crate::cli::ColorChoice;
 use crate::sanitize;
 
@@ -22,7 +24,9 @@ pub struct Terminal {
 impl Terminal {
     /// The real process.
     pub fn detect() -> Self {
-        Self::default()
+        Self::from_lookup(io::stdout().is_terminal(), cfg!(windows), |name| {
+            std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+        })
     }
 
     /// The facts from a lookup of environment variables; tests pass fixtures.
@@ -31,20 +35,47 @@ impl Terminal {
         windows: bool,
         var: impl Fn(&str) -> Option<String>,
     ) -> Self {
-        let _ = var;
+        let non_empty = |name: &str| var(name).filter(|value| !value.is_empty());
         Self {
             stdout_is_terminal,
             windows,
-            ..Self::default()
+            no_color: non_empty("NO_COLOR").is_some(),
+            force: non_empty("CLICOLOR_FORCE").is_some_and(|value| value != "0"),
+            clicolor_off: var("CLICOLOR").is_some_and(|value| value == "0"),
+            dumb: var("TERM").is_some_and(|value| value == "dumb"),
+            ansi_console: non_empty("WT_SESSION").is_some()
+                || non_empty("ANSICON").is_some()
+                || var("ConEmuANSI").is_some_and(|value| value == "ON")
+                || non_empty("TERM").is_some(),
         }
     }
 }
 
-/// Whether colour is on: the decision order of ADR 0002.
+/// Whether colour is on: the decision order of ADR 0002, first match wins.
 pub fn enabled(choice: ColorChoice, terminal: &Terminal) -> bool {
-    let _ = terminal;
-    choice == ColorChoice::Always
+    match choice {
+        ColorChoice::Always => true,
+        ColorChoice::Never => false,
+        ColorChoice::Auto if terminal.no_color => false,
+        ColorChoice::Auto if terminal.force => true,
+        ColorChoice::Auto if terminal.clicolor_off || terminal.dumb => false,
+        // myip does not switch the Windows console mode, so only a console that is known to
+        // understand the codes gets them on its own.
+        ColorChoice::Auto => {
+            terminal.stdout_is_terminal && (!terminal.windows || terminal.ansi_console)
+        }
+    }
 }
+
+const RESET: &str = "\u{1b}[0m";
+const BOLD: &str = "\u{1b}[1m";
+const DIM: &str = "\u{1b}[2m";
+const RED: &str = "\u{1b}[31m";
+const GREEN: &str = "\u{1b}[32m";
+const YELLOW: &str = "\u{1b}[33m";
+
+/// The only escape sequences this program ever writes.
+const CODES: [&str; 6] = [RESET, BOLD, DIM, RED, GREEN, YELLOW];
 
 /// How text is written: plain, or with ANSI SGR codes around the spans that carry meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,39 +86,70 @@ pub enum Style {
 
 impl Style {
     pub fn choose(choice: ColorChoice, terminal: &Terminal) -> Self {
-        let _ = (choice, terminal);
-        Self::Plain
+        if enabled(choice, terminal) {
+            Self::Ansi
+        } else {
+            Self::Plain
+        }
     }
 
     /// Names of blocks, fields and interfaces.
     pub fn bold(self, text: &str) -> String {
-        text.to_owned()
+        self.span(BOLD, text)
     }
 
     /// Provenance and explanations.
     pub fn dim(self, text: &str) -> String {
-        text.to_owned()
+        self.span(DIM, text)
     }
 
     /// A verified or agreeing answer.
     pub fn good(self, text: &str) -> String {
-        text.to_owned()
+        self.span(GREEN, text)
     }
 
     /// Unverified, unknown, a guess, a translated address.
     pub fn warn(self, text: &str) -> String {
-        text.to_owned()
+        self.span(YELLOW, text)
     }
 
     /// A disagreement, a failure, no answer.
     pub fn bad(self, text: &str) -> String {
-        text.to_owned()
+        self.span(RED, text)
+    }
+
+    /// A span never nests, never holds a newline and is empty text, not a pair of codes.
+    fn span(self, code: &str, text: &str) -> String {
+        match self {
+            Self::Ansi if !text.is_empty() => format!("{code}{text}{RESET}"),
+            _ => text.to_owned(),
+        }
     }
 
     /// `text` as it may reach stdout: every control character is shown as an escape, except
     /// the newlines and, in colour, our own codes.
     pub fn clean(self, text: &str) -> String {
-        sanitize::escape_keeping_newlines(text)
+        if self == Self::Plain {
+            return sanitize::escape_keeping_newlines(text);
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find('\u{1b}') {
+            out.push_str(&sanitize::escape_keeping_newlines(&rest[..at]));
+            let tail = &rest[at..];
+            match CODES.iter().find(|code| tail.starts_with(**code)) {
+                Some(code) => {
+                    out.push_str(code);
+                    rest = &tail[code.len()..];
+                }
+                None => {
+                    out.push_str(&sanitize::escape_keeping_newlines("\u{1b}"));
+                    rest = &tail[1..];
+                }
+            }
+        }
+        out.push_str(&sanitize::escape_keeping_newlines(rest));
+        out
     }
 }
 

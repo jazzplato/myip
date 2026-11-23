@@ -47,20 +47,22 @@ pub fn disagreement_summary(verdict: &Verdict) -> String {
 
 /// What `--verify` prints on stdout when it exits 3: who said what, per family, with the
 /// answers that differ from a clear majority marked.
-pub fn disagreement_report(report: &PublicReport, _style: Style) -> String {
+pub fn disagreement_report(report: &PublicReport, style: Style) -> String {
     let width = PROVIDERS.iter().map(|p| p.name.len()).max().unwrap_or(0);
     let mut text = String::new();
     for family in report.verdict().map_or(&[][..], |v| &v.families[..]) {
         text.push_str(&format!(
             "{}: {}\n",
-            family.family.as_str(),
-            summary(family)
+            style.bold(family.family.as_str()),
+            summary(family, style)
         ));
         let majority = family.majority();
         for answer in &family.answers {
             let mark = match majority {
-                Some(m) if family.status == Status::Disagree && m != answer.ip => "  <- differs",
-                _ => "",
+                Some(m) if family.status == Status::Disagree && m != answer.ip => {
+                    format!("  {}", style.bad("<- differs"))
+                }
+                _ => String::new(),
             };
             text.push_str(&format!(
                 "  {:<width$}  {}{mark}\n",
@@ -74,7 +76,8 @@ pub fn disagreement_report(report: &PublicReport, _style: Style) -> String {
         .filter(|a| a.outcome.is_err())
         .collect();
     if !failed.is_empty() {
-        text.push_str("no answer:\n");
+        text.push_str(&style.bad("no answer:"));
+        text.push('\n');
         for attempt in failed {
             let reason = attempt.outcome.as_ref().err().map_or("", String::as_str);
             text.push_str(&format!(
@@ -87,11 +90,18 @@ pub fn disagreement_report(report: &PublicReport, _style: Style) -> String {
     text
 }
 
-fn summary(family: &FamilyReport) -> String {
+/// The verdict of a family, in the colour of its status.
+fn summary(family: &FamilyReport, style: Style) -> String {
     match family.status {
-        Status::Verified => format!("verified, {} of {} agree", family.agree, family.total),
-        Status::Unverified => "unverified, 1 answer".to_owned(),
-        Status::Disagree => format!("DISAGREE, {} of {} agree", family.agree, family.total),
+        Status::Verified => style.good(&format!(
+            "verified, {} of {} agree",
+            family.agree, family.total
+        )),
+        Status::Unverified => style.warn("unverified, 1 answer"),
+        Status::Disagree => style.bad(&format!(
+            "DISAGREE, {} of {} agree",
+            family.agree, family.total
+        )),
     }
 }
 

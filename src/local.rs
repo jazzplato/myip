@@ -313,23 +313,31 @@ impl Report {
     }
 
     /// The human-readable report. Not a stable format; `--json` is the contract.
-    pub fn render(&self, _style: Style) -> String {
-        let mut out = String::from("interfaces (observed)\n");
+    pub fn render(&self, style: Style) -> String {
+        let mut out = format!("{}{}\n", style.bold("interfaces"), style.dim(" (observed)"));
         match &self.interfaces {
-            Err(message) => {
-                out.push_str(&format!("  unavailable: {}\n", sanitize::escape(message)))
-            }
+            Err(message) => out.push_str(&format!(
+                "  {}: {}\n",
+                style.bad("unavailable"),
+                sanitize::escape(message)
+            )),
             Ok(list) if list.is_empty() => out.push_str("  no interfaces found\n"),
-            Ok(list) => render_interfaces(&mut out, list),
+            Ok(list) => render_interfaces(&mut out, list, style),
         }
         out.push_str(&format!(
-            "egress (observed: a UDP connect() towards {}, which sends nothing)\n",
-            self.probe_targets()
+            "{}{}\n",
+            style.bold("egress"),
+            style.dim(&format!(
+                " (observed: a UDP connect() towards {}, which sends nothing)",
+                self.probe_targets()
+            ))
         ));
         for (label, egress) in self.egresses() {
             match egress {
                 None => out.push_str(&format!(
-                    "  {label}  unknown (the egress probe found no address; -v shows why)\n"
+                    "  {label}  {}{}\n",
+                    style.warn("unknown"),
+                    style.dim(" (the egress probe found no address; -v shows why)")
                 )),
                 Some(e) => out.push_str(&format!("  {label}  {}\n", egress_line(e))),
             }
@@ -339,7 +347,10 @@ impl Report {
             .as_ref()
             .is_ok_and(|list| list.iter().any(|i| i.likely_virtual))
         {
-            out.push_str("\"likely virtual\" is a guess from the interface name, not a fact.\n");
+            out.push_str(
+                &style.dim("\"likely virtual\" is a guess from the interface name, not a fact."),
+            );
+            out.push('\n');
         }
         out
     }
@@ -438,7 +449,7 @@ fn shown_name(name: &str) -> String {
     }
 }
 
-fn render_interfaces(out: &mut String, list: &[InterfaceInfo]) {
+fn render_interfaces(out: &mut String, list: &[InterfaceInfo], style: Style) {
     let cidr = |a: &AddressInfo| format!("{}/{}", a.ip, a.prefix_len);
     let addr_width = list
         .iter()
@@ -453,9 +464,10 @@ fn render_interfaces(out: &mut String, list: &[InterfaceInfo]) {
         .max()
         .unwrap_or(0);
     for interface in list {
-        out.push_str(&format!("  {}", shown_name(&interface.name)));
+        out.push_str(&format!("  {}", style.bold(&shown_name(&interface.name))));
         if interface.likely_virtual {
-            out.push_str(" (likely virtual)");
+            out.push(' ');
+            out.push_str(&style.warn("(likely virtual)"));
         }
         out.push('\n');
         for address in &interface.addresses {
