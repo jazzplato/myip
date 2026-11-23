@@ -105,22 +105,19 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
     out
 }
 
-/// The shortest query value that is masked wherever `text` has it. Anything shorter (`1`,
-/// `on`, `12`) cannot be told from ordinary words and numbers, and masking it would garble
-/// the message without hiding anything worth hiding.
-const MIN_MASKED_VALUE_CHARS: usize = 4;
-
 /// Replaces, wherever `text` has it, every query value that one of `args` carries with `***`.
 ///
 /// A server may echo a value back in an error body (`token SECRET rejected`), with no `?`
 /// or `scheme://` around it, so `redact_arg_queries` and `redact_query` cannot see it. The
 /// values are the part after the first `=` of each `&`-separated pair of a `?query` (the
-/// whole pair when it has no `=`), up to a `#`. A percent-decoded form is masked as well,
-/// since the server sees that one. Values shorter than `MIN_MASKED_VALUE_CHARS` are left
-/// alone. Longer values go first so that one that contains another cannot leave a tail behind.
+/// whole pair when it has no `=`), up to a `#`. An argument is trimmed first, as FIELD is
+/// before it is sent. A percent-decoded form is masked as well, since the server sees that
+/// one. Like the other redactions, no value is too short to be masked; an empty one is
+/// skipped. Longer values go first so that one that contains another cannot leave a tail
+/// behind.
 pub fn redact_arg_values(text: &str, args: &[String]) -> String {
     let mut values: Vec<String> = Vec::new();
-    for (_, query) in args.iter().filter_map(|arg| arg.split_once('?')) {
+    for (_, query) in args.iter().filter_map(|arg| arg.trim().split_once('?')) {
         let query = query.split_once('#').map_or(query, |(query, _)| query);
         for pair in query.split('&') {
             let value = pair.split_once('=').map_or(pair, |(_, value)| value);
@@ -128,7 +125,7 @@ pub fn redact_arg_values(text: &str, args: &[String]) -> String {
             values.push(value.to_owned());
         }
     }
-    values.retain(|value| value.chars().count() >= MIN_MASKED_VALUE_CHARS);
+    values.retain(|value| !value.is_empty());
     values.sort_by_key(|value| std::cmp::Reverse(value.len()));
     values.dedup();
     let mut out = text.to_owned();

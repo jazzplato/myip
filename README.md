@@ -145,7 +145,7 @@ myip 8.8.8.8/org
 myip 'json?token=YOUR_TOKEN'
 ```
 
-A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. If an HTTP error body from ipinfo.io repeats a value from your command line (`token abc123 rejected`), the value is shown as `***` too; a value shorter than 4 characters is not masked, and neither is one that you did not type on the command line. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
+A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. If an HTTP error body from ipinfo.io repeats a value from your command line (`token abc123 rejected`), the value is shown as `***` too, wherever the body has it, even a short one (so a value such as `1` also hides every `1` of the body); a value that you did not type on the command line is not masked. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
 
 > To get full information in JSON format
 
