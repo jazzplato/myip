@@ -5,8 +5,8 @@ use std::time::Duration;
 use crate::Context;
 use crate::cli::Options;
 use crate::hint;
-use crate::http::{FetchError, FetchOptions, Response};
-use crate::redact::{redact_query, redact_userinfo};
+use crate::http::{FetchError, FetchOptions, Response, proxy_family_hint};
+use crate::redact::{redact_arg_values, redact_credentials, redact_query};
 use crate::sanitize;
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
@@ -14,11 +14,7 @@ const DEFAULT_FIELD: &str = "json";
 const MAX_BODY_BYTES: usize = 1 << 20;
 const MAX_DETAIL_CHARS: usize = 200;
 
-fn redact_credentials(text: &str) -> String {
-    redact_query(&redact_userinfo(text))
-}
-
-pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 {
+pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Context<'_>) -> u8 {
     let fetch_options = FetchOptions {
         timeout: Duration::from_secs(options.timeout),
         max_bytes: MAX_BODY_BYTES,
@@ -35,7 +31,12 @@ pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 
     let response = match ctx.fetch.get(&url, &fetch_options) {
         Ok(response) => response,
         Err(e) => {
-            let code = fail(ctx, &describe(&e, options.timeout));
+            let mut message = describe(&e, options.timeout);
+            if let Some(family_hint) = proxy_family_hint(&e, &fetch_options) {
+                message.push_str("; hint: ");
+                message.push_str(&family_hint);
+            }
+            let code = fail(ctx, &message);
             if matches!(&e, FetchError::Transport(message) if hint::is_no_ca(message)) {
                 let _ = writeln!(ctx.err, "{}", hint::NO_CA_HINT);
             }
@@ -50,7 +51,7 @@ pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 
             response.body.len()
         );
     }
-    match answer(&response) {
+    match answer(&response, args) {
         Ok(body) => print_line(ctx, body),
         Err(message) => fail(ctx, &message),
     }
@@ -82,6 +83,7 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
             format!("response from ipinfo.io is larger than {limit} bytes")
         }
         FetchError::Resolve(message)
+        | FetchError::NoAddress(message)
         | FetchError::Rejected(message)
         | FetchError::Transport(message) => message.clone(),
     }
@@ -90,13 +92,19 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
 /// Accepts only a real answer: 2xx, non-empty, and not a web page.
 /// ipinfo.io labels plain-text answers (`city`, `8.8.8.8/org`) as text/html, so the
 /// content type cannot be trusted and the body is inspected instead.
-fn answer(response: &Response) -> Result<&str, String> {
+///
+/// An error body may echo a query value from the command line (a rejected token, say), so
+/// those values are masked, and before `detail` cuts the body to its length limit. The
+/// credentials and the values are found in the body together: masking the values first
+/// would destroy the `://` that finds the credentials (a value such as `:`), and hiding
+/// the credentials first would change a value that holds a URL, so it is no longer found.
+fn answer<'a>(response: &'a Response, args: &[String]) -> Result<&'a str, String> {
     let html = looks_like_html(&response.body);
     if !(200..300).contains(&response.status) {
         let mut message = format!("ipinfo.io returned HTTP {}", response.status);
         if !html && !response.body.trim().is_empty() {
             message.push_str(": ");
-            message.push_str(&detail(&response.body));
+            message.push_str(&detail(&redact_arg_values(&response.body, args)));
         }
         return Err(message);
     }

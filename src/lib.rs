@@ -93,13 +93,13 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             }
         };
     match (cli.command, cli.field.as_deref()) {
-        (Some(Command::Public(args)), None) => match args.field.as_deref() {
-            Some(field) => passthrough(Some(field), &cli.options, ctx),
-            None => public::run(&cli.options, args.verify, ctx),
+        (Some(Command::Public(public)), None) => match public.field.as_deref() {
+            Some(field) => passthrough(Some(field), args, &cli.options, ctx),
+            None => public::run(&cli.options, public.verify, ctx),
         },
         (Some(Command::Local), None) => local::run(&cli.options, ctx),
         (Some(Command::Where), None) => location::run(&cli.options, ctx),
-        (Some(Command::All(args)), None) => all::run(&cli.options, args.verify, ctx),
+        (Some(Command::All(all)), None) => all::run(&cli.options, all.verify, ctx),
         (Some(command), Some(_)) => {
             let _ = writeln!(
                 ctx.err,
@@ -108,13 +108,19 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             );
             2
         }
-        (None, field) => passthrough(field, &cli.options, ctx),
+        (None, field) => passthrough(field, args, &cli.options, ctx),
     }
 }
 
 /// Prints what ipinfo.io returns for `field`. That body is passed through as it came, so
 /// `--format` has nothing to shape and is a usage error here (ADR 0002), before any request.
-fn passthrough(field: Option<&str>, options: &cli::Options, ctx: &mut Context<'_>) -> u8 {
+/// `args` is the command line, so that an error body cannot echo a value from it.
+fn passthrough(
+    field: Option<&str>,
+    args: &[String],
+    options: &cli::Options,
+    ctx: &mut Context<'_>,
+) -> u8 {
     if options.format.is_some() {
         let _ = writeln!(
             ctx.err,
@@ -123,7 +129,7 @@ fn passthrough(field: Option<&str>, options: &cli::Options, ctx: &mut Context<'_
         );
         return 2;
     }
-    legacy::run(field, options, ctx)
+    legacy::run(field, args, options, ctx)
 }
 
 /// Converts OS arguments to UTF-8 without altering them. A non-Unicode argument is
@@ -494,6 +500,144 @@ mod tests {
         assert_eq!((code, out.as_str()), (1, ""));
         assert!(err.contains("HTTP 403"), "{err}");
         assert!(!err.contains(SECRET), "{err}");
+    }
+
+    #[test]
+    fn an_error_body_that_echoes_a_query_value_does_not_print_it() {
+        const SECRET: &str = "SECRET123";
+        let body = r#"{"error":"token SECRET123 rejected"}"#;
+        for args in [
+            &["json?token=SECRET123"][..],
+            &["public", "json?token=SECRET123"],
+            &["-v", "ip?x=1&token=SECRET123"],
+            &["json?token=SECRET%31%32%33"],
+            &["json?token=SECRET123\n"],
+        ] {
+            let fetch = FakeFetch::new(vec![ok(403, body)]);
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            assert!(!err.contains(SECRET), "{args:?}: {err}");
+            assert!(
+                err.contains(
+                    r#"myip: ipinfo.io returned HTTP 403: {"error":"token *** rejected"}"#
+                ),
+                "{args:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_masked_value_that_breaks_a_url_does_not_hide_its_credentials_from_the_redaction() {
+        // `:` is a legal query character; masking it first would destroy the `://`.
+        let body = "proxy http://user:S3CR3T@host:1/x refused";
+        let fetch = FakeFetch::new(vec![ok(403, body)]);
+        let (code, out, err) = exec(&fetch, &["json?x=:"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTTP 403"), "{err}");
+        assert!(!err.contains("S3CR3T"), "{err}");
+    }
+
+    #[test]
+    fn a_value_that_the_credential_redaction_would_change_is_still_masked() {
+        // The decoded value is `SECRET123://host?x=y`; the credential redaction alone would
+        // turn the body into `SECRET123://host?x=***` and the value would no longer be found.
+        let fetch = FakeFetch::new(vec![ok(403, "token SECRET123://host?x=y rejected")]);
+        let (code, out, err) = exec(&fetch, &["json?token=SECRET123:%2F%2Fhost%3Fx%3Dy"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTTP 403: token *** rejected"), "{err}");
+    }
+
+    #[test]
+    fn a_short_query_value_is_hidden_like_any_other() {
+        let fetch = FakeFetch::new(vec![ok(403, r#"{"token":"abc"}"#)]);
+        let (code, out, err) = exec(&fetch, &["json?token=abc"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(
+            err.contains(r#"myip: ipinfo.io returned HTTP 403: {"token":"***"}"#),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_query_value_cut_by_the_length_limit_does_not_leave_its_start_behind() {
+        const SECRET: &str = "SECRET123";
+        let body = format!("{}{SECRET} and more", "x".repeat(195));
+        let fetch = FakeFetch::new(vec![ok(403, &body)]);
+        let (code, _, err) = exec(&fetch, &[&format!("json?token={SECRET}")]);
+        assert_eq!(code, 1);
+        assert!(err.contains("HTTP 403"), "{err}");
+        assert!(!err.contains("SECR"), "{err}");
+    }
+
+    #[test]
+    fn an_error_body_is_printed_unchanged_when_nothing_on_the_command_line_is_a_query_value() {
+        let body = r#"{"error":"token SECRET123 rejected, retry 1 of 12"}"#;
+        for args in [
+            &[][..],
+            &["json"],
+            &["-v", "public", "city"],
+            // No value: nothing to mask.
+            &["json?a="],
+        ] {
+            let fetch = FakeFetch::new(vec![ok(403, body)]);
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            assert!(
+                err.contains(&format!("myip: ipinfo.io returned HTTP 403: {body}\n")),
+                "{args:?}: {err}"
+            );
+        }
+    }
+
+    const PROXY: &str = "http://proxy.test:3128";
+    const PROXY_HINT: &str = "also applies to the proxy host";
+
+    #[test]
+    fn a_failed_host_lookup_with_a_family_and_a_proxy_says_the_proxy_host_is_the_one_resolved() {
+        let failures = [
+            FetchError::Resolve(
+                "io: failed to lookup address information: Temporary failure in name resolution"
+                    .to_owned(),
+            ),
+            FetchError::NoAddress("host not found".to_owned()),
+        ];
+        for (flag, example) in [("-6", "http://[::1]:PORT"), ("-4", "http://127.0.0.1:PORT")] {
+            for failure in &failures {
+                let fetch = FakeFetch::new(vec![Err(failure.clone())]);
+                let (code, out, err) = exec(&fetch, &[flag, "--proxy", PROXY, "json"]);
+                assert_eq!((code, out.as_str()), (1, ""), "{flag} {failure:?}");
+                assert_eq!(err.matches(PROXY_HINT).count(), 1, "{flag}: {err}");
+                assert!(err.starts_with(&format!("myip: {failure}")), "{err}");
+                assert!(err.contains(example), "{flag}: {err}");
+                assert!(err.contains(&format!("drop {flag}")), "{flag}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_proxy_hint_needs_a_family_a_proxy_url_and_a_failed_host_lookup() {
+        let dns = || Err(FetchError::Resolve("lookup failed".to_owned()));
+        let cases: [(&[&str], Result<crate::http::Response, FetchError>); 8] = [
+            (&["--proxy", PROXY, "json"], dns()),
+            (&["-6", "json"], dns()),
+            (&["-6", "--proxy", "env", "json"], dns()),
+            (&["-6", "--proxy", "none", "json"], dns()),
+            (
+                &["-6", "--proxy", PROXY, "json"],
+                Err(FetchError::Transport("io: Connection refused".to_owned())),
+            ),
+            (
+                &["-6", "--proxy", PROXY, "json"],
+                Err(FetchError::Timeout("timeout: global".to_owned())),
+            ),
+            (&["-6", "--proxy", PROXY, "json"], ok(503, "down")),
+            (&["-4", "--proxy", PROXY, "json"], ok(200, "{}\n")),
+        ];
+        for (args, answer) in cases {
+            let fetch = FakeFetch::new(vec![answer]);
+            let (_, _, err) = exec(&fetch, args);
+            assert!(!err.contains(PROXY_HINT), "{args:?}: {err}");
+        }
     }
 
     #[test]

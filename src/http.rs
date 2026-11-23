@@ -48,6 +48,9 @@ pub enum FetchError {
     /// The host name could not be resolved: no working DNS, or no such name. Carries the
     /// transport's own message.
     Resolve(String),
+    /// The host name resolved, but to no address of the family that `-4` or `-6` asks for.
+    /// Carries the transport's own message (for ureq, `host not found`).
+    NoAddress(String),
     /// The server answered, so the status line and headers arrived, but the answer was refused
     /// or cut short: a redirect that is not followed, too many redirects, or a body that
     /// could not be read. Carries the transport's own message.
@@ -60,6 +63,7 @@ impl fmt::Display for FetchError {
         match self {
             Self::Timeout(msg)
             | Self::Resolve(msg)
+            | Self::NoAddress(msg)
             | Self::Rejected(msg)
             | Self::Transport(msg) => f.write_str(msg),
             Self::TooLarge(limit) => {
@@ -169,6 +173,7 @@ fn map_error(e: ureq::Error) -> FetchError {
     match e {
         ureq::Error::Timeout(_) => FetchError::Timeout(e.to_string()),
         ureq::Error::Io(ref io) if is_lookup_failure(io) => FetchError::Resolve(e.to_string()),
+        ureq::Error::HostNotFound => FetchError::NoAddress(e.to_string()),
         other => FetchError::Transport(other.to_string()),
     }
 }
@@ -184,6 +189,28 @@ fn is_lookup_failure(error: &std::io::Error) -> bool {
 }
 
 const MAX_REDIRECTS: usize = 5;
+
+/// Tells the user, after a failed host lookup, that `-4` or `-6` also restricts the proxy
+/// host. The proxy host is the one connected to, so with a proxy URL it is the one resolved
+/// and the one that has to have an address of the wanted family. With no proxy, or one from
+/// the environment, we cannot tell that it is in play, so nothing is said.
+pub fn proxy_family_hint(error: &FetchError, options: &FetchOptions) -> Option<String> {
+    if !matches!(error, FetchError::Resolve(_) | FetchError::NoAddress(_)) {
+        return None;
+    }
+    if !matches!(options.proxy, ProxyMode::Url(_)) {
+        return None;
+    }
+    let (flag, example) = match options.family {
+        Family::V6 => ("-6", "http://[::1]:PORT"),
+        Family::V4 => ("-4", "http://127.0.0.1:PORT"),
+        Family::Any => return None,
+    };
+    Some(format!(
+        "{flag} also applies to the proxy host; give the proxy an address of that family, \
+         such as {example}, or drop {flag}"
+    ))
+}
 
 /// Resolves a `Location` against `base`, accepting only a target on the same scheme
 /// and authority (ADR 0001: no cross-host redirects, no downgrade to http). Relative
@@ -839,11 +866,65 @@ mod tests {
         for error in [
             ureq::Error::Io(std::io::Error::from_raw_os_error(111)),
             ureq::Error::Io(std::io::Error::other(not_at_the_start)),
-            ureq::Error::HostNotFound,
             ureq::Error::ConnectionFailed,
         ] {
             let mapped = map_error(error);
             assert!(matches!(mapped, FetchError::Transport(_)), "{mapped:?}");
+        }
+    }
+
+    #[test]
+    fn a_host_with_no_address_of_the_family_is_told_apart_from_a_failed_lookup() {
+        assert_eq!(
+            map_error(ureq::Error::HostNotFound),
+            FetchError::NoAddress("host not found".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_proxy_hint_names_the_flag_and_an_address_of_that_family() {
+        let url = || ProxyMode::Url("http://proxy.test:3128".to_owned());
+        for error in [
+            FetchError::Resolve("x".to_owned()),
+            FetchError::NoAddress("x".to_owned()),
+        ] {
+            for (family, flag, example) in [
+                (Family::V6, "-6", "http://[::1]:PORT"),
+                (Family::V4, "-4", "http://127.0.0.1:PORT"),
+            ] {
+                let o = FetchOptions {
+                    family,
+                    proxy: url(),
+                    ..opts()
+                };
+                let hint = proxy_family_hint(&error, &o).expect("a hint");
+                assert!(hint.starts_with(flag), "{hint}");
+                assert!(hint.contains("also applies to the proxy host"), "{hint}");
+                assert!(hint.contains(example), "{hint}");
+                assert!(hint.ends_with(&format!("drop {flag}")), "{hint}");
+            }
+        }
+    }
+
+    #[test]
+    fn there_is_no_proxy_hint_unless_a_family_a_proxy_url_and_a_failed_host_lookup_are_all_there() {
+        let url = || ProxyMode::Url("http://proxy.test:3128".to_owned());
+        let lookup = || FetchError::Resolve("x".to_owned());
+        for (error, family, proxy) in [
+            (lookup(), Family::Any, url()),
+            (lookup(), Family::V6, ProxyMode::None),
+            (lookup(), Family::V6, ProxyMode::Env),
+            (FetchError::Transport("x".to_owned()), Family::V6, url()),
+            (FetchError::Timeout("x".to_owned()), Family::V6, url()),
+            (FetchError::Rejected("x".to_owned()), Family::V6, url()),
+            (FetchError::TooLarge(1), Family::V6, url()),
+        ] {
+            let o = FetchOptions {
+                family,
+                proxy,
+                ..opts()
+            };
+            assert_eq!(proxy_family_hint(&error, &o), None, "{error:?} {o:?}");
         }
     }
 
@@ -883,7 +964,7 @@ mod tests {
         let err = UreqFetch
             .get(&format!("http://{}", ipv4_only.local_addr().unwrap()), &o)
             .unwrap_err();
-        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+        assert!(matches!(err, FetchError::NoAddress(_)), "{err:?}");
 
         let base = serve(vec![http_response("200 OK", "", b"v4")]);
         o.family = Family::V4;
