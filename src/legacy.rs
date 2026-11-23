@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::Context;
 use crate::cli::Options;
+use crate::hint;
 use crate::http::{FetchError, FetchOptions, Response};
 use crate::redact::{redact_query, redact_userinfo};
 use crate::sanitize;
@@ -33,7 +34,13 @@ pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 
 
     let response = match ctx.fetch.get(&url, &fetch_options) {
         Ok(response) => response,
-        Err(e) => return fail(ctx, &describe(&e, options.timeout)),
+        Err(e) => {
+            let code = fail(ctx, &describe(&e, options.timeout));
+            if matches!(&e, FetchError::Transport(message) if hint::is_no_ca(message)) {
+                let _ = writeln!(ctx.err, "{}", hint::NO_CA_HINT);
+            }
+            return code;
+        }
     };
     if options.verbose {
         let _ = writeln!(

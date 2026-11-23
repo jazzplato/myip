@@ -20,6 +20,12 @@ cargo install myip --locked
 
 `myip --version` from a release binary prints the version, the short commit it was built from and that commit's date in UTC, for example `myip 0.2.0 (f02e182 2026-11-22)`, so a bug report says exactly which build it is. A build from crates.io or a plain `cargo build` has no repository to ask and prints just `myip 0.2.0`. `myip` never checks for updates.
 
+**Troubleshooting: no CA certificates.** `myip` checks the certificate of every server against the CA certificates of the system and carries none of its own. A minimal container image, such as `debian:stable-slim`, has none, so every request fails with `No CA certificates were loaded from the system`; `myip public` and the ipinfo.io lookup then add a hint to stderr (the exit code and stdout do not change). Install the `ca-certificates` package in the image, or give `myip` a bundle of certificates: `SSL_CERT_FILE` names one file and `SSL_CERT_DIR` a directory of them.
+
+```sh
+docker run --rm -v /etc/ssl/certs/ca-certificates.crt:/ca.crt:ro -e SSL_CERT_FILE=/ca.crt -v "$PWD/myip:/myip:ro" debian:stable-slim /myip public
+```
+
 ## Usage
 
 ```

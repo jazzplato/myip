@@ -15,6 +15,7 @@ pub use verdict::{Answer, Attempt, FamilyReport, IpFamily, Status, Verdict};
 
 use crate::Context;
 use crate::cli::Options;
+use crate::hint;
 use crate::http::{Family, Fetch, FetchError, FetchOptions};
 use crate::legacy::detail;
 use crate::output;
@@ -193,8 +194,23 @@ fn emit(report: &PublicReport, options: &Options, ctx: &mut Context<'_>) -> u8 {
         if code == 1 && !is_document && !options.verbose {
             let _ = write!(ctx.err, "{}", render::attempt_list(report));
         }
+        if lacks_ca_certificates(report) {
+            let _ = writeln!(ctx.err, "{}", hint::NO_CA_HINT);
+        }
     }
     if written.is_err() { 1 } else { code }
+}
+
+/// True when every request that was made failed for want of CA certificates, and at least one
+/// was made. A provider that was not asked says nothing either way.
+fn lacks_ca_certificates(report: &PublicReport) -> bool {
+    let mut asked = report
+        .attempts()
+        .iter()
+        .filter(|attempt| attempt.latency.is_some())
+        .peekable();
+    asked.peek().is_some()
+        && asked.all(|attempt| matches!(&attempt.outcome, Err(error) if hint::is_no_ca(error)))
 }
 
 struct Query<'a> {
