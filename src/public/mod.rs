@@ -210,7 +210,8 @@ enum Reach {
     Skipped,
     /// The host name could not be resolved.
     Unresolved,
-    /// A server answered over HTTP, whatever the status or the body.
+    /// A server answered over HTTP, whatever the status or the body, even when the answer was
+    /// refused (a redirect to another host) or cut short.
     Responded,
     /// A timeout, a TLS or a connection error.
     Failed,
@@ -297,11 +298,9 @@ impl Query<'_> {
         let response = self.fetch.get(provider.url, &self.options);
         let latency = started.elapsed();
         let reach = match &response {
-            Ok(_) | Err(FetchError::TooLarge(_)) => Reach::Responded,
+            Ok(_) | Err(FetchError::TooLarge(_) | FetchError::Rejected(_)) => Reach::Responded,
             Err(FetchError::Resolve(_)) => Reach::Unresolved,
-            Err(FetchError::Timeout(_) | FetchError::Rejected(_) | FetchError::Transport(_)) => {
-                Reach::Failed
-            }
+            Err(FetchError::Timeout(_) | FetchError::Transport(_)) => Reach::Failed,
         };
         let outcome = match response {
             Ok(response) => read_answer(provider.parser, &response, self.options.family)

@@ -130,7 +130,7 @@ impl Fetch for UreqFetch {
             };
             hops += 1;
             if hops > MAX_REDIRECTS {
-                return Err(FetchError::Transport("too many redirects".to_owned()));
+                return Err(FetchError::Rejected("too many redirects".to_owned()));
             }
             current = same_origin_target(&current, &location)?;
         };
@@ -148,7 +148,12 @@ impl Fetch for UreqFetch {
             .as_reader()
             .take(opts.max_bytes as u64 + 1)
             .read_to_end(&mut raw)
-            .map_err(|e| map_error(ureq::Error::from(e)))?;
+            .map_err(|e| match map_error(ureq::Error::from(e)) {
+                // The headers arrived: a timeout keeps its own reason, anything else is an
+                // answer that could not be read.
+                FetchError::Transport(message) => FetchError::Rejected(message),
+                other => other,
+            })?;
         if raw.len() > opts.max_bytes {
             return Err(FetchError::TooLarge(opts.max_bytes));
         }
@@ -186,7 +191,7 @@ const MAX_REDIRECTS: usize = 5;
 /// `base`'s, so a path can never change the host. The target is deliberately not
 /// echoed in the error: it is server-controlled and may carry credentials.
 fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> {
-    let refused = || FetchError::Transport("refused a redirect to a different host".to_owned());
+    let refused = || FetchError::Rejected("refused a redirect to a different host".to_owned());
     let base: ureq::http::Uri = base.parse().map_err(|_| refused())?;
     let (scheme, authority) = match (base.scheme_str(), base.authority()) {
         (Some(s), Some(a)) => (s, a),
