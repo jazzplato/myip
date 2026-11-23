@@ -173,7 +173,7 @@ fn value_spans(text: &str, args: &[String]) -> Vec<Range<usize>> {
         let query = query.split_once('#').map_or(query, |(query, _)| query);
         for pair in query.split('&') {
             let value = pair.split_once('=').map_or(pair, |(_, value)| value);
-            values.extend(percent_decode(value));
+            values.extend(percent_decoded(value));
             values.push(value.to_owned());
         }
     }
@@ -235,8 +235,12 @@ fn mark_occurrences(text: &[u8], value: &[u8], covered: &mut [bool]) {
     }
 }
 
-/// The `%XX`-decoded form of `value`, if it has one that is text.
-fn percent_decode(value: &str) -> Option<String> {
+/// The `%XX`-decoded forms of `value` that a server may echo back, none if it has no escape.
+///
+/// When the decoded bytes are not UTF-8 the body shows each bad byte as U+FFFD (it is decoded
+/// lossily), so the forms are that text and each run of valid text in it: a value such as
+/// `%E9abc` must not leave `abc` behind.
+fn percent_decoded(value: &str) -> Vec<String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -259,7 +263,18 @@ fn percent_decode(value: &str) -> Option<String> {
             }
         }
     }
-    String::from_utf8(decoded).ok().filter(|text| text != value)
+    if decoded == bytes {
+        return Vec::new();
+    }
+    match String::from_utf8(decoded) {
+        Ok(text) => vec![text],
+        Err(error) => {
+            let decoded = error.into_bytes();
+            let mut forms = vec![String::from_utf8_lossy(&decoded).into_owned()];
+            forms.extend(decoded.utf8_chunks().map(|chunk| chunk.valid().to_owned()));
+            forms
+        }
+    }
 }
 
 #[cfg(test)]
@@ -491,6 +506,19 @@ mod tests {
         }
         let args = ["ip?k=éé".to_owned()];
         assert_eq!(redact_arg_values("xéééy", &args), "x***y");
+    }
+
+    #[test]
+    fn a_value_that_is_not_utf8_once_decoded_is_masked_as_the_lossy_body_shows_it() {
+        // The server decodes `%E9` to a byte that is not UTF-8, and our body shows it as U+FFFD.
+        let args = ["json?token=%E9abc12&k=%FFsecret%FE".to_owned()];
+        for (text, want) in [
+            ("token \u{FFFD}abc12 rejected", "token *** rejected"),
+            ("bad \u{FFFD}secret\u{FFFD}!", "bad ***!"),
+            ("a part: abc12 and secret", "a part: *** and ***"),
+        ] {
+            assert_eq!(redact_arg_values(text, &args), want, "{text}");
+        }
     }
 
     #[test]
