@@ -152,7 +152,7 @@ mod tests {
     use crate::env::RecordingEnv;
     use crate::env::testing::FakeEnv;
     use crate::http::testing::{FakeFetch, RouteFetch, ok, reply};
-    use crate::http::{Family, FetchError, ProxyMode};
+    use crate::http::{Family, FetchError, FetchOptions, ProxyMode, Response};
     use crate::ifaces::testing::{FakeInterfaces, iface};
     use crate::public::PROVIDERS;
     use crate::style::testing::{assert_balanced, strip};
@@ -1987,21 +1987,118 @@ mod tests {
         run_on(&Machine::laptop().host(), fetch, args)
     }
 
-    /// `"latency_ms":123` becomes `"latency_ms":N`: the only thing that differs between runs.
+    /// A measured latency, in any of its spellings, becomes `N`: `"latency_ms":123` and
+    /// `"latency_ms": 123` in a JSON document, `latency_ms: 123` in YAML and ` (123 ms)` in an
+    /// attempt list. It is the only thing that differs between two runs of one command.
     fn steady(text: &str) -> String {
-        let key = "\"latency_ms\":";
+        [
+            ("\"latency_ms\":", ""),
+            ("\"latency_ms\": ", ""),
+            ("latency_ms: ", ""),
+            (" (", " ms)"),
+        ]
+        .iter()
+        .fold(text.to_owned(), |text, (before, after)| {
+            replace_number(&text, before, after)
+        })
+    }
+
+    /// A run's output with every measured latency hidden, so two runs can be compared.
+    fn steady_run((code, out, err): (u8, String, String)) -> (u8, String, String) {
+        (code, steady(&out), steady(&err))
+    }
+
+    /// Replaces with `N` each run of digits that follows `before` and is followed by `after`.
+    fn replace_number(text: &str, before: &str, after: &str) -> String {
         let (mut out, mut rest) = (String::new(), text);
-        while let Some(at) = rest.find(key) {
-            let (head, tail) = rest.split_at(at + key.len());
+        while let Some(at) = rest.find(before) {
+            let (head, tail) = rest.split_at(at + before.len());
             out.push_str(head);
             let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-            if digits > 0 {
+            if digits > 0 && tail[digits..].starts_with(after) {
                 out.push('N');
+                rest = &tail[digits..];
+            } else {
+                rest = tail;
             }
-            rest = &tail[digits..];
         }
         out.push_str(rest);
         out
+    }
+
+    /// Delays its first request only, so that two runs of one command measure different
+    /// latencies, as two runs on a loaded machine do.
+    struct StallsOnce<'a> {
+        inner: &'a dyn Fetch,
+        stall: Duration,
+        stalled: std::sync::atomic::AtomicBool,
+    }
+
+    impl Fetch for StallsOnce<'_> {
+        fn get(&self, url: &str, opts: &FetchOptions) -> Result<Response, FetchError> {
+            if !self.stalled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(self.stall);
+            }
+            self.inner.get(url, opts)
+        }
+    }
+
+    #[test]
+    fn two_runs_that_measure_different_latencies_compare_equal() {
+        for (fixture, args) in [
+            (nobody_answers as Fixture, &["public"][..]),
+            (agree, &["public", "--format", "json"]),
+            (agree, &["public", "--format", "json-pretty"]),
+            (agree, &["public", "--format", "yaml"]),
+        ] {
+            let started = std::time::Instant::now();
+            let quick = laptop_run(&fixture(), args);
+            let inner = fixture();
+            let slow = StallsOnce {
+                inner: &inner,
+                // Longer than the whole quick run, so its first latency is the larger one.
+                stall: started.elapsed() + Duration::from_millis(10),
+                stalled: std::sync::atomic::AtomicBool::new(false),
+            };
+            let stalled = run_on(&Machine::laptop().host(), &slow, args);
+            assert_ne!(stalled, quick, "the stall did not show in {args:?}");
+            assert_eq!(steady_run(stalled), steady_run(quick), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn steady_hides_a_measured_latency_and_nothing_else() {
+        for (text, want) in [
+            (" (12 ms)", " (N ms)"),
+            (
+                "name: down (0 ms)\nname2: HTTP 500 (1234 ms)\n",
+                "name: down (N ms)\nname2: HTTP 500 (N ms)\n",
+            ),
+            (r#"{"latency_ms":12,"x":1}"#, r#"{"latency_ms":N,"x":1}"#),
+            (
+                r#"{"latency_ms":3,"a":" (4 ms)"}"#,
+                r#"{"latency_ms":N,"a":" (N ms)"}"#,
+            ),
+            (" (12 s)", " (12 s)"),
+            (" (x ms)", " (x ms)"),
+            (" (-3 ms)", " (-3 ms)"),
+            (" (1 2 ms)", " (1 2 ms)"),
+            (" (12 ms", " (12 ms"),
+            ("(12 ms)", "(12 ms)"),
+            ("12 ms", "12 ms"),
+            (r#"{"latency_ms":null}"#, r#"{"latency_ms":null}"#),
+            (
+                "{\n  \"latency_ms\": 12,\n  \"x\": 1\n}",
+                "{\n  \"latency_ms\": N,\n  \"x\": 1\n}",
+            ),
+            ("latency_ms: 12\nx: 1\n", "latency_ms: N\nx: 1\n"),
+            ("  latency_ms: 0\n", "  latency_ms: N\n"),
+            ("latency_ms: null\n", "latency_ms: null\n"),
+            ("latency_ms 12\n", "latency_ms 12\n"),
+            ("took (12 ms) of 7 s (7 s)", "took (N ms) of 7 s (7 s)"),
+        ] {
+            assert_eq!(steady(text), want, "{text}");
+        }
     }
 
     /// What a real YAML parser reads from `text` (JSON is YAML), with every measured latency
@@ -2049,7 +2146,7 @@ mod tests {
                 let (got_code, got, got_err) = laptop_run(&fixture(), &spelled);
                 assert_eq!(got_code, want_code, "{spelled:?}");
                 assert_eq!(steady(&got), steady(&want), "{spelled:?}");
-                assert_eq!(got_err, want_err, "{spelled:?}");
+                assert_eq!(steady(&got_err), steady(&want_err), "{spelled:?}");
             }
         }
     }
@@ -2063,7 +2160,7 @@ mod tests {
             let (pretty_code, pretty, pretty_err) = run("json-pretty");
             let (yaml_code, yaml, yaml_err) = run("yaml");
             for (got, err) in [(pretty_code, &pretty_err), (yaml_code, &yaml_err)] {
-                assert_eq!((got, err), (code, &json_err), "{args:?}");
+                assert_eq!((got, steady(err)), (code, steady(&json_err)), "{args:?}");
             }
             assert_eq!(json_code, code, "{args:?}");
 
@@ -2121,7 +2218,7 @@ mod tests {
         assert_eq!((code, out.as_str()), (1, ""));
         assert!(plain.lines().count() > 1, "{plain}");
         let (_, _, text) = laptop_run(&nobody_answers(), &["public", "--format", "text"]);
-        assert_eq!(text, plain);
+        assert_eq!(steady(&text), steady(&plain));
         for format in ["json", "json-pretty", "yaml"] {
             let (_, _, err) = laptop_run(&nobody_answers(), &["public", "--format", format]);
             assert_eq!(
@@ -2143,8 +2240,9 @@ mod tests {
             ] {
                 let (got_code, got, got_err) = laptop_run(&fixture(), &spelled);
                 assert_eq!(
-                    (got_code, got, got_err),
-                    (want_code, want.clone(), want_err.clone())
+                    steady_run((got_code, got, got_err)),
+                    steady_run((want_code, want.clone(), want_err.clone())),
+                    "{spelled:?}"
                 );
             }
         }
@@ -2368,7 +2466,7 @@ mod tests {
     #[test]
     fn without_colour_the_text_is_unchanged_whatever_the_terminal_says() {
         for (machine, args, fixture) in text_cases() {
-            let want = run_on(&machine().host(), &fixture(), args);
+            let want = steady_run(run_on(&machine().host(), &fixture(), args));
             assert!(!want.1.contains('\u{1b}'), "{args:?}: {:?}", want.1);
             assert!(!want.2.contains('\u{1b}'), "{args:?}: {:?}", want.2);
             let forms = [
@@ -2384,7 +2482,12 @@ mod tests {
                 ),
             ];
             for (terminal, spelled) in forms {
-                let got = run_in(&machine().host(), &fixture(), terminal.clone(), &spelled);
+                let got = steady_run(run_in(
+                    &machine().host(),
+                    &fixture(),
+                    terminal.clone(),
+                    &spelled,
+                ));
                 assert_eq!(got, want, "{spelled:?} on {terminal:?}");
             }
         }
@@ -2405,8 +2508,12 @@ mod tests {
                 &flagged(&["--color", "always"], args),
             );
             let label = format!("{args:?} (exit {plain_code})");
-            assert_eq!((code, &err), (plain_code, &plain_err), "{label}");
-            assert_eq!(strip(&out), plain, "{label}");
+            assert_eq!(
+                (code, steady(&err)),
+                (plain_code, steady(&plain_err)),
+                "{label}"
+            );
+            assert_eq!(steady(&strip(&out)), steady(&plain), "{label}");
             assert!(
                 !strip(&out).contains('\u{1b}'),
                 "{label}: a code that is not ours in {out:?}"
@@ -2734,8 +2841,8 @@ mod tests {
             let (code, out, err) = coloured(&Machine::laptop(), &fixture(), args);
             let (want_code, want_out, want_err) = laptop_run(&fixture(), args);
             assert_eq!(
-                (code, &out, &err),
-                (want_code, &want_out, &want_err),
+                steady_run((code, out.clone(), err.clone())),
+                steady_run((want_code, want_out, want_err)),
                 "{args:?}"
             );
             assert!(
@@ -2771,8 +2878,8 @@ mod tests {
                 );
                 assert_eq!(plain.0, code, "{args:?}");
                 assert_eq!(
-                    (styled.0, steady(&styled.1), styled.2),
-                    (plain.0, steady(&plain.1), plain.2),
+                    (styled.0, steady(&styled.1), steady(&styled.2)),
+                    (plain.0, steady(&plain.1), steady(&plain.2)),
                     "{format} {args:?}"
                 );
                 assert!(!styled.1.contains('\u{1b}'), "{format} {args:?}");
@@ -2795,7 +2902,7 @@ mod tests {
                 &flagged(&["--color", "never"], args),
             );
             assert_eq!(code, want_code, "{args:?}");
-            assert_eq!(err, want_err, "{args:?}");
+            assert_eq!(steady(&err), steady(&want_err), "{args:?}");
             assert!(
                 err.contains("myip: "),
                 "{args:?} must log something: {err:?}"
