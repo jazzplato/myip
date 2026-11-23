@@ -98,14 +98,16 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
 /// content type cannot be trusted and the body is inspected instead.
 ///
 /// An error body may echo a query value from the command line (a rejected token, say), so
-/// those values are masked first, and before `detail` cuts the body to its length limit.
+/// those values are masked, and before `detail` cuts the body to its length limit. The
+/// credentials go first: a value such as `:` would destroy the `://` that finds them.
 fn answer<'a>(response: &'a Response, args: &[String]) -> Result<&'a str, String> {
     let html = looks_like_html(&response.body);
     if !(200..300).contains(&response.status) {
         let mut message = format!("ipinfo.io returned HTTP {}", response.status);
         if !html && !response.body.trim().is_empty() {
             message.push_str(": ");
-            message.push_str(&detail(&redact_arg_values(&response.body, args)));
+            let body = redact_arg_values(&redact_credentials(&response.body), args);
+            message.push_str(&detail(&body));
         }
         return Err(message);
     }

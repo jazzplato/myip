@@ -113,8 +113,9 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
 /// whole pair when it has no `=`), up to a `#`. An argument is trimmed first, as FIELD is
 /// before it is sent. A percent-decoded form is masked as well, since the server sees that
 /// one. Like the other redactions, no value is too short to be masked; an empty one is
-/// skipped. Longer values go first so that one that contains another cannot leave a tail
-/// behind.
+/// skipped. Every place where a value occurs is found in `text` as it is, and places that
+/// overlap or touch are masked once, so a value that holds another, or two that overlap,
+/// leave no tail behind, and a mask is never searched for a value again.
 pub fn redact_arg_values(text: &str, args: &[String]) -> String {
     let mut values: Vec<String> = Vec::new();
     for (_, query) in args.iter().filter_map(|arg| arg.trim().split_once('?')) {
@@ -126,12 +127,30 @@ pub fn redact_arg_values(text: &str, args: &[String]) -> String {
         }
     }
     values.retain(|value| !value.is_empty());
-    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.sort();
     values.dedup();
-    let mut out = text.to_owned();
-    for value in values {
-        out = out.replace(&value, "***");
+    let mut spans: Vec<(usize, usize)> = values
+        .iter()
+        .flat_map(|value| text.match_indices(value.as_str()))
+        .map(|(start, found)| (start, start + found.len()))
+        .collect();
+    spans.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    let mut spans = spans.into_iter().peekable();
+    while let Some((start, mut end)) = spans.next() {
+        while let Some(&(next_start, next_end)) = spans.peek() {
+            if next_start > end {
+                break;
+            }
+            end = end.max(next_end);
+            spans.next();
+        }
+        out.push_str(&text[done..start]);
+        out.push_str("***");
+        done = end;
     }
+    out.push_str(&text[done..]);
     out
 }
 
@@ -338,7 +357,7 @@ mod tests {
     fn a_repeated_value_is_not_applied_once_per_repetition() {
         // `*` is masked as `***`, which holds `*` again: a value repeated and interleaved with
         // another of the same length must not make the text grow with every repetition.
-        let repeated = format!("ip?{}", vec!["a=%2A&b=x"; 10].join("&"));
+        let repeated = format!("ip?{}", ["a=%2A&b=x"; 10].join("&"));
         assert_eq!(redact_arg_values("*", &[repeated]), "***");
     }
 
