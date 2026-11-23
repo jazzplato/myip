@@ -2051,14 +2051,16 @@ mod tests {
             (agree, &["public", "--format", "json-pretty"]),
             (agree, &["public", "--format", "yaml"]),
         ] {
+            let started = std::time::Instant::now();
+            let quick = laptop_run(&fixture(), args);
             let inner = fixture();
             let slow = StallsOnce {
                 inner: &inner,
-                stall: Duration::from_millis(10),
+                // Longer than the whole quick run, so its first latency is the larger one.
+                stall: started.elapsed() + Duration::from_millis(10),
                 stalled: std::sync::atomic::AtomicBool::new(false),
             };
             let stalled = run_on(&Machine::laptop().host(), &slow, args);
-            let quick = laptop_run(&fixture(), args);
             assert_ne!(stalled, quick, "the stall did not show in {args:?}");
             assert_eq!(steady_run(stalled), steady_run(quick), "{args:?}");
         }
