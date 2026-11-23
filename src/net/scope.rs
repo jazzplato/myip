@@ -56,8 +56,8 @@ impl Scope {
     }
 }
 
-/// Classifies an address. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is classified as
-/// the IPv4 address it carries.
+/// Classifies an address. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) and a 6to4 address
+/// (`2002::/16`, RFC 3056) are classified as the IPv4 address they carry.
 pub fn classify(ip: IpAddr) -> Scope {
     match ip {
         IpAddr::V4(v4) => classify_v4(v4),
@@ -104,6 +104,15 @@ fn classify_v6(ip: Ipv6Addr) -> Scope {
         // fec0::/10, the discard prefix 100::/64 and the NAT64 prefixes 64:ff9b::/96 and
         // 64:ff9b:1::/48, none of which is a host's public address.
         Scope::Reserved
+    } else if s[0] == 0x2002 {
+        // 6to4 carries an IPv4 address in bits 16..48; without this a provider could pass a
+        // private or loopback address off as a public one. `2002::` is not the unspecified address.
+        let [a, b] = s[1].to_be_bytes();
+        let [c, d] = s[2].to_be_bytes();
+        match classify_v4(Ipv4Addr::new(a, b, c, d)) {
+            Scope::Unspecified => Scope::Reserved,
+            embedded => embedded,
+        }
     } else if (s[0] == 0x2001 && s[1] == 0x0db8) || (s[0] == 0x3fff && s[1] <= 0x0fff) {
         Scope::Documentation
     } else if is_protocol_assignment_v6(&s) {

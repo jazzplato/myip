@@ -123,7 +123,7 @@ pub fn read_answer(parser: Parser, response: &Response, wanted: Family) -> Resul
     if response.body.len() > MAX_ANSWER_BYTES {
         return Err(Reject::TooLarge);
     }
-    if response.body.trim().is_empty() {
+    if response.body.trim_ascii().is_empty() {
         return Err(Reject::Empty);
     }
     if looks_like_html(&response.body) {
@@ -132,7 +132,7 @@ pub fn read_answer(parser: Parser, response: &Response, wanted: Family) -> Resul
     let ip = match parser {
         Parser::PlainText => response
             .body
-            .trim()
+            .trim_ascii()
             .parse()
             .map_err(|_| Reject::NotAnAddress)?,
         Parser::CloudflareTrace => trace_ip(&response.body)?,
@@ -163,7 +163,7 @@ fn trace_ip(body: &str) -> Result<IpAddr, Reject> {
     if values.next().is_some() {
         return Err(Reject::DuplicateTraceIp);
     }
-    value.trim().parse().map_err(|_| Reject::NotAnAddress)
+    value.parse().map_err(|_| Reject::NotAnAddress)
 }
 
 #[cfg(test)]
