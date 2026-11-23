@@ -4,11 +4,18 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
 ### Added
 
 - `--format text|json|json-pretty|yaml` chooses how `public`, `local`, `where` and `all` write their result. `json-pretty` is the `--json` document indented, and `yaml` is the same document as block-style YAML in which every string is double-quoted and no control character is printed raw. `--json` is now exactly `--format json` and its output is unchanged byte for byte; combining the two is a usage error (exit 2), as is `--format` with the ipinfo.io lookup (`FIELD`, `public FIELD`, or no command), before any request. Exit codes and the stdout/stderr split do not change. Only `json` is stable byte for byte; `json-pretty` and `yaml` promise the document, not the whitespace. See [ADR 0002](docs/adr/0002-output-formats-and-styled-text.md).
 - `--color auto|always|never` (default `auto`) colours the text of `local`, `where`, `all` and the `--verify` disagreement report: bold names, dim provenance, green for verified and "no NAT", yellow for unknown, unverified, guesses and a translated address, red for failures and the answer that differs. With the codes removed the text is exactly what 0.1.1 printed, so every word stays. `auto` colours only when stdout is a terminal and honours `NO_COLOR`, `CLICOLOR=0`, `CLICOLOR_FORCE` and `TERM=dumb`; on Windows it also needs a console known to understand ANSI codes. Nothing else changes: pipes and files get the same plain text as before, and the `public` headline, the ipinfo.io lookup, JSON and YAML documents, `--help`, `-v` and stderr are never coloured. Only six fixed SGR codes are written, and text from the network or the machine is still shown with its control characters escaped. See [ADR 0002](docs/adr/0002-output-formats-and-styled-text.md).
 - `myip --version` in a release binary also shows the short commit it was built from and that commit's date in UTC, for example `myip 0.2.0 (f02e182 2026-11-22)`. A build without that information (`cargo install myip`, a plain `cargo build`) still prints just `myip 0.2.0`. The release workflow now checks the exact text on all five targets. There is no build timestamp and no update check.
+
+### Internal
+
+- New test-only dependency `yaml-rust2` (MIT OR Apache-2.0) parses every YAML rendering back in the tests, so the hand-written YAML writer is checked against a real parser. It and its five transitive crates are in `Cargo.lock` but not in the shipped binary.
+- `src/style.rs` (colour) and `src/yaml.rs` (YAML) are new, with no new runtime dependency. The release workflow checks the exact `--version` text on all five targets.
 
 ## [0.1.1] - 2026-11-22
 
@@ -64,7 +71,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - Initial version: prints the body of `https://ipinfo.io/<FIELD>`.
 
-[Unreleased]: https://github.com/jazzplato/myip/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jazzplato/myip/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jazzplato/myip/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jazzplato/myip/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jazzplato/myip/compare/v0.0.1...v0.1.0
 [0.0.1]: https://github.com/jazzplato/myip/releases/tag/v0.0.1
