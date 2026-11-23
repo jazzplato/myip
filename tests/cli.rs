@@ -134,3 +134,52 @@ fn local_prints_a_versioned_json_document_whatever_the_host() {
     assert!(stdout.starts_with("{\"schema_version\":1,"), "{stdout}");
     assert!(stdout.ends_with("}\n"), "{stdout}");
 }
+
+fn parsed(stdout: &[u8]) -> yaml_rust2::Yaml {
+    let stdout = text(stdout);
+    let mut documents = yaml_rust2::YamlLoader::load_from_str(&stdout)
+        .unwrap_or_else(|error| panic!("{error}\n---\n{stdout}"));
+    assert_eq!(documents.len(), 1, "{stdout}");
+    documents.remove(0)
+}
+
+#[test]
+fn where_is_one_document_in_json_pretty_json_and_yaml() {
+    let json = myip(&["--format", "json", "where"]);
+    let pretty = myip(&["--format", "json-pretty", "where"]);
+    let yaml = myip(&["where", "--format", "yaml"]);
+    for out in [&json, &pretty, &yaml] {
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out.stderr.is_empty());
+    }
+    assert_eq!(json.stdout, myip(&["--json", "where"]).stdout);
+    assert!(text(&yaml.stdout).starts_with("schema_version: 1\n"));
+    assert!(text(&pretty.stdout).starts_with("{\n  \"schema_version\": 1,\n"));
+    let tree = parsed(&json.stdout);
+    assert_eq!(tree["schema_version"].as_i64(), Some(1));
+    assert_eq!(parsed(&pretty.stdout), tree);
+    assert_eq!(parsed(&yaml.stdout), tree);
+}
+
+#[test]
+fn local_yaml_is_a_versioned_document_whatever_the_host() {
+    let out = myip(&["--format", "yaml", "local"]);
+    assert!(matches!(out.status.code(), Some(0 | 1)), "{:?}", out.status);
+    assert!(text(&out.stdout).starts_with("schema_version: 1\n"));
+}
+
+#[test]
+fn format_is_a_usage_error_for_the_passthrough_and_with_json() {
+    for args in [
+        &["--format", "yaml", "city"][..],
+        &["--format", "json"],
+        &["--format", "text", "public", "city"],
+        &["--json", "--format", "json", "where"],
+        &["--format", "toml", "where"],
+    ] {
+        let out = myip(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        assert!(text(&out.stderr).contains("--format"), "{args:?}");
+    }
+}

@@ -17,6 +17,7 @@ pub mod public;
 pub mod redact;
 pub mod sanitize;
 pub mod version;
+pub mod yaml;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -1252,7 +1253,17 @@ mod tests {
 
     /// Everything that can be put into a variable, a file or an interface name and must
     /// never reach a terminal as itself.
-    const HOSTILE: [&str; 6] = ["\u{1b}[2J", "\n", "\r", "\0", "\u{85}", "\u{202e}"];
+    const HOSTILE: [&str; 9] = [
+        "\u{1b}[2J",
+        "\n",
+        "\r",
+        "\0",
+        "\u{85}",
+        "\u{202e}",
+        "\u{2028}",
+        "\u{2029}",
+        "\u{feff}",
+    ];
 
     const SERVICE_ACCOUNT_NAMESPACE: &str =
         "/var/run/secrets/kubernetes.io/serviceaccount/namespace";
@@ -1380,12 +1391,12 @@ mod tests {
         for source in SOURCES {
             for bad in HOSTILE {
                 let payload = format!("a{bad}INJECT");
-                for json in [false, true] {
+                for format in [None, Some("json"), Some("json-pretty"), Some("yaml")] {
                     for command in commands {
                         let machine = machine_with(source, &payload);
                         let mut args = vec!["-v"];
-                        if json {
-                            args.push("--json");
+                        if let Some(format) = format {
+                            args.extend(["--format", format]);
                         }
                         args.extend_from_slice(command);
                         let (_, out, err) =
@@ -1394,7 +1405,10 @@ mod tests {
                         if err.contains("INJECT") {
                             on_stderr.insert((source, bad));
                         }
-                        for forbidden in ['\u{1b}', '\r', '\0', '\u{85}', '\u{202e}'] {
+                        for forbidden in [
+                            '\u{1b}', '\r', '\0', '\u{85}', '\u{202e}', '\u{2028}', '\u{2029}',
+                            '\u{feff}', '\u{fffe}', '\u{ffff}',
+                        ] {
                             assert!(
                                 !out.contains(forbidden) && !err.contains(forbidden),
                                 "{label}: {forbidden:?} reached the terminal\nstdout: {out:?}\nstderr: {err:?}"
@@ -1412,7 +1426,7 @@ mod tests {
                                 "{label}: stray stderr line {line:?}"
                             );
                         }
-                        if json {
+                        if format == Some("json") {
                             assert_eq!(out.matches('\n').count(), 1, "{label}: {out:?}");
                         }
                     }
@@ -1716,6 +1730,332 @@ mod tests {
                     "{command:?} must read the namespace file or this test proves nothing: {touched:?}"
                 );
             }
+        }
+    }
+
+    // ---- --format (ADR 0002) ----
+
+    type Fixture = fn() -> RouteFetch;
+
+    fn agree() -> RouteFetch {
+        everyone_says(PUBLIC_IP)
+    }
+
+    fn split() -> RouteFetch {
+        providers([
+            Some(PUBLIC_IP),
+            Some(OTHER_IP),
+            Some(PUBLIC_IP),
+            None,
+            None,
+            None,
+        ])
+    }
+
+    /// Every outcome a document format has to carry: a headline, a verified answer, a
+    /// disagreement (exit 3), a total failure (exit 1) and each dimension command.
+    fn documents() -> [(&'static [&'static str], u8, Fixture); 10] {
+        [
+            (&["public"], 0, agree),
+            (&["public", "--verify"], 0, agree),
+            (&["public", "--verify"], 3, split),
+            (&["public"], 1, nobody_answers),
+            (&["local"], 0, agree),
+            (&["where"], 0, agree),
+            (&["all"], 0, agree),
+            (&["all", "--verify"], 0, agree),
+            (&["all", "--verify"], 3, split),
+            (&["all"], 0, nobody_answers),
+        ]
+    }
+
+    fn laptop_run(fetch: &RouteFetch, args: &[&str]) -> (u8, String, String) {
+        run_on(&Machine::laptop().host(), fetch, args)
+    }
+
+    /// `"latency_ms":123` becomes `"latency_ms":N`: the only thing that differs between runs.
+    fn steady(text: &str) -> String {
+        let key = "\"latency_ms\":";
+        let (mut out, mut rest) = (String::new(), text);
+        while let Some(at) = rest.find(key) {
+            let (head, tail) = rest.split_at(at + key.len());
+            out.push_str(head);
+            let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if digits > 0 {
+                out.push('N');
+            }
+            rest = &tail[digits..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// What a real YAML parser reads from `text` (JSON is YAML), with every measured latency
+    /// zeroed so two runs compare.
+    fn read(text: &str) -> yaml_rust2::Yaml {
+        use yaml_rust2::{Yaml, YamlLoader};
+
+        fn zeroed(yaml: Yaml) -> Yaml {
+            match yaml {
+                Yaml::Array(items) => Yaml::Array(items.into_iter().map(zeroed).collect()),
+                Yaml::Hash(map) => Yaml::Hash(
+                    map.into_iter()
+                        .map(|(key, value)| match (&key, value) {
+                            (Yaml::String(name), Yaml::Integer(_)) if name == "latency_ms" => {
+                                (key, Yaml::Integer(0))
+                            }
+                            (_, value) => {
+                                let value = zeroed(value);
+                                (key, value)
+                            }
+                        })
+                        .collect(),
+                ),
+                other => other,
+            }
+        }
+
+        let mut documents =
+            YamlLoader::load_from_str(text).unwrap_or_else(|error| panic!("{error}\n---\n{text}"));
+        assert_eq!(documents.len(), 1, "{text}");
+        zeroed(documents.remove(0))
+    }
+
+    #[test]
+    fn format_json_is_the_json_flag_byte_for_byte() {
+        for (args, code, fixture) in documents() {
+            let (want_code, want, want_err) =
+                laptop_run(&fixture(), &[&["--json"][..], args].concat());
+            assert_eq!(want_code, code, "{args:?}");
+            for spelled in [
+                [&["--format", "json"][..], args].concat(),
+                [&["--format=json"][..], args].concat(),
+                [args, &["--format", "json"]].concat(),
+            ] {
+                let (got_code, got, got_err) = laptop_run(&fixture(), &spelled);
+                assert_eq!(got_code, want_code, "{spelled:?}");
+                assert_eq!(steady(&got), steady(&want), "{spelled:?}");
+                assert_eq!(got_err, want_err, "{spelled:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_document_format_carries_the_same_document() {
+        for (args, code, fixture) in documents() {
+            let run =
+                |format: &str| laptop_run(&fixture(), &[&["--format", format][..], args].concat());
+            let (json_code, json, json_err) = run("json");
+            let (pretty_code, pretty, pretty_err) = run("json-pretty");
+            let (yaml_code, yaml, yaml_err) = run("yaml");
+            for (got, err) in [(pretty_code, &pretty_err), (yaml_code, &yaml_err)] {
+                assert_eq!((got, err), (code, &json_err), "{args:?}");
+            }
+            assert_eq!(json_code, code, "{args:?}");
+
+            let tree = read(&json);
+            assert_eq!(read(&pretty), tree, "{args:?}\n{pretty}");
+            assert_eq!(read(&yaml), tree, "{args:?}\n{yaml}");
+            assert_eq!(tree["schema_version"].as_i64(), Some(1), "{args:?}");
+
+            assert!(yaml.starts_with("schema_version: 1\n"), "{yaml}");
+            assert!(
+                pretty.starts_with("{\n  \"schema_version\": 1,\n"),
+                "{pretty}"
+            );
+            for (text, name) in [(&json, "json"), (&pretty, "json-pretty"), (&yaml, "yaml")] {
+                assert!(
+                    text.ends_with('\n') && !text.ends_with("\n\n"),
+                    "{name}: {text:?}"
+                );
+            }
+            assert_eq!(json.matches('\n').count(), 1, "{json}");
+        }
+    }
+
+    #[test]
+    fn a_disagreement_and_a_total_failure_are_still_documents_in_every_format() {
+        for format in ["json", "json-pretty", "yaml"] {
+            let (code, out, err) =
+                laptop_run(&split(), &["--format", format, "public", "--verify"]);
+            assert_eq!(code, 3, "{format}");
+            assert_eq!(err, "myip: providers disagree: ipv4 (2 of 3 agree)\n");
+            let tree = read(&out);
+            assert_eq!(tree["ip"], yaml_rust2::Yaml::Null, "{format}");
+            assert_eq!(
+                tree["families"][0]["status"].as_str(),
+                Some("disagree"),
+                "{format}"
+            );
+            assert_eq!(tree["families"][0]["agree"].as_i64(), Some(2), "{format}");
+
+            let (code, out, err) = laptop_run(&nobody_answers(), &["public", "--format", format]);
+            assert_eq!(code, 1, "{format}");
+            assert_eq!(err, "myip: no provider returned a valid public address\n");
+            let tree = read(&out);
+            assert_eq!(tree["ip"], yaml_rust2::Yaml::Null, "{format}");
+            assert_eq!(
+                tree["attempts"].as_vec().map(Vec::len),
+                Some(PROVIDERS.len())
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_document_the_attempt_list_stays_on_stderr_and_with_one_it_does_not() {
+        let (code, out, plain) = laptop_run(&nobody_answers(), &["public"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(plain.lines().count() > 1, "{plain}");
+        let (_, _, text) = laptop_run(&nobody_answers(), &["public", "--format", "text"]);
+        assert_eq!(text, plain);
+        for format in ["json", "json-pretty", "yaml"] {
+            let (_, _, err) = laptop_run(&nobody_answers(), &["public", "--format", format]);
+            assert_eq!(
+                err, "myip: no provider returned a valid public address\n",
+                "{format}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_text_is_the_default() {
+        for (args, code, fixture) in documents() {
+            let (want_code, want, want_err) = laptop_run(&fixture(), args);
+            assert_eq!(want_code, code, "{args:?}");
+            for spelled in [
+                [&["--format", "text"][..], args].concat(),
+                [&["--format=text"][..], args].concat(),
+                [args, &["--format", "text"]].concat(),
+            ] {
+                let (got_code, got, got_err) = laptop_run(&fixture(), &spelled);
+                assert_eq!(
+                    (got_code, got, got_err),
+                    (want_code, want.clone(), want_err.clone())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn format_and_json_never_combine_even_when_they_agree() {
+        for combined in [
+            &["--json", "--format", "json", "where"][..],
+            &["--format", "json", "--json", "where"],
+            &["--json", "--format", "yaml", "where"],
+            &["--format", "text", "--json", "where"],
+            &["where", "--json", "--format=json-pretty"],
+            &["--json", "--format", "json"],
+        ] {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, combined);
+            assert_eq!(code, 2, "{combined:?}");
+            assert_eq!(out, "", "{combined:?}");
+            assert!(err.contains("--json") && err.contains("--format"), "{err}");
+            assert!(requested(&fetch).is_empty(), "{combined:?}");
+        }
+    }
+
+    #[test]
+    fn format_is_refused_for_the_ipinfo_passthrough_before_any_request() {
+        for args in [
+            &["--format", "json", "city"][..],
+            &["--format", "text", "city"],
+            &["--format", "yaml", "public", "city"],
+            &["public", "--format", "json-pretty", "ip"],
+            &["--format", "json"],
+            &["--format=yaml"],
+            &["--format", "text"],
+            &["--format", "json", "8.8.8.8/org"],
+        ] {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!(code, 2, "{args:?}");
+            assert_eq!(out, "", "{args:?}");
+            assert!(
+                err.starts_with("error: ")
+                    && err.contains("--format")
+                    && err.ends_with("For more information, try '--help'.\n"),
+                "{args:?}: {err}"
+            );
+            assert!(
+                requested(&fetch).is_empty(),
+                "{args:?} must not query ipinfo.io"
+            );
+        }
+    }
+
+    #[test]
+    fn the_passthrough_still_tolerates_json() {
+        let fetch = FakeFetch::new(vec![ok(200, "Seattle\n")]);
+        let (code, out, err) = exec(&fetch, &["--json", "city"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "Seattle\n", ""));
+    }
+
+    #[test]
+    fn an_unknown_missing_or_repeated_format_is_a_usage_error() {
+        for args in [
+            &["--format", "toml", "where"][..],
+            &["--format=TOML", "where"],
+            &["--format=Yaml", "where"],
+            &["--format", "", "where"],
+            &["--format", "where"],
+            &["where", "--format"],
+            &["--format", "json", "--format", "yaml", "where"],
+            &["--format", "json", "where", "--format", "json"],
+        ] {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!(code, 2, "{args:?}");
+            assert_eq!(out, "", "{args:?}");
+            assert!(err.contains("--format"), "{args:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{args:?}");
+        }
+        let (_, _, err) = exec(&no_network(), &["--format", "toml", "where"]);
+        for value in ["text", "json", "json-pretty", "yaml"] {
+            assert!(err.contains(value), "{value} missing in {err}");
+        }
+    }
+
+    #[test]
+    fn help_lists_the_format_flag_and_its_values() {
+        for args in [&["--help"][..], &["-h"], &["where", "--help"]] {
+            let (code, out, _) = exec(&no_network(), args);
+            assert_eq!(code, 0, "{args:?}");
+            assert!(out.contains("--format <FORMAT>"), "{args:?}\n{out}");
+            for value in ["text", "json-pretty", "yaml"] {
+                assert!(out.contains(value), "{value} missing in\n{out}");
+            }
+        }
+    }
+
+    #[test]
+    fn hostile_text_reads_back_the_same_in_every_document_format() {
+        let commands: [&[&str]; 4] = [&["local"], &["where"], &["all"], &["all", "--verify"]];
+        let mut reached = std::collections::BTreeSet::new();
+        for source in SOURCES {
+            for bad in HOSTILE {
+                let payload = format!("a{bad}INJECT");
+                for command in commands {
+                    let run = |format: &str| {
+                        let machine = machine_with(source, &payload);
+                        let args = [&["--format", format][..], command].concat();
+                        run_on(&machine.host(), &everyone_says(PUBLIC_IP), &args).1
+                    };
+                    let (json, pretty, yaml) = (run("json"), run("json-pretty"), run("yaml"));
+                    let tree = read(&json);
+                    assert_eq!(read(&pretty), tree, "{source} / {bad:?} / {command:?}");
+                    assert_eq!(read(&yaml), tree, "{source} / {bad:?} / {command:?}");
+                    if yaml.contains("INJECT") {
+                        reached.insert(bad);
+                    }
+                }
+            }
+        }
+        for bad in HOSTILE {
+            assert!(
+                reached.contains(bad),
+                "no document carried {bad:?}, so nothing was proved"
+            );
         }
     }
 
