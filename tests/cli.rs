@@ -281,7 +281,8 @@ fn colour_never_reaches_a_document_a_trace_or_a_usage_error() {
     ] {
         let out = myip_with(args, &[("CLICOLOR_FORCE", "1")]);
         assert!(!text(&out.stdout).contains('\u{1b}'), "{args:?}");
-        assert!(out.stderr.is_empty(), "{args:?}");
+        // `local` may write a diagnostic when the interfaces cannot be listed.
+        assert!(!text(&out.stderr).contains('\u{1b}'), "{args:?}");
     }
     let out = myip_with(&["-v", "--color", "always", "where"], &[]);
     assert!(text(&out.stdout).contains('\u{1b}'));
