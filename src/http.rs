@@ -45,13 +45,23 @@ pub enum FetchError {
     /// Carries the transport's own message (for ureq, `timeout: global`).
     Timeout(String),
     TooLarge(usize),
+    /// The host name could not be resolved: no working DNS, or no such name. Carries the
+    /// transport's own message.
+    Resolve(String),
+    /// The server answered, so the status line and headers arrived, but the answer was refused
+    /// or cut short: a redirect that is not followed, too many redirects, or a body that
+    /// could not be read. Carries the transport's own message.
+    Rejected(String),
     Transport(String),
 }
 
 impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Timeout(msg) | Self::Transport(msg) => f.write_str(msg),
+            Self::Timeout(msg)
+            | Self::Resolve(msg)
+            | Self::Rejected(msg)
+            | Self::Transport(msg) => f.write_str(msg),
             Self::TooLarge(limit) => {
                 write!(f, "the response body is larger than request limit: {limit}")
             }
@@ -120,7 +130,7 @@ impl Fetch for UreqFetch {
             };
             hops += 1;
             if hops > MAX_REDIRECTS {
-                return Err(FetchError::Transport("too many redirects".to_owned()));
+                return Err(FetchError::Rejected("too many redirects".to_owned()));
             }
             current = same_origin_target(&current, &location)?;
         };
@@ -138,7 +148,12 @@ impl Fetch for UreqFetch {
             .as_reader()
             .take(opts.max_bytes as u64 + 1)
             .read_to_end(&mut raw)
-            .map_err(|e| map_error(ureq::Error::from(e)))?;
+            .map_err(|e| match map_error(ureq::Error::from(e)) {
+                // The headers arrived: a timeout keeps its own reason, anything else is an
+                // answer that could not be read.
+                FetchError::Transport(message) => FetchError::Rejected(message),
+                other => other,
+            })?;
         if raw.len() > opts.max_bytes {
             return Err(FetchError::TooLarge(opts.max_bytes));
         }
@@ -153,8 +168,19 @@ impl Fetch for UreqFetch {
 fn map_error(e: ureq::Error) -> FetchError {
     match e {
         ureq::Error::Timeout(_) => FetchError::Timeout(e.to_string()),
+        ureq::Error::Io(ref io) if is_lookup_failure(io) => FetchError::Resolve(e.to_string()),
         other => FetchError::Transport(other.to_string()),
     }
+}
+
+/// ureq reports a failed lookup as a plain `io::Error` with no variant of its own (its
+/// `HostNotFound` only means that no address of the wanted family was found). On Unix, std
+/// builds that error from this text and libc's wording, with no OS code. Windows reports
+/// a Winsock code instead, which is not recognised, so there the run is not cut short.
+fn is_lookup_failure(error: &std::io::Error) -> bool {
+    error
+        .to_string()
+        .starts_with("failed to lookup address information")
 }
 
 const MAX_REDIRECTS: usize = 5;
@@ -165,7 +191,7 @@ const MAX_REDIRECTS: usize = 5;
 /// `base`'s, so a path can never change the host. The target is deliberately not
 /// echoed in the error: it is server-controlled and may carry credentials.
 fn same_origin_target(base: &str, location: &str) -> Result<String, FetchError> {
-    let refused = || FetchError::Transport("refused a redirect to a different host".to_owned());
+    let refused = || FetchError::Rejected("refused a redirect to a different host".to_owned());
     let base: ureq::http::Uri = base.parse().map_err(|_| refused())?;
     let (scheme, authority) = match (base.scheme_str(), base.authority()) {
         (Some(s), Some(a)) => (s, a),
@@ -536,7 +562,7 @@ mod tests {
         )]);
         let err = UreqFetch.get(&base, &opts()).unwrap_err();
         assert!(
-            matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+            matches!(&err, FetchError::Rejected(m) if m.contains("different host")),
             "{err:?}"
         );
         assert!(
@@ -564,7 +590,7 @@ mod tests {
             )]);
             let err = UreqFetch.get(&base, &opts()).unwrap_err();
             assert!(
-                matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+                matches!(&err, FetchError::Rejected(m) if m.contains("different host")),
                 "{location}: {err:?}"
             );
         }
@@ -576,7 +602,7 @@ mod tests {
         let base = serve(vec![hop; 8]);
         let err = UreqFetch.get(&base, &opts()).unwrap_err();
         assert!(
-            matches!(&err, FetchError::Transport(m) if m.contains("too many redirects")),
+            matches!(&err, FetchError::Rejected(m) if m.contains("too many redirects")),
             "{err:?}"
         );
     }
@@ -770,11 +796,11 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_cut_mid_body_is_a_transport_error_with_the_io_prefix() {
+    fn a_connection_cut_mid_body_is_a_rejected_answer_with_the_io_prefix() {
         let (url, _release) = serve_truncated(false);
         let err = UreqFetch.get(&url, &opts()).unwrap_err();
         match err {
-            FetchError::Transport(msg) => assert!(msg.starts_with("io: "), "{msg}"),
+            FetchError::Rejected(msg) => assert!(msg.starts_with("io: "), "{msg}"),
             other => panic!("{other:?}"),
         }
     }
@@ -789,6 +815,62 @@ mod tests {
         });
         let err = UreqFetch
             .get(&format!("http://{addr}"), &opts())
+            .unwrap_err();
+        assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
+    }
+
+    /// std reports a failed `getaddrinfo` as an `io::Error` without an OS code: its own prefix
+    /// and then libc's wording. The first reason is what `docker run --network none` printed.
+    #[test]
+    fn a_failed_name_lookup_is_a_resolution_failure_whatever_libc_says() {
+        for reason in [
+            "Temporary failure in name resolution",
+            "Name or service not known",
+        ] {
+            let text = format!("failed to lookup address information: {reason}");
+            let error = ureq::Error::Io(std::io::Error::other(text.clone()));
+            assert_eq!(map_error(error), FetchError::Resolve(format!("io: {text}")));
+        }
+    }
+
+    #[test]
+    fn other_transport_errors_are_not_resolution_failures() {
+        let not_at_the_start = "read failed: failed to lookup address information: x";
+        for error in [
+            ureq::Error::Io(std::io::Error::from_raw_os_error(111)),
+            ureq::Error::Io(std::io::Error::other(not_at_the_start)),
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+        ] {
+            let mapped = map_error(error);
+            assert!(matches!(mapped, FetchError::Transport(_)), "{mapped:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_connection_is_a_transport_error_not_a_resolution_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let err = UreqFetch
+            .get(&format!("http://{addr}"), &opts())
+            .unwrap_err();
+        match err {
+            FetchError::Transport(msg) => assert!(msg.contains("refused"), "{msg}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tls_failure_is_a_transport_error_not_a_resolution_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+        });
+        let err = UreqFetch
+            .get(&format!("https://{addr}"), &opts())
             .unwrap_err();
         assert!(matches!(err, FetchError::Transport(_)), "{err:?}");
     }
