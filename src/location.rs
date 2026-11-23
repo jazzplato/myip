@@ -278,31 +278,59 @@ fn systemd_signal(env: &dyn Env) -> Option<Signal> {
 const CONTAINER_MOUNT_POINTS: [&str; 3] = ["/etc/hostname", "/etc/hosts", "/etc/resolv.conf"];
 
 /// Under a private cgroup namespace `/proc/self/cgroup` is just `0::/`, but the runtime's
-/// bind mounts of `hostname`, `hosts` and `resolv.conf` still carry the container id in
-/// their source path (field 4 of each mountinfo line). Only a mount at the container's own
-/// `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf` (field 5) counts: a host-side tool
-/// can show another container's files at any other path.
+/// bind mounts of `hostname`, `hosts` and `resolv.conf` still say where this process runs:
+/// Docker and Podman carry the container id in their source path (field 4 of each mountinfo
+/// line), and containerd's CRI only the id of the pod sandbox. Only a mount at the
+/// container's own `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf` (field 5) counts: a
+/// host-side tool can show another container's files at any other path.
 fn mountinfo_signal(env: &dyn Env) -> Option<Signal> {
     let content = env.read_to_string(MOUNTINFO).ok()?;
-    let (runtime, id) = content
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split(' ');
-            let (root, mount_point) = (fields.nth(3)?, fields.next()?);
-            CONTAINER_MOUNT_POINTS
-                .contains(&mount_point)
-                .then_some(root)
-        })
-        .find_map(container_mount)?;
+    let mounts = content.lines().filter_map(|line| {
+        let mut fields = line.split(' ');
+        let (root, mount_point) = (fields.nth(3)?, fields.next()?);
+        CONTAINER_MOUNT_POINTS
+            .contains(&mount_point)
+            .then_some(root)
+            .and_then(container_mount)
+    });
+    let mut sandbox = None;
+    for mount in mounts {
+        match mount {
+            Mounted::Container(runtime, id) => {
+                return Some(Signal {
+                    source: format!("file:{MOUNTINFO}"),
+                    runtime: Some(runtime.to_owned()),
+                    id: Some(id),
+                    evidence: format!(
+                        "{MOUNTINFO} shows {runtime} bind-mounting this container's files"
+                    ),
+                });
+            }
+            Mounted::ContainerdSandbox(id) => {
+                sandbox.get_or_insert(id);
+            }
+        }
+    }
+    let sandbox = sandbox?;
     Some(Signal {
         source: format!("file:{MOUNTINFO}"),
-        runtime: Some(runtime.to_owned()),
-        id: Some(id),
-        evidence: format!("{MOUNTINFO} shows {runtime} bind-mounting this container's files"),
+        runtime: Some("containerd".to_owned()),
+        id: None,
+        evidence: format!(
+            "{MOUNTINFO} shows containerd's CRI bind-mounting the files of pod sandbox {}; the sandbox is shared by the pod's containers, so it is not this container's id",
+            &sandbox[..12]
+        ),
     })
 }
 
-fn container_mount(root: &str) -> Option<(&'static str, String)> {
+enum Mounted {
+    /// A container's own directory: the runtime and the container id.
+    Container(&'static str, String),
+    /// containerd's CRI sandbox directory (the id of the pod's sandbox).
+    ContainerdSandbox(String),
+}
+
+fn container_mount(root: &str) -> Option<Mounted> {
     const FILES: [&str; 3] = ["hostname", "hosts", "resolv.conf"];
     let after = |marker: &str, tail: &str| {
         root.match_indices(marker).find_map(|(at, _)| {
@@ -313,8 +341,13 @@ fn container_mount(root: &str) -> Option<(&'static str, String)> {
         })
     };
     after("/containers/", "/")
-        .map(|id| ("docker", id))
-        .or_else(|| after("/overlay-containers/", "/userdata/").map(|id| ("podman", id)))
+        .map(|id| Mounted::Container("docker", id))
+        .or_else(|| {
+            after("/overlay-containers/", "/userdata/").map(|id| Mounted::Container("podman", id))
+        })
+        .or_else(|| {
+            after("/io.containerd.grpc.v1.cri/sandboxes/", "/").map(Mounted::ContainerdSandbox)
+        })
 }
 
 fn containerenv_signal(env: &dyn Env) -> Option<Signal> {
@@ -1045,6 +1078,107 @@ mod tests {
                 );
                 assert_eq!(text(&location.container.id), Some(id64()), "{mountinfo}");
             }
+        }
+    }
+
+    const KIND_VAR: &str =
+        "/docker/volumes/34d591cc583eca2c28c1511f6e3744e468b5e44da223d3e027d16eaf7b199e0d/_data";
+    const KIND_POD_UID: &str = "a4e677d1-bb0f-44ba-9c0e-480430434b4f";
+    const KIND_SANDBOX: &str = "41b03147543572b096137cef650745cbc63df5f55386734782e0b30605b0b9f7";
+
+    /// `/proc/self/mountinfo` of the `main` container of a pod in a real `kind` v0.22.0
+    /// cluster (Kubernetes v1.29.2, containerd, cgroup v2), reduced to the lines that
+    /// matter. The container's `/proc/self/cgroup` there is just `0::/`.
+    fn kind_pod_mountinfo() -> String {
+        format!(
+            "1102 974 0:304 / / rw,relatime master:251 - overlay overlay rw,lowerdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/106/fs,upperdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/108/fs,workdir=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/108/work\n\
+             1103 1102 0:306 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n\
+             1107 1102 0:302 / /sys ro,nosuid,nodev,noexec,relatime - sysfs sysfs ro\n\
+             1108 1107 0:33 / /sys/fs/cgroup ro,nosuid,nodev,noexec,relatime - cgroup2 cgroup rw\n\
+             1110 1102 254:1 {KIND_VAR}/lib/kubelet/pods/{KIND_POD_UID}/etc-hosts /etc/hosts rw,relatime - ext4 /dev/vda1 rw\n\
+             1111 1104 254:1 {KIND_VAR}/lib/kubelet/pods/{KIND_POD_UID}/containers/main/0dd628ea /dev/termination-log rw,relatime - ext4 /dev/vda1 rw\n\
+             1112 1102 254:1 {KIND_VAR}/lib/containerd/io.containerd.grpc.v1.cri/sandboxes/{KIND_SANDBOX}/hostname /etc/hostname rw,relatime - ext4 /dev/vda1 rw\n\
+             1113 1102 254:1 {KIND_VAR}/lib/containerd/io.containerd.grpc.v1.cri/sandboxes/{KIND_SANDBOX}/resolv.conf /etc/resolv.conf rw,relatime - ext4 /dev/vda1 rw\n\
+             1114 1104 0:295 / /dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=65536k\n\
+             1115 1102 0:294 / /run/secrets/kubernetes.io/serviceaccount ro,relatime - tmpfs tmpfs rw,size=4027704k\n"
+        )
+    }
+
+    fn kind_pod_env(mountinfo: &str) -> FakeEnv {
+        pod_env().file(CGROUP, "0::/\n").file(MOUNTINFO, mountinfo)
+    }
+
+    #[test]
+    fn a_containerd_pod_on_cgroup_v2_reports_the_runtime_but_never_the_sandbox_as_the_id() {
+        let location = detect(&kind_pod_env(&kind_pod_mountinfo()));
+        assert_eq!(location.environment, Environment::Kubernetes);
+        assert!(location.container.detected);
+        assert_eq!(
+            text(&location.container.runtime).as_deref(),
+            Some("containerd")
+        );
+        assert_eq!(
+            source(&location.container.runtime),
+            Some("file:/proc/self/mountinfo")
+        );
+        assert_eq!(basis(&location.container.runtime), Some(Basis::Observed));
+        assert!(location.container.id.is_none());
+        let evidence = location.container.evidence.join("\n");
+        assert!(evidence.contains("mountinfo"), "{evidence}");
+        assert!(evidence.contains("sandbox"), "{evidence}");
+        assert!(evidence.contains(&KIND_SANDBOX[..12]), "{evidence}");
+        assert!(!evidence.contains(KIND_SANDBOX), "{evidence}");
+        let json = location.to_json().render(false);
+        assert!(json.contains(r#""id":null"#), "{json}");
+        assert!(!json.contains(KIND_SANDBOX), "{json}");
+    }
+
+    #[test]
+    fn the_same_lines_without_the_container_mount_points_are_a_plain_host() {
+        let lines = kind_pod_mountinfo();
+        let without: String = lines
+            .lines()
+            .filter(|line| !line.contains(" /etc/"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let moved = lines.replace(" /etc/", " /inspect/etc/");
+        for mountinfo in [without, moved] {
+            assert_not_a_container(&mountinfo);
+        }
+    }
+
+    #[test]
+    fn a_cgroup_container_id_still_beats_the_sandbox_directory() {
+        let cgroup = format!(
+            "0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod1c2f.slice/cri-containerd-{}.scope\n",
+            id64()
+        );
+        let env = pod_env()
+            .file(CGROUP, &cgroup)
+            .file(MOUNTINFO, &kind_pod_mountinfo());
+        let location = detect(&env);
+        assert_eq!(text(&location.container.id), Some(id64()));
+        assert_eq!(
+            source(&location.container.id),
+            Some("file:/proc/self/cgroup")
+        );
+    }
+
+    #[test]
+    fn only_a_real_containerd_cri_sandbox_directory_counts() {
+        let lines = kind_pod_mountinfo();
+        let variants = [
+            lines.replace("io.containerd.grpc.v1.cri/sandboxes/", "sandboxes/"),
+            lines.replace("io.containerd.grpc.v1.cri/", "io.containerd.grpc.v1.cri.x/"),
+            lines.replace("/sandboxes/", "/sandbox/"),
+            lines.replace(KIND_SANDBOX, &KIND_SANDBOX[1..]),
+            lines.replace(KIND_SANDBOX, &KIND_SANDBOX.to_uppercase()),
+            lines
+                .replace("/hostname ", "/shm ")
+                .replace("/resolv.conf /etc", "/hosts.bak /etc"),
+        ];
+        for mountinfo in variants {
+            assert_not_a_container(&mountinfo);
         }
     }
 
