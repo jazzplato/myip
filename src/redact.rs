@@ -153,8 +153,8 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
 /// values are the part after the first `=` of each `&`-separated pair of a `?query` (the
 /// whole pair when it has no `=`), up to a `#`. An argument is trimmed first, as FIELD is
 /// before it is sent. A percent-decoded form is masked as well, since the server sees that
-/// one. Like the other redactions, no value is too short to be masked; an empty one is
-/// skipped.
+/// one (as the lossy text of the body when it is not UTF-8). Like the other redactions, no
+/// value is too short to be masked; an empty one is skipped.
 ///
 /// The credentials are those of `redact_credentials`. Both kinds of range are found in
 /// `text` as it is and masked together, so a value that holds a `://` or a `?` is still
