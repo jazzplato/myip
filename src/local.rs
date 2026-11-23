@@ -3,8 +3,9 @@
 //!
 //! Everything here is observed on this machine: the interface list comes from the operating
 //! system, the egress address from asking the kernel to route a UDP socket (nothing is
-//! sent), and the gateway from the Linux routing tables. Whatever cannot be determined is
-//! `null`, never guessed.
+//! sent), and the gateway from the Linux main routing table (`/proc/net/route`,
+//! `/proc/net/ipv6_route`), which does not show policy routing rules or other tables.
+//! Whatever cannot be determined is `null`, never guessed.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -71,7 +72,7 @@ pub struct Report {
     pub interfaces: Result<Vec<InterfaceInfo>, String>,
     pub ipv4: Option<EgressInfo>,
     pub ipv6: Option<EgressInfo>,
-    /// Details for `-v`: probes that failed, route tables that could not be read.
+    /// Details for `-v`: probes that failed, where the gateway came from or why it is unknown.
     pub notes: Vec<String>,
 }
 
@@ -193,13 +194,19 @@ fn egress(
                 Some(DefaultRoute {
                     gateway: Some(gateway),
                     ..
-                }) => Some(GatewayInfo {
-                    address: *gateway,
-                    scope: classify(*gateway),
-                }),
+                }) => {
+                    notes.push(format!(
+                        "{}: the gateway {gateway} comes from the main routing table ({}); policy routing (ip rule) and other tables are not consulted",
+                        side.label, side.routes
+                    ));
+                    Some(GatewayInfo {
+                        address: *gateway,
+                        scope: classify(*gateway),
+                    })
+                }
                 Some(_) => {
                     notes.push(format!(
-                        "{}: the default route for {address} in {} has no gateway (it leaves directly through the interface); gateway left unknown",
+                        "{}: the default route for {address} in the main routing table ({}) has no gateway (it leaves directly through the interface); gateway left unknown",
                         side.label, side.routes
                     ));
                     None
@@ -207,7 +214,7 @@ fn egress(
                 None => {
                     if interface.is_some() {
                         notes.push(format!(
-                            "{}: no single default route in {} applies to {address}; gateway left unknown",
+                            "{}: no single default route in the main routing table ({}) applies to {address}; gateway left unknown",
                             side.label, side.routes
                         ));
                     }
@@ -216,7 +223,10 @@ fn egress(
             }
         }
         Err(e) => {
-            notes.push(format!("cannot read {}: {e}", side.routes));
+            notes.push(format!(
+                "cannot read the main routing table {}: {e}",
+                side.routes
+            ));
             None
         }
     };
