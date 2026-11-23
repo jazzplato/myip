@@ -4,6 +4,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- `myip public FIELD` is accepted as another spelling of `myip FIELD` (for example `myip public city`, which prints what `myip city` prints). It is exactly the ipinfo.io lookup, with the same FIELD rules, options and output: the answer comes from ipinfo.io alone and is not verified. `myip public --verify FIELD` and a FIELD both before and after `public` stay usage errors (exit 2, no request). `myip public` without a FIELD is unchanged. In 0.0.1 `myip public city` asked ipinfo.io for `/public` and printed an HTML page; in 0.1.0 it was a usage error.
+
 ## [0.1.0] - 2026-11-22
 
 ### Changed (behavior differences from 0.0.1)

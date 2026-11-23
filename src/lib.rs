@@ -75,7 +75,10 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             }
         };
     match (cli.command, cli.field.as_deref()) {
-        (Some(Command::Public(args)), None) => public::run(&cli.options, args.verify, ctx),
+        (Some(Command::Public(args)), None) => match args.field.as_deref() {
+            Some(field) => legacy::run(Some(field), &cli.options, ctx),
+            None => public::run(&cli.options, args.verify, ctx),
+        },
         (Some(Command::Local), None) => local::run(&cli.options, ctx),
         (Some(Command::Where), None) => location::run(&cli.options, ctx),
         (Some(Command::All(args)), None) => all::run(&cli.options, args.verify, ctx),
@@ -747,12 +750,11 @@ mod tests {
 
     #[test]
     fn verify_and_extra_arguments_are_only_valid_for_public_and_all() {
-        let cases: [&[&str]; 6] = [
+        let cases: [&[&str]; 5] = [
             &["--verify"],
             &["ip", "--verify"],
             &["local", "--verify"],
             &["where", "--verify"],
-            &["public", "ip"],
             &["public", "--verify=yes"],
         ];
         for args in cases {

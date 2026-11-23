@@ -83,7 +83,7 @@ impl Options {
 }
 
 // All four commands are implemented; `Public` carries its own flags.
-#[derive(Subcommand, Debug, Clone, Copy)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum Command {
     /// Print your public IP address, as seen by independent providers
     ///
@@ -91,6 +91,9 @@ pub enum Command {
     /// icanhazip.com, ident.me and ipinfo.io in that order and prints the first valid
     /// answer. With --verify it asks all of them at once and compares the answers per
     /// address family. The providers see your public address; that is the point.
+    ///
+    /// With a FIELD (`myip public city`) it is the same as `myip city`: ipinfo.io answers
+    /// alone and the answer is not verified.
     Public(PublicArgs),
     /// Interfaces with their scope, and the address used to reach the internet
     Local,
@@ -111,15 +114,20 @@ pub struct AllArgs {
     pub verify: bool,
 }
 
-#[derive(Args, Debug, Clone, Copy)]
+#[derive(Args, Debug, Clone)]
 pub struct PublicArgs {
     /// Ask every provider and require at least two answers per family to agree; exit 3 if they differ
-    #[arg(long)]
+    #[arg(long, conflicts_with = "field")]
     pub verify: bool,
+
+    /// ipinfo.io path to print, e.g. city, region, country: the same as `myip FIELD`,
+    /// answered by ipinfo.io alone and not verified
+    #[arg(value_name = "FIELD", value_parser = parse_field)]
+    pub field: Option<String>,
 }
 
 impl Command {
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::Public(_) => "public",
             Self::Local => "local",
