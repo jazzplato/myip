@@ -5,7 +5,8 @@
 //! read as another type or as syntax, and no line break or control character is printed.
 //! A bare word is only ever `null`, `true`, `false`, an integer, `[]` or `{}`; they mean the
 //! same under YAML 1.1 and 1.2. Keys are bare only when they match `[a-z][a-z0-9_]*` and are
-//! not a word YAML 1.1 reads as a boolean or null.
+//! not a word YAML 1.1 reads as a boolean or null. A key too long for an implicit entry is
+//! written in the explicit `? key` / `: value` form.
 
 use crate::json::{Json, write_quoted};
 
@@ -23,6 +24,11 @@ pub fn render(value: &Json) -> String {
     out
 }
 
+/// YAML reads a `key: value` entry only when the key is at most 1024 characters. A longer one
+/// is written as `? key` and `: value`; this switches over well before that edge, so the
+/// counting of quotes and of the colon cannot matter.
+const MAX_IMPLICIT_KEY: usize = 1000;
+
 /// One `key: value` entry per line at `indent`. With `inline_first` the caller has already
 /// written the first line's indentation (a `- ` marker), so the first entry continues it.
 fn mapping(out: &mut String, fields: &[(String, Json)], indent: usize, mut inline_first: bool) {
@@ -30,7 +36,15 @@ fn mapping(out: &mut String, fields: &[(String, Json)], indent: usize, mut inlin
         if !std::mem::take(&mut inline_first) {
             pad(out, indent);
         }
-        key_text(out, key);
+        let key = key_text(key);
+        if key.chars().count() > MAX_IMPLICIT_KEY {
+            out.push_str("? ");
+            out.push_str(&key);
+            out.push('\n');
+            pad(out, indent);
+        } else {
+            out.push_str(&key);
+        }
         out.push(':');
         match value {
             Json::Object(fields) if !fields.is_empty() => {
@@ -84,11 +98,13 @@ fn scalar_text(out: &mut String, value: &Json) {
     }
 }
 
-fn key_text(out: &mut String, key: &str) {
+fn key_text(key: &str) -> String {
     if is_bare_key(key) {
-        out.push_str(key);
+        key.to_owned()
     } else {
-        write_quoted(out, key, true);
+        let mut quoted = String::new();
+        write_quoted(&mut quoted, key, true);
+        quoted
     }
 }
 
