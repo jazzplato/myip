@@ -5,6 +5,7 @@ pub mod cli;
 pub mod egress;
 pub mod env;
 pub mod fact;
+pub mod hint;
 pub mod http;
 pub mod ifaces;
 pub mod json;
