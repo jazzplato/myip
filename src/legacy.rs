@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::Context;
 use crate::cli::Options;
+use crate::hint;
 use crate::http::{FetchError, FetchOptions, Response, proxy_family_hint};
 use crate::redact::{redact_arg_values, redact_query, redact_userinfo};
 use crate::sanitize;
@@ -35,11 +36,15 @@ pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Co
         Ok(response) => response,
         Err(e) => {
             let mut message = describe(&e, options.timeout);
-            if let Some(hint) = proxy_family_hint(&e, &fetch_options) {
+            if let Some(family_hint) = proxy_family_hint(&e, &fetch_options) {
                 message.push_str("; hint: ");
-                message.push_str(&hint);
+                message.push_str(&family_hint);
             }
-            return fail(ctx, &message);
+            let code = fail(ctx, &message);
+            if matches!(&e, FetchError::Transport(message) if hint::is_no_ca(message)) {
+                let _ = writeln!(ctx.err, "{}", hint::NO_CA_HINT);
+            }
+            return code;
         }
     };
     if options.verbose {

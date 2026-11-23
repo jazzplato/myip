@@ -4,6 +4,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- When every request of `myip public` or of the ipinfo.io lookup (`myip`, `myip FIELD`) fails because the system has no CA certificates (the transport error `No CA certificates were loaded from the system`, typical of a minimal container image), `myip` now prints one more line to stderr after the error and the attempt list: `hint: no CA certificates were found; install ca-certificates, or set SSL_CERT_FILE or SSL_CERT_DIR to a bundle`. It is printed once, never for other failures, and never in a `--json`, `--format` document. The exit code and stdout do not change. The README has a short troubleshooting note.
+
 ### Changed
 
 - `myip public` (and the public part of `myip all`) no longer waits for six failed lookups when there is no name resolution, for example in a container without a network, where it took about 30 seconds to exit 1. Once the host names of two providers in a row could not be resolved and no provider has responded yet, the other providers are not asked; stdout is still empty, the exit code is still 1, and the stderr attempt list shows them as `not asked`. A timeout, a TLS error or a refused connection starts the count over, any HTTP answer turns the early stop off for the run, `--timeout` still applies to each request, and `--verify` still asks all six at once. Recognising a failed lookup needs the text std gives it on Unix (Linux, macOS); on Windows nothing changes.

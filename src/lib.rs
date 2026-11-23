@@ -5,6 +5,7 @@ pub mod cli;
 pub mod egress;
 pub mod env;
 pub mod fact;
+pub mod hint;
 pub mod http;
 pub mod ifaces;
 pub mod json;
@@ -2904,5 +2905,165 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let bad = OsString::from_vec(vec![b'i', 0xFF, b'p']);
         assert_eq!(utf8_args([OsString::from("ip"), bad]), Err(2));
+    }
+
+    // ---- no CA certificates: say what to do, once (#35) ----
+
+    /// The transport error of a Debian container without `ca-certificates`, verbatim from
+    /// `docker run --rm -v myip-target:/t debian:stable-slim /t/release/myip public` (glibc
+    /// release build, ureq 3 with rustls-platform-verifier).
+    const NO_CA: &str = "rustls: unexpected error: No CA certificates were loaded from the system";
+    const NO_CA_HINT: &str = "hint: no CA certificates were found; install ca-certificates, \
+        or set SSL_CERT_FILE or SSL_CERT_DIR to a bundle";
+
+    fn each_provider(
+        answer: impl Fn(usize) -> Result<crate::http::Response, FetchError>,
+    ) -> RouteFetch {
+        let routes = PROVIDERS
+            .iter()
+            .enumerate()
+            .map(|(at, provider)| (provider.url, answer(at)))
+            .collect();
+        RouteFetch::new(routes)
+    }
+
+    fn no_ca_anywhere() -> RouteFetch {
+        providers_failing_with([None; 6], NO_CA)
+    }
+
+    #[test]
+    fn public_says_once_after_the_attempt_list_what_to_do_without_ca_certificates() {
+        let (code, out, err) = laptop_run(&no_ca_anywhere(), &["public"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        let lines: Vec<&str> = err.lines().collect();
+        assert_eq!(lines.len(), 1 + PROVIDERS.len() + 1, "{err}");
+        assert_eq!(
+            lines[0],
+            "myip: no provider returned a valid public address"
+        );
+        for (line, provider) in lines[1..].iter().zip(&PROVIDERS) {
+            assert!(
+                line.starts_with(&format!("  {}: {NO_CA} (", provider.name)),
+                "{line}"
+            );
+        }
+        assert_eq!(lines[PROVIDERS.len() + 1], NO_CA_HINT);
+        assert_eq!(err.matches("hint:").count(), 1, "{err}");
+    }
+
+    #[test]
+    fn the_hint_follows_the_verdict_with_verbose_verify_and_a_family() {
+        for args in [
+            &["-v", "public"][..],
+            &["public", "--verify"],
+            &["-v", "public", "--verify"],
+            &["-6", "public"],
+        ] {
+            let (code, out, err) = laptop_run(&no_ca_anywhere(), args);
+            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            assert_eq!(err.lines().last(), Some(NO_CA_HINT), "{args:?}\n{err}");
+            assert_eq!(err.matches("hint:").count(), 1, "{args:?}\n{err}");
+        }
+    }
+
+    #[test]
+    fn the_hint_is_stderr_only_and_never_part_of_a_document() {
+        for format in ["json", "json-pretty", "yaml"] {
+            for extra in [&[][..], &["--verify"]] {
+                let args = [&["public", "--format", format][..], extra].concat();
+                let (code, out, err) = laptop_run(&no_ca_anywhere(), &args);
+                assert_eq!(code, 1, "{args:?}");
+                assert!(!out.contains("hint"), "{args:?}\n{out}");
+                assert_eq!(
+                    err,
+                    format!("myip: no provider returned a valid public address\n{NO_CA_HINT}\n"),
+                    "{args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_ipinfo_passthrough_says_once_what_to_do_without_ca_certificates() {
+        for args in [&[][..], &["ip"], &["public", "city"], &["-v", "org"]] {
+            let fetch = FakeFetch::new(vec![Err(FetchError::Transport(NO_CA.to_owned()))]);
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            assert!(
+                err.ends_with(&format!("myip: {NO_CA}\n{NO_CA_HINT}\n")),
+                "{args:?}\n{err}"
+            );
+            assert_eq!(err.matches("hint:").count(), 1, "{args:?}\n{err}");
+        }
+    }
+
+    #[test]
+    fn other_failures_never_get_the_hint() {
+        const NO_DNS: &str =
+            "io: failed to lookup address information: Temporary failure in name resolution";
+        let boards: Vec<(&str, RouteFetch)> = vec![
+            (
+                "timeout",
+                each_provider(|_| Err(FetchError::Timeout("deadline".to_owned()))),
+            ),
+            (
+                "http 500",
+                each_provider(|_| reply(500, "text/plain", "boom")),
+            ),
+            ("dns", providers_failing_with([None; 6], NO_DNS)),
+            ("refused", nobody_answers()),
+            (
+                "ca error and a timeout",
+                each_provider(|at| match at {
+                    3 => Err(FetchError::Timeout("deadline".to_owned())),
+                    _ => Err(FetchError::Transport(NO_CA.to_owned())),
+                }),
+            ),
+            (
+                "ca error and an http 500",
+                each_provider(|at| match at {
+                    0 => reply(500, "text/plain", "boom"),
+                    _ => Err(FetchError::Transport(NO_CA.to_owned())),
+                }),
+            ),
+            // The text is only recognised in a transport error, never in what a server says.
+            (
+                "a server quoting the text",
+                each_provider(|_| reply(200, "text/plain", NO_CA)),
+            ),
+        ];
+        for (label, fetch) in boards {
+            for args in [&["public"][..], &["-v", "public"], &["public", "--verify"]] {
+                let (code, out, err) = laptop_run(&fetch, args);
+                assert_eq!((code, out.as_str()), (1, ""), "{label} {args:?}");
+                assert!(!err.contains("hint:"), "{label} {args:?}\n{err}");
+            }
+        }
+        let legacy = [
+            Err(FetchError::Timeout("deadline".to_owned())),
+            Err(FetchError::Transport(NO_DNS.to_owned())),
+            ok(500, NO_CA),
+            ok(200, ""),
+        ];
+        for result in legacy {
+            let (code, _, err) = exec(&FakeFetch::new(vec![result]), &[]);
+            assert_eq!(code, 1);
+            assert!(!err.contains("hint:"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_answer_means_no_hint() {
+        let (code, out, err) = laptop_run(&everyone_says(PUBLIC_IP), &["public"]);
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "1.2.3.4\n", ""));
+        let (code, _, err) = laptop_run(
+            &each_provider(|at| match at {
+                0 => Err(FetchError::Transport(NO_CA.to_owned())),
+                _ => reply(200, "text/plain", "1.2.3.4\n"),
+            }),
+            &["public"],
+        );
+        assert_eq!(code, 0);
+        assert!(!err.contains("hint:"), "{err}");
     }
 }
