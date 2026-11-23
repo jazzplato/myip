@@ -2023,22 +2023,28 @@ mod tests {
 
     #[test]
     fn two_runs_that_measure_different_latencies_compare_equal() {
-        let inner = nobody_answers();
-        let slow = StallsOnce {
-            inner: &inner,
-            stall: Duration::from_millis(10),
-            stalled: std::sync::atomic::AtomicBool::new(false),
-        };
-        let (_, _, stalled) = run_on(&Machine::laptop().host(), &slow, &["public"]);
-        let (_, _, quick) = laptop_run(&nobody_answers(), &["public"]);
+        for (fixture, args) in [
+            (nobody_answers as Fixture, &["public"][..]),
+            (agree, &["public", "--format", "json"]),
+            (agree, &["public", "--format", "json-pretty"]),
+            (agree, &["public", "--format", "yaml"]),
+        ] {
+            let inner = fixture();
+            let slow = StallsOnce {
+                inner: &inner,
+                stall: Duration::from_millis(10),
+                stalled: std::sync::atomic::AtomicBool::new(false),
+            };
+            let stalled = run_on(&Machine::laptop().host(), &slow, args);
+            let quick = laptop_run(&fixture(), args);
+            assert_ne!(stalled, quick, "the stall did not show in {args:?}");
+            assert_eq!(steady_run(stalled), steady_run(quick), "{args:?}");
+        }
+    }
 
-        let first_attempt = stalled.lines().nth(1).unwrap_or_default();
-        let measured = first_attempt
-            .strip_suffix(" ms)")
-            .and_then(|line| line.rsplit_once(" ("))
-            .and_then(|(_, ms)| ms.parse::<u64>().ok());
-        assert!(measured >= Some(10), "the stall did not show: {stalled}");
-        assert_eq!(steady(&stalled), steady(&quick));
+    /// A run's output with every measured latency hidden, so two runs can be compared.
+    fn steady_run((code, out, err): (u8, String, String)) -> (u8, String, String) {
+        (code, steady(&out), steady(&err))
     }
 
     #[test]
@@ -2062,6 +2068,14 @@ mod tests {
             ("(12 ms)", "(12 ms)"),
             ("12 ms", "12 ms"),
             (r#"{"latency_ms":null}"#, r#"{"latency_ms":null}"#),
+            (
+                "{\n  \"latency_ms\": 12,\n  \"x\": 1\n}",
+                "{\n  \"latency_ms\": N,\n  \"x\": 1\n}",
+            ),
+            ("latency_ms: 12\nx: 1\n", "latency_ms: N\nx: 1\n"),
+            ("  latency_ms: 0\n", "  latency_ms: N\n"),
+            ("latency_ms: null\n", "latency_ms: null\n"),
+            ("latency_ms 12\n", "latency_ms 12\n"),
             ("took (12 ms) of 7 s (7 s)", "took (N ms) of 7 s (7 s)"),
         ] {
             assert_eq!(steady(text), want, "{text}");
