@@ -123,7 +123,7 @@ pub fn read_answer(parser: Parser, response: &Response, wanted: Family) -> Resul
     if response.body.len() > MAX_ANSWER_BYTES {
         return Err(Reject::TooLarge);
     }
-    if response.body.trim().is_empty() {
+    if response.body.trim_ascii().is_empty() {
         return Err(Reject::Empty);
     }
     if looks_like_html(&response.body) {
@@ -132,7 +132,7 @@ pub fn read_answer(parser: Parser, response: &Response, wanted: Family) -> Resul
     let ip = match parser {
         Parser::PlainText => response
             .body
-            .trim()
+            .trim_ascii()
             .parse()
             .map_err(|_| Reject::NotAnAddress)?,
         Parser::CloudflareTrace => trace_ip(&response.body)?,
@@ -163,7 +163,7 @@ fn trace_ip(body: &str) -> Result<IpAddr, Reject> {
     if values.next().is_some() {
         return Err(Reject::DuplicateTraceIp);
     }
-    value.trim().parse().map_err(|_| Reject::NotAnAddress)
+    value.parse().map_err(|_| Reject::NotAnAddress)
 }
 
 #[cfg(test)]
@@ -268,6 +268,33 @@ tls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n";
         ] {
             assert_eq!(
                 read(Parser::PlainText, body, Family::Any),
+                Err(Reject::NotAnAddress),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_ascii_whitespace_is_trimmed_around_an_answer() {
+        for body in [
+            "\u{a0}8.8.8.8",
+            "8.8.8.8\u{a0}",
+            "\u{a0}8.8.8.8\u{a0}\n",
+            "\u{2003}8.8.8.8\u{3000}",
+            "\u{85}8.8.8.8",
+            "\u{b}8.8.8.8",
+            "8.8.8.8\u{2028}",
+        ] {
+            assert_eq!(
+                read(Parser::PlainText, body, Family::Any),
+                Err(Reject::NotAnAddress),
+                "{body:?}"
+            );
+        }
+        for body in ["\u{b}8.8.8.8", "\u{a0}8.8.8.8\u{a0}", "\u{2003}8.8.8.8"] {
+            let trace = TRACE.replace("ip=1.2.3.4", &format!("ip={body}"));
+            assert_eq!(
+                read(Parser::CloudflareTrace, &trace, Family::Any),
                 Err(Reject::NotAnAddress),
                 "{body:?}"
             );
@@ -421,6 +448,36 @@ tls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n";
         }
     }
 
+    // 2002::/16 embeds an IPv4 address, so a hostile provider could dress up a private or
+    // loopback address as a "global" IPv6 one.
+    #[test]
+    fn six_to_four_answers_are_judged_by_the_embedded_ipv4() {
+        for (body, scope) in [
+            ("2002:0a00:0001::1", Scope::Private),
+            ("2002:c0a8:0101::", Scope::Private),
+            ("2002:7f00:1::", Scope::Loopback),
+            ("2002:c000:204::1", Scope::Documentation),
+        ] {
+            let trace = format!("fl=1\nip={body}\nts=1\n");
+            for wanted in [Family::Any, Family::V6] {
+                assert_eq!(
+                    read(Parser::PlainText, &format!("{body}\n"), wanted),
+                    Err(Reject::NotGlobal(ip(body), scope)),
+                    "{body} {wanted:?}"
+                );
+                assert_eq!(
+                    read(Parser::CloudflareTrace, &trace, wanted),
+                    Err(Reject::NotGlobal(ip(body), scope)),
+                    "trace {body} {wanted:?}"
+                );
+            }
+        }
+        assert_eq!(
+            read(Parser::PlainText, "2002:808:808::1\n", Family::V6),
+            Ok(ip("2002:808:808::1"))
+        );
+    }
+
     #[test]
     fn the_answer_must_be_in_the_requested_family() {
         let (v4, v6) = ("1.2.3.4", "2606:4700:4700::1111");
@@ -473,6 +530,8 @@ tls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n";
         let same_twice = TRACE.replace("ip=1.2.3.4\n", "ip=1.2.3.4\nip=1.2.3.4\n");
         let junk = TRACE.replace("ip=1.2.3.4", "ip=not-an-ip");
         let blank = TRACE.replace("ip=1.2.3.4", "ip=");
+        let spaced = TRACE.replace("ip=1.2.3.4", "ip= 8.8.8.8");
+        let trailing = TRACE.replace("ip=1.2.3.4", "ip=8.8.8.8 ");
         let indented = TRACE.replace("ip=1.2.3.4", " ip=1.2.3.4");
         let uppercase = TRACE.replace("ip=1.2.3.4", "IP=1.2.3.4");
         let embedded = TRACE
@@ -485,6 +544,8 @@ tls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n";
             ("same twice", &same_twice, Reject::DuplicateTraceIp),
             ("junk", &junk, Reject::NotAnAddress),
             ("blank", &blank, Reject::NotAnAddress),
+            ("space after the equals sign", &spaced, Reject::NotAnAddress),
+            ("space after the address", &trailing, Reject::NotAnAddress),
             ("indented", &indented, Reject::NoTraceIp),
             ("uppercase", &uppercase, Reject::NoTraceIp),
             ("embedded in another value", &embedded, Reject::NoTraceIp),
