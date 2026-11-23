@@ -362,6 +362,13 @@ mod tests {
     }
 
     #[test]
+    fn a_value_that_overlaps_itself_is_masked_as_one_run() {
+        let args = ["ip?t=ABABABABA".to_owned()];
+        assert_eq!(redact_arg_values("ABABABABABABABABA", &args), "***");
+        assert_eq!(redact_arg_values("x ABABABABABA y", &args), "x *** y");
+    }
+
+    #[test]
     fn two_values_that_overlap_in_the_text_are_one_mask() {
         let args = ["ip?a=abc&b=bcd".to_owned()];
         assert_eq!(redact_arg_values("x abcd y", &args), "x *** y");

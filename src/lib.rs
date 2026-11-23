@@ -538,6 +538,16 @@ mod tests {
     }
 
     #[test]
+    fn a_value_that_the_credential_redaction_would_change_is_still_masked() {
+        // The decoded value is `SECRET123://host?x=y`; the credential redaction alone would
+        // turn the body into `SECRET123://host?x=***` and the value would no longer be found.
+        let fetch = FakeFetch::new(vec![ok(403, "token SECRET123://host?x=y rejected")]);
+        let (code, out, err) = exec(&fetch, &["json?token=SECRET123:%2F%2Fhost%3Fx%3Dy"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTTP 403: token *** rejected"), "{err}");
+    }
+
+    #[test]
     fn a_short_query_value_is_hidden_like_any_other() {
         let fetch = FakeFetch::new(vec![ok(403, r#"{"token":"abc"}"#)]);
         let (code, out, err) = exec(&fetch, &["json?token=abc"]);
