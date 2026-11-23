@@ -203,16 +203,53 @@ struct Query<'a> {
     timeout_secs: u64,
 }
 
+/// What an attempt shows about getting out to the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// No request was made.
+    Skipped,
+    /// The host name could not be resolved.
+    Unresolved,
+    /// A server answered over HTTP, whatever the status or the body.
+    Responded,
+    /// A timeout, a TLS or a connection error.
+    Failed,
+}
+
+/// Host names that cannot be resolved this many times in a row, before anything has
+/// responded, end the sequential lookup: the machine most likely has no name resolution, and
+/// each further provider would cost the resolver's timeout again.
+const UNRESOLVED_LIMIT: usize = 2;
+const NO_IPV6: &str = "has no IPv6 address, not asked";
+const OFFLINE_STOP: &str = "not asked: two lookups in a row could not resolve a host name";
+
 impl Query<'_> {
     fn ask_in_order(&self, seen: &mut dyn FnMut(&Attempt)) -> Vec<Attempt> {
         let mut attempts = Vec::new();
+        let (mut unresolved_in_a_row, mut responded) = (0, false);
         for provider in &PROVIDERS {
-            let attempt = self.ask(provider);
+            let stopped = !responded && unresolved_in_a_row >= UNRESOLVED_LIMIT;
+            let (attempt, reach) = if stopped {
+                let reason = if self.lacks_ipv6(provider) {
+                    NO_IPV6
+                } else {
+                    OFFLINE_STOP
+                };
+                (Self::not_asked(provider, reason), Reach::Skipped)
+            } else {
+                self.ask(provider)
+            };
             seen(&attempt);
             let answered = attempt.outcome.is_ok();
             attempts.push(attempt);
             if answered {
                 break;
+            }
+            match reach {
+                Reach::Skipped => {}
+                Reach::Unresolved => unresolved_in_a_row += 1,
+                Reach::Responded => responded = true,
+                Reach::Failed => unresolved_in_a_row = 0,
             }
         }
         attempts
@@ -224,7 +261,7 @@ impl Query<'_> {
         thread::scope(|scope| {
             let handles: Vec<_> = PROVIDERS
                 .iter()
-                .map(|provider| scope.spawn(move || self.ask(provider)))
+                .map(|provider| scope.spawn(move || self.ask(provider).0))
                 .collect();
             handles
                 .into_iter()
@@ -240,27 +277,41 @@ impl Query<'_> {
         })
     }
 
-    fn ask(&self, provider: &'static Provider) -> Attempt {
-        if self.options.family == Family::V6 && !provider.ipv6 {
-            return Attempt {
-                provider,
-                outcome: Err("has no IPv6 address, not asked".to_owned()),
-                latency: None,
-            };
+    fn lacks_ipv6(&self, provider: &Provider) -> bool {
+        self.options.family == Family::V6 && !provider.ipv6
+    }
+
+    fn not_asked(provider: &'static Provider, reason: &str) -> Attempt {
+        Attempt {
+            provider,
+            outcome: Err(reason.to_owned()),
+            latency: None,
+        }
+    }
+
+    fn ask(&self, provider: &'static Provider) -> (Attempt, Reach) {
+        if self.lacks_ipv6(provider) {
+            return (Self::not_asked(provider, NO_IPV6), Reach::Skipped);
         }
         let started = Instant::now();
         let response = self.fetch.get(provider.url, &self.options);
         let latency = started.elapsed();
+        let reach = match &response {
+            Ok(_) | Err(FetchError::TooLarge(_)) => Reach::Responded,
+            Err(FetchError::Resolve(_)) => Reach::Unresolved,
+            Err(FetchError::Timeout(_) | FetchError::Transport(_)) => Reach::Failed,
+        };
         let outcome = match response {
             Ok(response) => read_answer(provider.parser, &response, self.options.family)
                 .map_err(|reject| reject.to_string()),
             Err(error) => Err(self.describe(&error)),
         };
-        Attempt {
+        let attempt = Attempt {
             provider,
             outcome,
             latency: Some(latency),
-        }
+        };
+        (attempt, reach)
     }
 
     /// Transport messages can name the proxy URL, so they go through the redacting `detail`.

@@ -53,6 +53,8 @@ A provider's answer counts only if it is a 2xx response of at most 4 KiB that ho
 
 `-4` and `-6` limit the lookup to one address family. With `-6` the providers without an IPv6 address (3 and 6) are not asked and are listed as errors.
 
+When the host names of two providers in a row cannot be resolved (no DNS, usually no network) and no provider has responded yet, the remaining providers are not asked: each would cost the resolver's timeout again. They are listed as not asked, so the attempt list stays complete, and the exit code is 1 as before. A timeout, a TLS error or a refused connection starts the count over, and once any provider has responded over HTTP, even with an error status, the rest are asked as usual. `--timeout` still applies to each request, and `--verify` always asks all six.
+
 > To cross-check the answer
 
 ```bash

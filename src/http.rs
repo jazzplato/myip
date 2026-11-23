@@ -156,8 +156,19 @@ impl Fetch for UreqFetch {
 fn map_error(e: ureq::Error) -> FetchError {
     match e {
         ureq::Error::Timeout(_) => FetchError::Timeout(e.to_string()),
+        ureq::Error::Io(ref io) if is_lookup_failure(io) => FetchError::Resolve(e.to_string()),
         other => FetchError::Transport(other.to_string()),
     }
+}
+
+/// ureq reports a failed lookup as a plain `io::Error` with no variant of its own (its
+/// `HostNotFound` only means that no address of the wanted family was found). On Unix, std
+/// builds that error from this text and libc's wording, with no OS code. Windows reports
+/// a Winsock code instead, which is not recognised, so there the run is not cut short.
+fn is_lookup_failure(error: &std::io::Error) -> bool {
+    error
+        .to_string()
+        .starts_with("failed to lookup address information")
 }
 
 const MAX_REDIRECTS: usize = 5;

@@ -4,6 +4,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Changed
+
+- `myip public` (and the public part of `myip all`) no longer waits for six failed lookups when there is no name resolution, for example in a container without a network, where it took about 30 seconds to exit 1. Once the host names of two providers in a row could not be resolved and no provider has responded yet, the other providers are not asked; stdout is still empty, the exit code is still 1, and the stderr attempt list shows them as `not asked`. A timeout, a TLS error or a refused connection starts the count over, any HTTP answer turns the early stop off for the run, `--timeout` still applies to each request, and `--verify` still asks all six at once. Recognising a failed lookup needs the text std gives it on Unix (Linux, macOS); on Windows nothing changes.
+
 ### Fixed
 
 - `myip where` reads a container id from `/proc/self/mountinfo` only from a bind mount of the runtime's `hostname`, `hosts` or `resolv.conf` at this process's own `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf`. A host-side tool that shows another container's files at another path (an inspection tool) is no longer reported as running in that container. Every real container mounts those files at those paths, so detection there is unchanged; the JSON schema is unchanged.
