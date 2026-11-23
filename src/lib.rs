@@ -510,6 +510,7 @@ mod tests {
             &["public", "json?token=SECRET123"],
             &["-v", "ip?x=1&token=SECRET123"],
             &["json?token=SECRET%31%32%33"],
+            &["json?token=SECRET123\n"],
         ] {
             let fetch = FakeFetch::new(vec![ok(403, body)]);
             let (code, out, err) = exec(&fetch, args);
@@ -522,6 +523,17 @@ mod tests {
                 "{args:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn a_short_query_value_is_hidden_like_any_other() {
+        let fetch = FakeFetch::new(vec![ok(403, r#"{"token":"abc"}"#)]);
+        let (code, out, err) = exec(&fetch, &["json?token=abc"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(
+            err.contains(r#"myip: ipinfo.io returned HTTP 403: {"token":"***"}"#),
+            "{err}"
+        );
     }
 
     #[test]
@@ -542,8 +554,8 @@ mod tests {
             &[][..],
             &["json"],
             &["-v", "public", "city"],
-            // Too short to be told apart from ordinary text.
-            &["json?a=1&b=12"],
+            // No value: nothing to mask.
+            &["json?a="],
         ] {
             let fetch = FakeFetch::new(vec![ok(403, body)]);
             let (code, out, err) = exec(&fetch, args);

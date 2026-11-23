@@ -109,7 +109,16 @@ fn a_family_flag_with_a_proxy_that_has_no_such_address_says_so() {
     assert!(stderr.contains("http://[::1]:PORT"), "{stderr}");
     assert!(!stderr.contains("S3CR3T"), "{stderr}");
 
-    let out = myip(&["--proxy", "http://127.0.0.1:9", "--timeout", "2", "json"]);
+    // A proxy that hangs up on every connection, so that without `-6` the request fails in
+    // the transport and never reaches whatever listens on this host.
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in proxy.incoming() {
+            drop(stream);
+        }
+    });
+    let out = myip(&["--proxy", &proxy_url, "--timeout", "2", "json"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1));
     assert!(!stderr.contains(hint), "{stderr}");

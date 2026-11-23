@@ -314,17 +314,34 @@ mod tests {
                 &["--proxy=http://h:1/?t=PXTOKEN9", "ip"],
                 "proxy rejected ***",
             ),
+            // No value is too short to hide: the existing query redaction has no minimum.
+            (
+                r#"{"token":"abc"}"#,
+                &["json?token=abc"],
+                r#"{"token":"***"}"#,
+            ),
+            ("pin 12 or 1", &["ip?a=12&b=1"], "pin *** or ***"),
+            // FIELD is trimmed before it is sent, so the value is the trimmed one.
+            (
+                r#"{"error":"SECRET123"}"#,
+                &["json?token=SECRET123\n"],
+                r#"{"error":"***"}"#,
+            ),
+            (
+                r#"{"error":"SECRET123"}"#,
+                &[" json?token=SECRET123 "],
+                r#"{"error":"***"}"#,
+            ),
         ] {
             assert_eq!(redact_arg_values(text, &args(list)), want, "{text}");
         }
     }
 
     #[test]
-    fn short_values_and_arguments_without_a_query_leave_the_text_alone() {
+    fn arguments_without_a_query_value_leave_the_text_alone() {
         let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
         for (text, list) in [
-            ("HTTP 403 abc 1 on page 12", &["json?a=1&b=abc&c=12"][..]),
-            ("token SECRET123 rejected", &["json"]),
+            ("token SECRET123 rejected", &["json"][..]),
             ("token SECRET123 rejected", &["-v", "public", "SECRET123"]),
             ("token SECRET123 rejected", &["json?", "ip?=", "?&"]),
             ("token SECRET123 rejected", &[]),
