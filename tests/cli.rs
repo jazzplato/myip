@@ -50,6 +50,19 @@ fn an_invalid_field_exits_2_without_touching_the_network() {
 }
 
 #[test]
+fn public_accepts_a_field_but_not_together_with_verify() {
+    // `--verify` is checked by the parser, so this never reaches the network.
+    let out = myip(&["public", "--verify", "city"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(text(&out.stderr).contains("error:"));
+
+    let out = myip(&["public", "a/../b"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
 fn a_query_is_accepted_but_its_value_is_never_printed() {
     // A proxy that hangs up on every connection makes the real transport fail without
     // leaving the machine, whatever else listens on this host.
