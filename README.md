@@ -89,7 +89,7 @@ myip: ipinfo.io: 104.232.113.7 (83 ms)
 
 > To get a machine-readable result
 
-`--json` prints one compact line of JSON on stdout for `myip public`, also when the lookup fails (the exit code and a note on stderr still tell you). Without `--verify` the document has the keys below. With `--verify` it adds `families`, one object per family that answered.
+`--json` prints one compact line of JSON on stdout for `myip public`, also when the lookup fails (the exit code and a note on stderr still tell you). `--format json-pretty` and `--format yaml` print the same document indented or as YAML (see [Output formats](#output-formats)). Without `--verify` the document has the keys below. With `--verify` it adds `families`, one object per family that answered.
 
 ```bash
 myip --json public
@@ -202,7 +202,7 @@ evidence
   - /.dockerenv exists (Docker creates it in its containers)
 ```
 
-- `--json` prints one compact JSON document with `"schema_version": 1` as the first key. Fields only ever get added within a schema version; unknown values are `null`. The text output is for people and may change.
+- `--json` prints one compact JSON document with `"schema_version": 1` as the first key. Fields only ever get added within a schema version; unknown values are `null`. The text output is for people and may change. `--format json-pretty` and `--format yaml` carry the same document (see [Output formats](#output-formats)).
 - `-4` / `-6` limit `local` (and the local part of `all`) to one IP family. `where` ignores them.
 - `-v` lists every environment variable and file that was looked at, and why a probe or route table could not be used.
 - The gateway in `local` comes from the Linux routing tables; elsewhere it is `null`. It is the default route on the egress interface that the kernel would pick for the egress address: for IPv6, a source-specific constraint (if any) must contain that address and the most specific source wins; then the lowest metric. A direct default (`default dev wg0`, no gateway) competes like any other, so when it wins or ties with a gateway route the gateway is `null`, never the backup's. It is also `null` when no single route applies, and when the egress address is carried by several interfaces (a virtual IP on `lo` and `eth0`): then the egress `interface` is `null` as well. `-v` says which.
@@ -231,6 +231,40 @@ env:
 
 The variable names are a convention `myip` reads, not something Kubernetes sets by itself. Without them `where` still recognises a pod (from `KUBERNETES_SERVICE_HOST`, the ServiceAccount `namespace` file, a cluster search domain in `/etc/resolv.conf`, or a `kubepods` cgroup in `/proc/self/cgroup`, which is *observed*) and reports the missing identity as `unknown`, naming the variable that would fill it in. The Downward API variables are read for a pod recognised by any of these signals, including one with `dnsPolicy: Default` and no ServiceAccount mount. A variable such as `POD_NAME` on its own, in a plain container, is ignored.
 
+### Output formats
+
+`--format text|json|json-pretty|yaml` picks how `public`, `local`, `where` and `all` write their result. `text` is the default.
+
+| Format | What you get | Stable? |
+|--------|--------------|---------|
+| `text` | The layout for people | No, it may change in any release |
+| `json` | One compact line; the same as `--json` | Yes, byte for byte within `schema_version` 1 |
+| `json-pretty` | The same document, indented | The document, not the whitespace |
+| `yaml` | The same document as YAML | The document, not the whitespace |
+
+All three document formats carry exactly the same keys and values. Parse the output (`jq`, `yq`, a YAML library) rather than matching its text. Failures keep their exit code, and the document still goes to stdout.
+
+```bash
+myip --format yaml public
+```
+```yaml
+schema_version: 1
+ip: "104.232.113.7"
+family: "ipv4"
+provider: "one.one.one.one"
+latency_ms: 29
+verified: null
+error: null
+attempts:
+  - provider: "one.one.one.one"
+    url: "https://one.one.one.one/cdn-cgi/trace"
+    ip: "104.232.113.7"
+    latency_ms: 29
+    error: null
+```
+
+In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read as a boolean or a number), `null`, `true`, `false` and integers are bare, and no control character is ever printed raw. `--format` cannot be combined with `--json` (use one of them), and it is a usage error with the ipinfo.io lookup (a FIELD, `public FIELD`, or no command): that answer is ipinfo.io's own body, passed through unchanged. Like the other options, a `--format` given after the command replaces one given before it.
+
 ### Options
 
 | Option | Meaning |
@@ -238,7 +272,8 @@ The variable names are a convention `myip` reads, not something Kubernetes sets 
 | `--timeout <SECS>` | Give up on a request after 1 to 600 seconds (default 10) |
 | `-4` / `-6` | Use IPv4 or IPv6 only (mutually exclusive); filters `local` and `all` |
 | `--proxy none\|env\|URL` | `none` (default) ignores proxy environment variables; `env` honors `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`; or give an `http://HOST:PORT` URL |
-| `--json` | With `public`, `local`, `where` and `all`: one line of JSON (see above). For the ipinfo.io lookup it changes nothing, the ipinfo.io body is already passed through unchanged |
+| `--json` | With `public`, `local`, `where` and `all`: one line of JSON (see above); the same as `--format json`. For the ipinfo.io lookup it changes nothing, the ipinfo.io body is already passed through unchanged |
+| `--format <FORMAT>` | With `public`, `local`, `where` and `all`: `text` (default), `json`, `json-pretty` or `yaml` (see [Output formats](#output-formats)). Not with `--json`, and not with the ipinfo.io lookup |
 | `-v`, `--verbose` | Log requests to stderr; with `local`, `where` and `all`, also log what was read |
 | `--verify` | Only after `public` or `all`: ask all providers and cross-check them |
 Credentials in a proxy URL are never printed. They are visible to other local users on the command line, so prefer `--proxy env`.
@@ -252,7 +287,7 @@ Credentials in a proxy URL are never printed. They are visible to other local us
 | 2 | Usage error |
 | 3 | `public --verify` or `all --verify`: the providers of an address family disagree |
 
-With `--json` a failing command still prints one parseable document (unknown values `null`, plus an `error` string), and the message goes to stderr as well. If stdout cannot be written, the exit code is 1.
+With `--json` or any document `--format` a failing command still prints one parseable document (unknown values `null`, plus an `error` string), and the message goes to stderr as well. If stdout cannot be written, the exit code is 1.
 
 The answer goes to stdout and diagnostics to stderr, so `ip=$(myip public) || exit 1` is safe in scripts. With exit code 3, stdout carries the list of who said what instead of an address, so test the exit code before using stdout as an address.
 

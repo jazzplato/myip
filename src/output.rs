@@ -1,15 +1,28 @@
-//! How `local`, `where` and `all` print: one compact JSON line or plain text on stdout, and
+//! How `local`, `where` and `all` print: a JSON or YAML document or plain text on stdout, and
 //! with `-v` a trace of what was looked at on stderr.
 
 use std::io::{self, Write};
 
-use crate::cli::Options;
+use crate::cli::{Format, Options};
 use crate::env::RecordingEnv;
 use crate::json::Json;
 use crate::sanitize;
+use crate::yaml;
 
-/// Prints `json` as one line when `--json` is set, otherwise `text` (when there is any).
-/// Plain mode prints nothing on stdout when `text` is `None`: a failure belongs on stderr.
+/// `json` as the document `format` asks for, ending with a newline; `None` for text, which
+/// each command lays out itself.
+pub fn document(json: &Json, format: Format) -> Option<String> {
+    match format {
+        Format::Text => None,
+        Format::Json => Some(format!("{}\n", json.render(false))),
+        Format::JsonPretty => Some(format!("{}\n", json.render(true))),
+        Format::Yaml => Some(yaml::render(json)),
+    }
+}
+
+/// Prints `json` as the document `--format` (or `--json`) asks for, otherwise `text` (when
+/// there is any). Plain mode prints nothing on stdout when `text` is `None`: a failure
+/// belongs on stderr.
 ///
 /// This is the boundary where text stops being trusted: control characters in `text`
 /// (other than its own newlines) are shown as visible escapes, never printed raw.
@@ -19,8 +32,8 @@ pub fn emit(
     text: Option<&str>,
     out: &mut dyn Write,
 ) -> io::Result<()> {
-    if options.json {
-        writeln!(out, "{}", json.render(false))
+    if let Some(document) = document(json, options.format()) {
+        out.write_all(document.as_bytes())
     } else if let Some(text) = text {
         out.write_all(sanitize::escape_keeping_newlines(text).as_bytes())
     } else {

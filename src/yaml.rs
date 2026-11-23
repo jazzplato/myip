@@ -1,10 +1,105 @@
 //! The YAML rendering of a [`Json`] tree for `--format yaml` (ADR 0002).
+//!
+//! Block style, two-space indents, one document, no `---`. Every string is double-quoted
+//! with the JSON escapes (plus `\uXXXX` for what YAML cannot carry raw), so no value can be
+//! read as another type or as syntax, and no line break or control character is printed.
+//! A bare word is only ever `null`, `true`, `false`, an integer, `[]` or `{}`; they mean the
+//! same under YAML 1.1 and 1.2. Keys are bare only when they match `[a-z][a-z0-9_]*` and are
+//! not a word YAML 1.1 reads as a boolean or null.
 
-use crate::json::Json;
+use crate::json::{Json, write_quoted};
 
 /// `value` as one YAML document in block style, ending with a newline.
-pub fn render(_value: &Json) -> String {
-    String::new()
+pub fn render(value: &Json) -> String {
+    let mut out = String::new();
+    match value {
+        Json::Object(fields) if !fields.is_empty() => mapping(&mut out, fields, 0, false),
+        Json::Array(items) if !items.is_empty() => sequence(&mut out, items, 0, false),
+        scalar => {
+            scalar_text(&mut out, scalar);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// One `key: value` entry per line at `indent`. With `inline_first` the caller has already
+/// written the first line's indentation (a `- ` marker), so the first entry continues it.
+fn mapping(out: &mut String, fields: &[(String, Json)], indent: usize, mut inline_first: bool) {
+    for (key, value) in fields {
+        if !std::mem::take(&mut inline_first) {
+            pad(out, indent);
+        }
+        key_text(out, key);
+        out.push(':');
+        match value {
+            Json::Object(fields) if !fields.is_empty() => {
+                out.push('\n');
+                mapping(out, fields, indent + 2, false);
+            }
+            Json::Array(items) if !items.is_empty() => {
+                out.push('\n');
+                sequence(out, items, indent + 2, false);
+            }
+            scalar => {
+                out.push(' ');
+                scalar_text(out, scalar);
+                out.push('\n');
+            }
+        }
+    }
+}
+
+/// One `- item` entry per line at `indent`; see [`mapping`] for `inline_first`.
+fn sequence(out: &mut String, items: &[Json], indent: usize, mut inline_first: bool) {
+    for item in items {
+        if !std::mem::take(&mut inline_first) {
+            pad(out, indent);
+        }
+        out.push_str("- ");
+        match item {
+            Json::Object(fields) if !fields.is_empty() => mapping(out, fields, indent + 2, true),
+            Json::Array(items) if !items.is_empty() => sequence(out, items, indent + 2, true),
+            scalar => {
+                scalar_text(out, scalar);
+                out.push('\n');
+            }
+        }
+    }
+}
+
+fn pad(out: &mut String, indent: usize) {
+    out.extend(std::iter::repeat_n(' ', indent));
+}
+
+/// A scalar or an empty collection, on one line and without the newline.
+fn scalar_text(out: &mut String, value: &Json) {
+    match value {
+        Json::Null => out.push_str("null"),
+        Json::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+        Json::Int(value) => out.push_str(&value.to_string()),
+        Json::Str(value) => write_quoted(out, value, true),
+        Json::Array(_) => out.push_str("[]"),
+        Json::Object(_) => out.push_str("{}"),
+    }
+}
+
+fn key_text(out: &mut String, key: &str) {
+    if is_bare_key(key) {
+        out.push_str(key);
+    } else {
+        write_quoted(out, key, true);
+    }
+}
+
+fn is_bare_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && !matches!(
+            key,
+            "y" | "n" | "yes" | "no" | "on" | "off" | "true" | "false" | "null"
+        )
 }
 
 #[cfg(test)]

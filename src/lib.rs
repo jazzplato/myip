@@ -78,7 +78,7 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
         };
     match (cli.command, cli.field.as_deref()) {
         (Some(Command::Public(args)), None) => match args.field.as_deref() {
-            Some(field) => legacy::run(Some(field), &cli.options, ctx),
+            Some(field) => passthrough(Some(field), &cli.options, ctx),
             None => public::run(&cli.options, args.verify, ctx),
         },
         (Some(Command::Local), None) => local::run(&cli.options, ctx),
@@ -92,8 +92,22 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             );
             2
         }
-        (None, field) => legacy::run(field, &cli.options, ctx),
+        (None, field) => passthrough(field, &cli.options, ctx),
     }
+}
+
+/// Prints what ipinfo.io returns for `field`. That body is passed through as it came, so
+/// `--format` has nothing to shape and is a usage error here (ADR 0002), before any request.
+fn passthrough(field: Option<&str>, options: &cli::Options, ctx: &mut Context<'_>) -> u8 {
+    if options.format.is_some() {
+        let _ = writeln!(
+            ctx.err,
+            "error: --format applies to `public`, `local`, `where` and `all`, not to the ipinfo.io \
+             passthrough (a FIELD, or no command)\n\nFor more information, try '--help'."
+        );
+        return 2;
+    }
+    legacy::run(field, options, ctx)
 }
 
 /// Converts OS arguments to UTF-8 without altering them. A non-Unicode argument is
@@ -2001,7 +2015,8 @@ mod tests {
             &["--format", "where"],
             &["where", "--format"],
             &["--format", "json", "--format", "yaml", "where"],
-            &["--format", "json", "where", "--format", "json"],
+            &["--format", "json", "--format", "json", "where"],
+            &["where", "--format", "json", "--format", "json"],
         ] {
             let fetch = no_network();
             let (code, out, err) = exec(&fetch, args);
@@ -2014,6 +2029,26 @@ mod tests {
         for value in ["text", "json", "json-pretty", "yaml"] {
             assert!(err.contains(value), "{value} missing in {err}");
         }
+    }
+
+    #[test]
+    fn a_format_after_the_command_overrides_one_before_it_like_every_global_option() {
+        let compact = exec(
+            &no_network(),
+            &["--format", "yaml", "where", "--format", "json"],
+        );
+        let yaml = exec(
+            &no_network(),
+            &["--format", "json", "where", "--format", "yaml"],
+        );
+        assert_eq!(compact.0, 0);
+        assert!(
+            compact.1.starts_with("{\"schema_version\":1,"),
+            "{}",
+            compact.1
+        );
+        assert_eq!(yaml.0, 0);
+        assert!(yaml.1.starts_with("schema_version: 1\n"), "{}", yaml.1);
     }
 
     #[test]
