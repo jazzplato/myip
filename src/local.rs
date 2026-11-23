@@ -22,6 +22,7 @@ use crate::json::Json;
 use crate::net::{Scope, classify};
 use crate::output;
 use crate::sanitize;
+use crate::style::Style;
 
 const ROUTES_V4: &str = "/proc/net/route";
 const ROUTES_V6: &str = "/proc/net/ipv6_route";
@@ -121,8 +122,9 @@ pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
     if let Some(error) = report.error() {
         output::diagnostic(ctx.err, error);
     }
-    let text = report.error().is_none().then(|| report.render_text());
-    let written = output::emit(options, &report.to_json(), text.as_deref(), ctx.out);
+    let style = ctx.style(options);
+    let text = report.error().is_none().then(|| report.render(style));
+    let written = output::emit(options, &report.to_json(), text.as_deref(), style, ctx.out);
     output::exit_code(written, report.exit_code())
 }
 
@@ -310,7 +312,8 @@ impl Report {
         ])
     }
 
-    pub fn render_text(&self) -> String {
+    /// The human-readable report. Not a stable format; `--json` is the contract.
+    pub fn render(&self, _style: Style) -> String {
         let mut out = String::from("interfaces (observed)\n");
         match &self.interfaces {
             Err(message) => {
@@ -472,6 +475,14 @@ fn render_interfaces(out: &mut String, list: &[InterfaceInfo]) {
             out.push_str(line.trim_end());
             out.push('\n');
         }
+    }
+}
+
+#[cfg(test)]
+impl Report {
+    /// The plain text, the oracle of the colour tests: what 0.1.1 printed.
+    pub fn render_text(&self) -> String {
+        self.render(Style::Plain)
     }
 }
 

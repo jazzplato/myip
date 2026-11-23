@@ -21,6 +21,7 @@ use crate::location::{self, Environment, Location};
 use crate::output;
 use crate::public::{self, PublicReport};
 use crate::sanitize;
+use crate::style::Style;
 
 #[derive(Debug)]
 pub struct Overview {
@@ -66,10 +67,12 @@ pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
     for note in overview.notes() {
         output::diagnostic(ctx.err, &note);
     }
+    let style = ctx.style(options);
     let written = output::emit(
         options,
         &overview.to_json(),
-        Some(&overview.render_text()),
+        Some(&overview.render(style)),
+        style,
         ctx.out,
     );
     output::exit_code(written, overview.exit_code())
@@ -109,13 +112,13 @@ impl Overview {
         ])
     }
 
-    pub fn render_text(&self) -> String {
+    pub fn render(&self, style: Style) -> String {
         let mut out = String::from("[public]\n");
-        out.push_str(&self.public_lines());
+        out.push_str(&self.public_lines(style));
         out.push_str("\n[local]\n");
-        out.push_str(&self.local.render_text());
+        out.push_str(&self.local.render(style));
         out.push_str("\n[where]\n");
-        out.push_str(&self.location.render_text());
+        out.push_str(&self.location.render(style));
         out.push_str("\n[highlights]\n");
         out.push_str(&self.nat_line());
         if self.location.environment == Environment::Kubernetes {
@@ -140,7 +143,7 @@ impl Overview {
         self.public.headline().map(|headline| headline.ip)
     }
 
-    fn public_lines(&self) -> String {
+    fn public_lines(&self, style: Style) -> String {
         if let Some(headline) = self.public.headline() {
             let verified = headline
                 .verified
@@ -159,7 +162,7 @@ impl Overview {
             sanitize::escape(self.public.error().unwrap_or("no answer"))
         );
         if self.public.code() == 3 {
-            for line in public::disagreement_report(&self.public).lines() {
+            for line in public::disagreement_report(&self.public, style).lines() {
                 lines.push_str(&format!("  {line}\n"));
             }
         }
@@ -272,6 +275,14 @@ fn without_schema_version(json: Json) -> Json {
                 .collect(),
         ),
         other => other,
+    }
+}
+
+#[cfg(test)]
+impl Overview {
+    /// The plain text, the oracle of the colour tests: what 0.1.1 printed.
+    pub fn render_text(&self) -> String {
+        self.render(Style::Plain)
     }
 }
 

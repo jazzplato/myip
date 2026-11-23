@@ -2,6 +2,7 @@ use std::io;
 use std::process::ExitCode;
 
 use myip::http::UreqFetch;
+use myip::style::Terminal;
 use myip::{Context, Host};
 
 fn main() -> ExitCode {
@@ -13,11 +14,13 @@ fn main() -> ExitCode {
         }
     };
     let (stdout, stderr) = (io::stdout(), io::stderr());
+    let terminal = Terminal::detect();
     let (mut out, mut err) = (stdout.lock(), stderr.lock());
     let host = Host::system();
     let mut ctx = Context {
         fetch: &UreqFetch,
         host: &host,
+        terminal,
         out: &mut out,
         err: &mut err,
     };

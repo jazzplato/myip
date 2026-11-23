@@ -16,6 +16,7 @@ use crate::fact::{Fact, SCHEMA_VERSION, Value};
 use crate::json::Json;
 use crate::output;
 use crate::sanitize;
+use crate::style::Style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -111,10 +112,12 @@ pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
     let env = RecordingEnv::new(ctx.host.env);
     let location = detect(&env);
     output::trace(options, &env, &[], ctx.err);
+    let style = ctx.style(options);
     let written = output::emit(
         options,
         &location.to_json(),
-        Some(&location.render_text()),
+        Some(&location.render(style)),
+        style,
         ctx.out,
     );
     output::exit_code(written, 0)
@@ -653,7 +656,7 @@ impl Location {
     }
 
     /// Human-readable report. Not a stable format; `--json` is the contract.
-    pub fn render_text(&self) -> String {
+    pub fn render(&self, _style: Style) -> String {
         let mut out = String::new();
         let headline = match self.environment {
             Environment::Host => "host (no container or Kubernetes signals found)",
@@ -742,6 +745,14 @@ fn fact_or(fact: &Option<Fact>, missing: &str, shorten: fn(&str) -> String) -> S
             sanitize::escape(&fact.source)
         ),
         None => missing.to_owned(),
+    }
+}
+
+#[cfg(test)]
+impl Location {
+    /// The plain text, the oracle of the colour tests: what 0.1.1 printed.
+    pub fn render_text(&self) -> String {
+        self.render(Style::Plain)
     }
 }
 

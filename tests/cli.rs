@@ -183,3 +183,152 @@ fn format_is_a_usage_error_for_the_passthrough_and_with_json() {
         assert!(text(&out.stderr).contains("--format"), "{args:?}");
     }
 }
+
+/// Everything that steers colour, so the shell the tests run in cannot change a result.
+const COLOUR_VARS: [&str; 7] = [
+    "NO_COLOR",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "TERM",
+    "WT_SESSION",
+    "ANSICON",
+    "ConEmuANSI",
+];
+
+fn myip_with(args: &[&str], env: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_myip"));
+    command.args(args);
+    for var in COLOUR_VARS {
+        command.env_remove(var);
+    }
+    command.envs(env.iter().copied());
+    command.output().expect("spawn myip")
+}
+
+/// Removes the colour codes of ADR 0002 (`ESC [ digits m`) and nothing else.
+fn without_codes(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("\u{1b}[") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        match tail[digits..].strip_prefix('m') {
+            Some(after) => rest = after,
+            None => {
+                out.push_str("\u{1b}[");
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[test]
+fn a_pipe_gets_plain_text_and_always_adds_only_codes() {
+    let piped = myip_with(&["where"], &[]);
+    assert_eq!(piped.status.code(), Some(0));
+    let plain = text(&piped.stdout);
+    assert!(!plain.contains('\u{1b}'), "{plain:?}");
+    assert!(plain.starts_with("environment"), "{plain:?}");
+
+    let never = myip_with(&["--color", "never", "where"], &[]);
+    assert_eq!(never.stdout, piped.stdout);
+
+    let always = myip_with(&["--color", "always", "where"], &[]);
+    assert_eq!(always.status.code(), Some(0));
+    assert!(always.stderr.is_empty());
+    let styled = text(&always.stdout);
+    assert!(
+        styled.starts_with("\u{1b}[1menvironment\u{1b}[0m"),
+        "{styled:?}"
+    );
+    assert_eq!(without_codes(&styled), plain);
+}
+
+#[test]
+fn the_environment_steers_auto_and_the_flag_overrules_it() {
+    let styled = |args: &[&str], env: &[(&str, &str)]| {
+        let out = myip_with(args, env);
+        assert_eq!(out.status.code(), Some(0), "{args:?} {env:?}");
+        assert!(out.stderr.is_empty(), "{args:?} {env:?}");
+        text(&out.stdout).contains('\u{1b}')
+    };
+    assert!(styled(&["where"], &[("CLICOLOR_FORCE", "1")]));
+    assert!(styled(
+        &["--color", "always", "where"],
+        &[("NO_COLOR", "1")]
+    ));
+    assert!(!styled(
+        &["where"],
+        &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")]
+    ));
+    assert!(!styled(
+        &["--color", "never", "where"],
+        &[("CLICOLOR_FORCE", "1")]
+    ));
+    assert!(!styled(&["where"], &[("CLICOLOR_FORCE", "0")]));
+    assert!(!styled(&["where"], &[]));
+}
+
+#[test]
+fn colour_never_reaches_a_document_a_trace_or_a_usage_error() {
+    for args in [
+        &["--color", "always", "--json", "where"][..],
+        &["--color", "always", "--format", "yaml", "where"],
+        &["--color", "always", "--format", "json-pretty", "local"],
+    ] {
+        let out = myip_with(args, &[("CLICOLOR_FORCE", "1")]);
+        assert!(!text(&out.stdout).contains('\u{1b}'), "{args:?}");
+        assert!(out.stderr.is_empty(), "{args:?}");
+    }
+    let out = myip_with(&["-v", "--color", "always", "where"], &[]);
+    assert!(text(&out.stdout).contains('\u{1b}'));
+    assert!(!text(&out.stderr).contains('\u{1b}'));
+
+    for args in [
+        &["--color", "rainbow", "where"][..],
+        &["--color", "ALWAYS", "where"],
+        &["--color"],
+    ] {
+        let out = myip_with(args, &[("CLICOLOR_FORCE", "1")]);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let stderr = text(&out.stderr);
+        assert!(
+            stderr.contains("--color") && !stderr.contains('\u{1b}'),
+            "{stderr:?}"
+        );
+    }
+}
+
+/// The one place a real terminal is involved: `script` gives the child a pseudo-terminal.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_real_terminal_gets_colour_by_default_and_not_with_no_color() {
+    let run = |env: &[(&str, &str)]| {
+        let quoted = format!(
+            "'{}' where",
+            env!("CARGO_BIN_EXE_myip").replace('\'', "'\\''")
+        );
+        let mut command = Command::new("script");
+        command.args(["-qec", &quoted, "/dev/null"]);
+        for var in COLOUR_VARS {
+            command.env_remove(var);
+        }
+        command.env("TERM", "xterm").envs(env.iter().copied());
+        let out = command
+            .output()
+            .expect("`script` (util-linux) is needed for the pseudo-terminal test");
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        text(&out.stdout)
+    };
+    let on = run(&[]);
+    assert!(on.contains("\u{1b}[1menvironment\u{1b}[0m"), "{on:?}");
+    let off = run(&[("NO_COLOR", "1")]);
+    assert!(off.starts_with("environment"), "{off:?}");
+    assert!(!off.contains('\u{1b}'), "{off:?}");
+    let dumb = run(&[("TERM", "dumb")]);
+    assert!(!dumb.contains('\u{1b}'), "{dumb:?}");
+}
