@@ -1,4 +1,9 @@
 //! Keeps credentials out of anything `myip` prints to a terminal or a log.
+//!
+//! Every redaction finds the byte ranges of `text` to hide and replaces them with `***` in
+//! one go (`mask`), so that several redactions can be combined on the text as it was.
+
+use std::ops::Range;
 
 /// Replaces the userinfo of every `scheme://user:password@host` in `text` with `***`.
 ///
@@ -6,24 +11,22 @@
 /// contains `/`, `?` or a quote is still covered. This may over-redact an `@` in a
 /// URL path, which is the safe direction.
 pub fn redact_userinfo(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("://") {
-        let (head, tail) = rest.split_at(at + 3);
-        out.push_str(head);
+    mask(text, userinfo_spans(text))
+}
+
+fn userinfo_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find("://") {
+        let authority_start = from + at + 3;
+        let tail = &text[authority_start..];
         let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
-        let (authority, after) = tail.split_at(end);
-        match authority.rfind('@') {
-            Some(i) => {
-                out.push_str("***");
-                out.push_str(&authority[i..]);
-            }
-            None => out.push_str(authority),
+        if let Some(i) = tail[..end].rfind('@') {
+            spans.push(authority_start..authority_start + i);
         }
-        rest = after;
+        from = authority_start + end;
     }
-    out.push_str(rest);
-    out
+    spans
 }
 
 /// Replaces the value of every query parameter of every `scheme://...?query` in `text`
@@ -35,39 +38,77 @@ pub fn redact_userinfo(text: &str) -> String {
 /// JSON can put another URL behind it in the same word. Text outside a `scheme://` URL
 /// is untouched.
 pub fn redact_query(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("://") {
-        let (head, tail) = rest.split_at(at + 3);
-        out.push_str(head);
+    mask(text, query_spans(text))
+}
+
+fn query_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find("://") {
+        let url_start = from + at + 3;
+        let tail = &text[url_start..];
         let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
         let url = &tail[..end];
         let resume = match url.split_once('?') {
             Some((path, query_and_fragment)) => {
-                let (query, fragment) = match query_and_fragment.find('#') {
-                    Some(i) => query_and_fragment.split_at(i),
-                    None => (query_and_fragment, ""),
-                };
-                out.push_str(path);
-                out.push('?');
-                let mut pairs = query.split('&').map(redact_pair);
-                if let Some(first) = pairs.next() {
-                    out.push_str(&first);
-                    for pair in pairs {
-                        out.push('&');
-                        out.push_str(&pair);
+                let query_end = query_and_fragment
+                    .find('#')
+                    .unwrap_or(query_and_fragment.len());
+                let mut pair_start = url_start + path.len() + 1;
+                for pair in query_and_fragment[..query_end].split('&') {
+                    // `name=value` hides the value, even an empty one; a bare `token` is hidden whole.
+                    match pair.find('=') {
+                        Some(i) => spans.push(pair_start + i + 1..pair_start + pair.len()),
+                        None if pair.is_empty() => {}
+                        None => spans.push(pair_start..pair_start + pair.len()),
                     }
+                    pair_start += pair.len() + 1;
                 }
-                end - fragment.len()
+                end - (query_and_fragment.len() - query_end)
             }
-            None => {
-                out.push_str(url);
-                end
-            }
+            None => end,
         };
-        rest = &tail[resume..];
+        from = url_start + resume;
     }
-    out.push_str(rest);
+    spans
+}
+
+/// Replaces the userinfo and the query values of every URL in `text`, as `redact_userinfo`
+/// and then `redact_query` do.
+pub fn redact_credentials(text: &str) -> String {
+    mask(text, credential_spans(text))
+}
+
+/// The ranges that `redact_userinfo` and then `redact_query` hide, all in the coordinates
+/// of `text`. The query pass of the second one looks at the text with the userinfo already
+/// hidden, which has the same shape as the text with it overwritten by letters of the same
+/// length, and that one has the coordinates of `text`.
+fn credential_spans(text: &str) -> Vec<Range<usize>> {
+    let mut spans = userinfo_spans(text);
+    let mut hidden = text.to_owned();
+    for span in &spans {
+        hidden.replace_range(span.clone(), &"x".repeat(span.len()));
+    }
+    spans.extend(query_spans(&hidden));
+    spans
+}
+
+/// `text` with every range of `spans` replaced by `***`. Ranges that overlap or touch are
+/// one mask, so a mask never grows with the number of ranges that cover the same text.
+fn mask(text: &str, mut spans: Vec<Range<usize>>) -> String {
+    spans.sort_unstable_by_key(|span| (span.start, span.end));
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    let mut spans = spans.into_iter().peekable();
+    while let Some(Range { start, mut end }) = spans.next() {
+        while let Some(next) = spans.next_if(|next| next.start <= end) {
+            end = end.max(next.end);
+        }
+        out.push_str(&text[done..start]);
+        out.push_str("***");
+        done = end;
+    }
+    out.push_str(&text[done..]);
     out
 }
 
@@ -105,7 +146,7 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
     out
 }
 
-/// Replaces, wherever `text` has it, every query value that one of `args` carries with `***`.
+/// Hides every credential in `text` and every query value that one of `args` carries.
 ///
 /// A server may echo a value back in an error body (`token SECRET rejected`), with no `?`
 /// or `scheme://` around it, so `redact_arg_queries` and `redact_query` cannot see it. The
@@ -113,10 +154,20 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
 /// whole pair when it has no `=`), up to a `#`. An argument is trimmed first, as FIELD is
 /// before it is sent. A percent-decoded form is masked as well, since the server sees that
 /// one. Like the other redactions, no value is too short to be masked; an empty one is
-/// skipped. Every place where a value occurs is found in `text` as it is, and places that
-/// overlap or touch are masked once, so a value that holds another, or two that overlap,
-/// leave no tail behind, and a mask is never searched for a value again.
+/// skipped.
+///
+/// The credentials are those of `redact_credentials`. Both kinds of range are found in
+/// `text` as it is and masked together, so a value that holds a `://` or a `?` is still
+/// found after its credentials are hidden. Places that overlap or touch, including a value
+/// that holds another, two that overlap, or one that overlaps itself, are masked once, so no
+/// tail is left behind and a mask is never searched for a value again.
 pub fn redact_arg_values(text: &str, args: &[String]) -> String {
+    let mut spans = credential_spans(text);
+    spans.extend(value_spans(text, args));
+    mask(text, spans)
+}
+
+fn value_spans(text: &str, args: &[String]) -> Vec<Range<usize>> {
     let mut values: Vec<String> = Vec::new();
     for (_, query) in args.iter().filter_map(|arg| arg.trim().split_once('?')) {
         let query = query.split_once('#').map_or(query, |(query, _)| query);
@@ -129,29 +180,19 @@ pub fn redact_arg_values(text: &str, args: &[String]) -> String {
     values.retain(|value| !value.is_empty());
     values.sort();
     values.dedup();
-    let mut spans: Vec<(usize, usize)> = values
-        .iter()
-        .flat_map(|value| text.match_indices(value.as_str()))
-        .map(|(start, found)| (start, start + found.len()))
-        .collect();
-    spans.sort_unstable();
-    let mut out = String::with_capacity(text.len());
-    let mut done = 0;
-    let mut spans = spans.into_iter().peekable();
-    while let Some((start, mut end)) = spans.next() {
-        while let Some(&(next_start, next_end)) = spans.peek() {
-            if next_start > end {
-                break;
-            }
-            end = end.max(next_end);
-            spans.next();
+    let mut spans = Vec::new();
+    for value in &values {
+        // `str::match_indices` skips an occurrence that overlaps the previous one, so the
+        // search resumes one character after the start of each match instead.
+        let step = value.chars().next().map_or(1, char::len_utf8);
+        let mut from = 0;
+        while let Some(at) = text[from..].find(value.as_str()) {
+            let start = from + at;
+            spans.push(start..start + value.len());
+            from = start + step;
         }
-        out.push_str(&text[done..start]);
-        out.push_str("***");
-        done = end;
     }
-    out.push_str(&text[done..]);
-    out
+    spans
 }
 
 /// The `%XX`-decoded form of `value`, if it has one that is text.
@@ -372,6 +413,41 @@ mod tests {
     fn two_values_that_overlap_in_the_text_are_one_mask() {
         let args = ["ip?a=abc&b=bcd".to_owned()];
         assert_eq!(redact_arg_values("x abcd y", &args), "x *** y");
+    }
+
+    #[test]
+    fn credentials_are_hidden_in_one_pass_as_the_two_redactions_hide_them_in_turn() {
+        for text in [
+            "http://u:p?w#d@h:1/x?t=1",
+            "http://u:p@h/x?t=1&u=2#f http://a?b=c",
+            "x://@h?k=v y://a:b@c?d",
+            r#"{"a":"https://u:p@h/?t=1#https://v:q@i?k"}"#,
+            "http://?=&&a=&b#c://x@y?z",
+            "no url here, 5 @ 3?",
+            "héllo://ü:ß@é?ñ=ö#ü",
+        ] {
+            assert_eq!(
+                redact_credentials(text),
+                redact_query(&redact_userinfo(text)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_holds_a_url_is_masked_with_the_credentials_it_overlaps() {
+        let args = ["json?token=SECRET123:%2F%2Fhost%3Fx%3Dy".to_owned()];
+        assert_eq!(
+            redact_arg_values("token SECRET123://host?x=y rejected", &args),
+            "token *** rejected"
+        );
+        // A value that is only a colon is masked everywhere, and the credentials that its
+        // `://` finds are still hidden.
+        let args = ["ip?c=:".to_owned()];
+        assert_eq!(
+            redact_arg_values("http://u:pw@h/x?k=v", &args),
+            "http***//***@h/x?k=***"
+        );
     }
 
     #[test]

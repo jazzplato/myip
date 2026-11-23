@@ -6,17 +6,13 @@ use crate::Context;
 use crate::cli::Options;
 use crate::hint;
 use crate::http::{FetchError, FetchOptions, Response, proxy_family_hint};
-use crate::redact::{redact_arg_values, redact_query, redact_userinfo};
+use crate::redact::{redact_arg_values, redact_credentials, redact_query};
 use crate::sanitize;
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
 const DEFAULT_FIELD: &str = "json";
 const MAX_BODY_BYTES: usize = 1 << 20;
 const MAX_DETAIL_CHARS: usize = 200;
-
-fn redact_credentials(text: &str) -> String {
-    redact_query(&redact_userinfo(text))
-}
 
 pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Context<'_>) -> u8 {
     let fetch_options = FetchOptions {
@@ -99,15 +95,16 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
 ///
 /// An error body may echo a query value from the command line (a rejected token, say), so
 /// those values are masked, and before `detail` cuts the body to its length limit. The
-/// credentials go first: a value such as `:` would destroy the `://` that finds them.
+/// credentials and the values are found in the body together: masking the values first
+/// would destroy the `://` that finds the credentials (a value such as `:`), and hiding
+/// the credentials first would change a value that holds a URL, so it is no longer found.
 fn answer<'a>(response: &'a Response, args: &[String]) -> Result<&'a str, String> {
     let html = looks_like_html(&response.body);
     if !(200..300).contains(&response.status) {
         let mut message = format!("ipinfo.io returned HTTP {}", response.status);
         if !html && !response.body.trim().is_empty() {
             message.push_str(": ");
-            let body = redact_arg_values(&redact_credentials(&response.body), args);
-            message.push_str(&detail(&body));
+            message.push_str(&detail(&redact_arg_values(&response.body, args)));
         }
         return Err(message);
     }
