@@ -67,7 +67,9 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
         FetchError::TooLarge(limit) => {
             format!("response from ipinfo.io is larger than {limit} bytes")
         }
-        FetchError::Resolve(message) | FetchError::Transport(message) => message.clone(),
+        FetchError::Resolve(message)
+        | FetchError::Rejected(message)
+        | FetchError::Transport(message) => message.clone(),
     }
 }
 

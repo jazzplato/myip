@@ -299,7 +299,9 @@ impl Query<'_> {
         let reach = match &response {
             Ok(_) | Err(FetchError::TooLarge(_)) => Reach::Responded,
             Err(FetchError::Resolve(_)) => Reach::Unresolved,
-            Err(FetchError::Timeout(_) | FetchError::Transport(_)) => Reach::Failed,
+            Err(FetchError::Timeout(_) | FetchError::Rejected(_) | FetchError::Transport(_)) => {
+                Reach::Failed
+            }
         };
         let outcome = match response {
             Ok(response) => read_answer(provider.parser, &response, self.options.family)
@@ -319,7 +321,9 @@ impl Query<'_> {
         match error {
             FetchError::Timeout(_) => format!("timed out after {}s", self.timeout_secs),
             FetchError::TooLarge(_) => format!("answer larger than {MAX_ANSWER_BYTES} bytes"),
-            FetchError::Resolve(message) | FetchError::Transport(message) => detail(message),
+            FetchError::Resolve(message)
+            | FetchError::Rejected(message)
+            | FetchError::Transport(message) => detail(message),
         }
     }
 }
@@ -355,6 +359,9 @@ mod tests {
         TooBig,
         Timeout,
         Fail(&'static str),
+        /// The server answered but the answer was refused or cut short, for example a
+        /// redirect to another host.
+        Rejected(&'static str),
         /// The host name cannot be resolved, as in a container without a network.
         Dns,
     }
@@ -382,6 +389,7 @@ mod tests {
                     TooBig => Err(FetchError::TooLarge(5000)),
                     Timeout => Err(FetchError::Timeout("deadline".to_owned())),
                     Fail(message) => Err(FetchError::Transport(message.to_owned())),
+                    Rejected(message) => Err(FetchError::Rejected(message.to_owned())),
                     Dns => Err(FetchError::Resolve(NO_DNS.to_owned())),
                 };
                 (provider.url, answer)
@@ -676,6 +684,29 @@ mod tests {
             assert_eq!(go(&fetch, &["public"]).0, 1);
             assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2, 3, 4, 5]));
         }
+    }
+
+    #[test]
+    fn a_rejected_answer_is_a_response_so_later_resolution_failures_do_not_stop_the_run() {
+        let rejected = Rejected("refused a redirect to a different host");
+        for first in [rejected, Rejected("io: unexpected end of file")] {
+            let fetch = board([first, Dns, Dns, Ip(A), Ip(B), Ip(B)]);
+            assert_eq!(
+                go(&fetch, &["public"]),
+                (0, format!("{A}\n"), String::new())
+            );
+            assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2, 3]));
+        }
+
+        let fetch = board([Dns, rejected, Dns, Dns, Dns, Dns]);
+        let (code, _, err) = go(&fetch, &["public"]);
+        assert_eq!(code, 1, "{err}");
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1, 2, 3, 4, 5]));
+        assert!(
+            err.contains("refused a redirect to a different host"),
+            "{err}"
+        );
+        assert!(!err.contains("not asked"), "{err}");
     }
 
     #[test]

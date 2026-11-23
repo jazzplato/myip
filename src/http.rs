@@ -48,13 +48,20 @@ pub enum FetchError {
     /// The host name could not be resolved: no working DNS, or no such name. Carries the
     /// transport's own message.
     Resolve(String),
+    /// The server answered, so the status line and headers arrived, but the answer was refused
+    /// or cut short: a redirect that is not followed, too many redirects, or a body that
+    /// could not be read. Carries the transport's own message.
+    Rejected(String),
     Transport(String),
 }
 
 impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Timeout(msg) | Self::Resolve(msg) | Self::Transport(msg) => f.write_str(msg),
+            Self::Timeout(msg)
+            | Self::Resolve(msg)
+            | Self::Rejected(msg)
+            | Self::Transport(msg) => f.write_str(msg),
             Self::TooLarge(limit) => {
                 write!(f, "the response body is larger than request limit: {limit}")
             }
@@ -550,7 +557,7 @@ mod tests {
         )]);
         let err = UreqFetch.get(&base, &opts()).unwrap_err();
         assert!(
-            matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+            matches!(&err, FetchError::Rejected(m) if m.contains("different host")),
             "{err:?}"
         );
         assert!(
@@ -578,7 +585,7 @@ mod tests {
             )]);
             let err = UreqFetch.get(&base, &opts()).unwrap_err();
             assert!(
-                matches!(&err, FetchError::Transport(m) if m.contains("different host")),
+                matches!(&err, FetchError::Rejected(m) if m.contains("different host")),
                 "{location}: {err:?}"
             );
         }
@@ -590,7 +597,7 @@ mod tests {
         let base = serve(vec![hop; 8]);
         let err = UreqFetch.get(&base, &opts()).unwrap_err();
         assert!(
-            matches!(&err, FetchError::Transport(m) if m.contains("too many redirects")),
+            matches!(&err, FetchError::Rejected(m) if m.contains("too many redirects")),
             "{err:?}"
         );
     }
@@ -784,11 +791,11 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_cut_mid_body_is_a_transport_error_with_the_io_prefix() {
+    fn a_connection_cut_mid_body_is_a_rejected_answer_with_the_io_prefix() {
         let (url, _release) = serve_truncated(false);
         let err = UreqFetch.get(&url, &opts()).unwrap_err();
         match err {
-            FetchError::Transport(msg) => assert!(msg.starts_with("io: "), "{msg}"),
+            FetchError::Rejected(msg) => assert!(msg.starts_with("io: "), "{msg}"),
             other => panic!("{other:?}"),
         }
     }
