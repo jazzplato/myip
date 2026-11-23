@@ -18,6 +18,8 @@ The binaries are not notarized. If macOS refuses one that a browser downloaded, 
 cargo install myip --locked
 ```
 
+`myip --version` from a release binary prints the version, the short commit it was built from and that commit's date in UTC, for example `myip 0.2.0 (f02e182 2026-11-22)`, so a bug report says exactly which build it is. A build from crates.io or a plain `cargo build` has no repository to ask and prints just `myip 0.2.0`. `myip` never checks for updates.
+
 ## Usage
 
 ```

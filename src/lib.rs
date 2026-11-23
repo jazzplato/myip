@@ -16,6 +16,7 @@ pub mod output;
 pub mod public;
 pub mod redact;
 pub mod sanitize;
+pub mod version;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -254,11 +255,15 @@ mod tests {
     }
 
     #[test]
-    fn version_prints_the_crate_version() {
+    fn version_prints_the_version_text() {
         let fetch = no_network();
         let (code, out, _) = exec(&fetch, &["--version"]);
         assert_eq!(code, 0);
-        assert_eq!(out, concat!("myip ", env!("CARGO_PKG_VERSION"), "\n"));
+        assert_eq!(out, format!("myip {}\n", *version::VERSION));
+        assert!(
+            out.starts_with(concat!("myip ", env!("CARGO_PKG_VERSION"))),
+            "{out}"
+        );
         assert!(requested(&fetch).is_empty());
     }
 
