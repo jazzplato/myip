@@ -285,6 +285,52 @@ nested:
     }
 
     #[test]
+    fn a_key_too_long_for_an_implicit_key_is_still_read_back() {
+        // YAML allows an implicit `key: value` entry only up to 1024 characters of key.
+        let keys = [
+            "a".repeat(1000),
+            "a".repeat(1001),
+            "a".repeat(1023),
+            "a".repeat(1024),
+            "a".repeat(1025),
+            "a".repeat(5000),
+            "\u{e9}".repeat(1500),
+            "\n".repeat(600),
+            "\"".repeat(600),
+            "word ".repeat(400),
+        ];
+        let values = [
+            Json::Null,
+            "text".into(),
+            7u32.into(),
+            Json::Array(vec![]),
+            Json::object(Vec::<(&str, Json)>::new()),
+            Json::Array(vec!["x".into(), Json::Array(vec![1u32.into()])]),
+            Json::object([("inner", "y".into()), ("n", Json::Null)]),
+        ];
+        for key in &keys {
+            for value in &values {
+                let entry = Json::object([(key.clone(), value.clone())]);
+                let both = Json::object([
+                    ("first", 1u32.into()),
+                    (key.as_str(), value.clone()),
+                    ("last", 2u32.into()),
+                ]);
+                for tree in [
+                    entry.clone(),
+                    both.clone(),
+                    Json::Array(vec![entry.clone(), both.clone(), Json::Null]),
+                    Json::object([("outer", Json::Array(vec![entry, both]))]),
+                ] {
+                    let out = render(&tree);
+                    assert_eq!(parsed(&out), tree, "key of {} chars in\n{out}", key.len());
+                    assert!(out.ends_with('\n') && !out.contains(" \n"), "{out:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn nothing_a_terminal_or_a_reader_acts_on_is_printed_raw() {
         let tree = Json::Array(AWKWARD.iter().map(|raw| Json::from(*raw)).collect());
         let out = render(&tree);
