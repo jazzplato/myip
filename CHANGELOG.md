@@ -4,6 +4,14 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Fixed
+
+- `myip where` reads a container id from `/proc/self/mountinfo` only from a bind mount of the runtime's `hostname`, `hosts` or `resolv.conf` at this process's own `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf`. A host-side tool that shows another container's files at another path (an inspection tool) is no longer reported as running in that container. Every real container mounts those files at those paths, so detection there is unchanged; the JSON schema is unchanged.
+
+### Documentation
+
+- The README and the `-v` notes of `myip local` say that the gateway comes from the main routing table (`/proc/net/route`, `/proc/net/ipv6_route`) and that policy routing (`ip rule`, other tables) is not consulted. `-v` now also notes where a reported gateway came from; nothing else about the output changes.
+
 ## [0.2.0] - 2026-11-22
 
 ### Added
