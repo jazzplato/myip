@@ -22,7 +22,7 @@ cargo install myip --locked
 
 ```
 myip [OPTIONS] [FIELD]
-myip [OPTIONS] public [--verify]
+myip [OPTIONS] public [--verify | FIELD]
 myip [OPTIONS] local | where
 myip [OPTIONS] all [--verify]
 ```
@@ -108,6 +108,8 @@ myip --json public
 ### ipinfo.io lookup
 
 `FIELD` is an ipinfo.io path, optionally followed by a `?query`: `ip`, `city`, `region`, `country`, `loc`, `org`, `postal`, `timezone`, `8.8.8.8/org`, `json?token=...`, and so on. Without it you get the full JSON.
+
+`myip public FIELD` is another spelling of `myip FIELD` (so `myip public city` prints the same as `myip city`). The answer comes from ipinfo.io alone and is not verified, unlike `myip public` without a FIELD; `public --verify FIELD` is a usage error.
 
 > To get your public ip
 

@@ -75,7 +75,10 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             }
         };
     match (cli.command, cli.field.as_deref()) {
-        (Some(Command::Public(args)), None) => public::run(&cli.options, args.verify, ctx),
+        (Some(Command::Public(args)), None) => match args.field.as_deref() {
+            Some(field) => legacy::run(Some(field), &cli.options, ctx),
+            None => public::run(&cli.options, args.verify, ctx),
+        },
         (Some(Command::Local), None) => local::run(&cli.options, ctx),
         (Some(Command::Where), None) => location::run(&cli.options, ctx),
         (Some(Command::All(args)), None) => all::run(&cli.options, args.verify, ctx),
@@ -449,6 +452,107 @@ mod tests {
     }
 
     #[test]
+    fn public_with_a_field_is_the_legacy_passthrough() {
+        let body = "Seattle\n";
+        for field in [
+            "city",
+            "region",
+            "country",
+            "ip",
+            "8.8.8.8/org",
+            "/ip",
+            "json?token=abc",
+        ] {
+            let direct = FakeFetch::new(vec![ok(200, body)]);
+            let expected = exec(&direct, &[field]);
+            let spelled = FakeFetch::new(vec![ok(200, body)]);
+            let actual = exec(&spelled, &["public", field]);
+            assert_eq!(actual, expected, "public {field}");
+            assert_eq!(actual.0, 0, "public {field}: {}", actual.2);
+            assert_eq!(requested(&spelled), requested(&direct), "public {field}");
+            let (_, a) = spelled.requests.lock().unwrap()[0].clone();
+            let (_, b) = direct.requests.lock().unwrap()[0].clone();
+            assert_eq!(
+                (a.timeout, a.max_bytes, a.family, a.proxy, a.accept),
+                (b.timeout, b.max_bytes, b.family, b.proxy, b.accept),
+                "public {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn public_with_a_field_honors_the_global_options_on_either_side() {
+        let cases: [(&[&str], Family, u64); 5] = [
+            (&["public", "-4", "city"], Family::V4, 10),
+            (&["-6", "public", "city"], Family::V6, 10),
+            (&["public", "city", "-4"], Family::V4, 10),
+            (&["--timeout", "3", "public", "city"], Family::Any, 3),
+            (&["public", "--timeout=7", "city"], Family::Any, 7),
+        ];
+        for (args, family, timeout) in cases {
+            let fetch = FakeFetch::new(vec![ok(200, "Seattle\n")]);
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!((code, out.as_str()), (0, "Seattle\n"), "{args:?}: {err}");
+            let (url, opts) = fetch.requests.lock().unwrap()[0].clone();
+            assert_eq!(url, "https://ipinfo.io/city", "{args:?}");
+            assert_eq!(opts.family, family, "{args:?}");
+            assert_eq!(opts.timeout, Duration::from_secs(timeout), "{args:?}");
+        }
+
+        // --json changes nothing for a FIELD: the raw ipinfo body.
+        let fetch = FakeFetch::new(vec![ok(200, "Seattle\n")]);
+        let (code, out, _) = exec(&fetch, &["--json", "public", "city"]);
+        assert_eq!((code, out.as_str()), (0, "Seattle\n"));
+    }
+
+    #[test]
+    fn public_with_a_field_never_prints_a_query_value() {
+        const SECRET: &str = "tok3n-S3CRET";
+        let fetch = FakeFetch::new(vec![ok(200, "1.2.3.4\n")]);
+        let (code, out, err) = exec(&fetch, &["-v", "public", &format!("ip?token={SECRET}")]);
+        assert_eq!((code, out.as_str()), (0, "1.2.3.4\n"));
+        assert!(err.contains("https://ipinfo.io/ip?token=***"), "{err}");
+        assert!(!err.contains(SECRET), "{err}");
+        assert_eq!(
+            requested(&fetch),
+            [format!("https://ipinfo.io/ip?token={SECRET}")]
+        );
+    }
+
+    #[test]
+    fn public_with_a_field_rejects_combinations_that_cannot_mean_anything() {
+        const SECRET: &str = "S3CR3T";
+        let cases: [&[&str]; 8] = [
+            &["public", "--verify", "city"],
+            &["public", "city", "--verify"],
+            &["public", "--verify", "json?token=S3CR3T"],
+            &["city", "public", "ip"],
+            &["public", "city", "ip"],
+            &["public", "a b"],
+            &["public", "../etc"],
+            &["public", "//evil.example"],
+        ];
+        for args in cases {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!(code, 2, "{args:?}: {err}");
+            assert_eq!(out, "", "{args:?}");
+            assert!(err.contains("error:"), "{args:?}: {err}");
+            assert!(!err.contains(SECRET), "{args:?}: {err}");
+            assert!(requested(&fetch).is_empty(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn public_help_says_a_field_is_answered_by_ipinfo_alone() {
+        let (code, out, _) = exec(&no_network(), &["public", "--help"]);
+        assert_eq!(code, 0);
+        assert!(out.contains("[FIELD]"), "{out}");
+        assert!(out.contains("ipinfo.io"), "{out}");
+        assert!(out.contains("not verified"), "{out}");
+    }
+
+    #[test]
     fn http_errors_exit_1_with_empty_stdout_and_the_reason_on_stderr() {
         for status in [404, 429, 500, 503] {
             let fetch = FakeFetch::new(vec![ok(status, "{\"error\":\"nope\"}")]);
@@ -646,12 +750,11 @@ mod tests {
 
     #[test]
     fn verify_and_extra_arguments_are_only_valid_for_public_and_all() {
-        let cases: [&[&str]; 6] = [
+        let cases: [&[&str]; 5] = [
             &["--verify"],
             &["ip", "--verify"],
             &["local", "--verify"],
             &["where", "--verify"],
-            &["public", "ip"],
             &["public", "--verify=yes"],
         ];
         for args in cases {

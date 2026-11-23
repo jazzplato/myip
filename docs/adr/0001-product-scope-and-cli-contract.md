@@ -22,7 +22,7 @@
 | `myip all` | All of the above, side by side (exposes NAT: local != public) | composes the three |
 | `myip [FIELD]` | The legacy ipinfo passthrough | ipinfo.io |
 
-Bare `myip` and `myip FIELD` keep printing the ipinfo body. Making an identity overview the default is deferred to 0.2.
+Bare `myip` and `myip FIELD` keep printing the ipinfo body. Making an identity overview the default is deferred to 0.2. `myip public FIELD` (for example `myip public city`) is a second spelling of `myip FIELD`, added in 0.1.1 because `public` reads as an optional word before a FIELD: it is the legacy passthrough with all of its rules, not a provider-based command, so its answer comes from ipinfo.io alone and is never verified. `public --verify FIELD` and a FIELD both before and after `public` are usage errors (exit `2`, no request). `local`, `where` and `all` take no FIELD.
 
 **Scope of the rules below.** The output contract and the strict address parsing apply to the new subcommands (`public`, `local`, `where`, `all`). The legacy passthrough keeps its own contract: the raw ipinfo body (JSON or plain text, not re-encoded; `--json` is accepted and changes nothing there), exit codes, and the transport rules (HTTPS only, size cap, HTML rejection, redirect rule). It is never parsed as an address and has no `schema_version` or `source`.
 
