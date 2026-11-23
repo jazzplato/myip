@@ -6,6 +6,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Fixed
 
+- `myip where` in a containerd Kubernetes pod on cgroup v2 (where `/proc/self/cgroup` is just `0::/`) now reports `container.runtime` `containerd` (observed from `/proc/self/mountinfo`, with an evidence line naming the pod sandbox) instead of an empty `container` section. `container.id` stays `null`: containerd's CRI mounts the pod sandbox's `hostname` and `resolv.conf`, which every container of the pod shares, so no container id can be read from them. Checked against a real `kind` v0.22.0 pod (Kubernetes v1.29.2, containerd, cgroup v2); CRI-O and cgroup v1 nodes are unchanged. No JSON field is added and `schema_version` stays 1.
 - `myip where` reads a container id from `/proc/self/mountinfo` only from a bind mount of the runtime's `hostname`, `hosts` or `resolv.conf` at this process's own `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf`. A host-side tool that shows another container's files at another path (an inspection tool) is no longer reported as running in that container. Every real container mounts those files at those paths, so detection there is unchanged; the JSON schema is unchanged.
 
 ### Documentation

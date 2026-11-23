@@ -278,31 +278,59 @@ fn systemd_signal(env: &dyn Env) -> Option<Signal> {
 const CONTAINER_MOUNT_POINTS: [&str; 3] = ["/etc/hostname", "/etc/hosts", "/etc/resolv.conf"];
 
 /// Under a private cgroup namespace `/proc/self/cgroup` is just `0::/`, but the runtime's
-/// bind mounts of `hostname`, `hosts` and `resolv.conf` still carry the container id in
-/// their source path (field 4 of each mountinfo line). Only a mount at the container's own
-/// `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf` (field 5) counts: a host-side tool
-/// can show another container's files at any other path.
+/// bind mounts of `hostname`, `hosts` and `resolv.conf` still say where this process runs:
+/// Docker and Podman carry the container id in their source path (field 4 of each mountinfo
+/// line), and containerd's CRI only the id of the pod sandbox. Only a mount at the
+/// container's own `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf` (field 5) counts: a
+/// host-side tool can show another container's files at any other path.
 fn mountinfo_signal(env: &dyn Env) -> Option<Signal> {
     let content = env.read_to_string(MOUNTINFO).ok()?;
-    let (runtime, id) = content
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split(' ');
-            let (root, mount_point) = (fields.nth(3)?, fields.next()?);
-            CONTAINER_MOUNT_POINTS
-                .contains(&mount_point)
-                .then_some(root)
-        })
-        .find_map(container_mount)?;
+    let mounts = content.lines().filter_map(|line| {
+        let mut fields = line.split(' ');
+        let (root, mount_point) = (fields.nth(3)?, fields.next()?);
+        CONTAINER_MOUNT_POINTS
+            .contains(&mount_point)
+            .then_some(root)
+            .and_then(container_mount)
+    });
+    let mut sandbox = None;
+    for mount in mounts {
+        match mount {
+            Mounted::Container(runtime, id) => {
+                return Some(Signal {
+                    source: format!("file:{MOUNTINFO}"),
+                    runtime: Some(runtime.to_owned()),
+                    id: Some(id),
+                    evidence: format!(
+                        "{MOUNTINFO} shows {runtime} bind-mounting this container's files"
+                    ),
+                });
+            }
+            Mounted::ContainerdSandbox(id) => {
+                sandbox.get_or_insert(id);
+            }
+        }
+    }
+    let sandbox = sandbox?;
     Some(Signal {
         source: format!("file:{MOUNTINFO}"),
-        runtime: Some(runtime.to_owned()),
-        id: Some(id),
-        evidence: format!("{MOUNTINFO} shows {runtime} bind-mounting this container's files"),
+        runtime: Some("containerd".to_owned()),
+        id: None,
+        evidence: format!(
+            "{MOUNTINFO} shows containerd's CRI bind-mounting the files of pod sandbox {}; the sandbox is shared by the pod's containers, so it is not this container's id",
+            &sandbox[..12]
+        ),
     })
 }
 
-fn container_mount(root: &str) -> Option<(&'static str, String)> {
+enum Mounted {
+    /// A container's own directory: the runtime and the container id.
+    Container(&'static str, String),
+    /// containerd's CRI sandbox directory (the id of the pod's sandbox).
+    ContainerdSandbox(String),
+}
+
+fn container_mount(root: &str) -> Option<Mounted> {
     const FILES: [&str; 3] = ["hostname", "hosts", "resolv.conf"];
     let after = |marker: &str, tail: &str| {
         root.match_indices(marker).find_map(|(at, _)| {
@@ -313,8 +341,13 @@ fn container_mount(root: &str) -> Option<(&'static str, String)> {
         })
     };
     after("/containers/", "/")
-        .map(|id| ("docker", id))
-        .or_else(|| after("/overlay-containers/", "/userdata/").map(|id| ("podman", id)))
+        .map(|id| Mounted::Container("docker", id))
+        .or_else(|| {
+            after("/overlay-containers/", "/userdata/").map(|id| Mounted::Container("podman", id))
+        })
+        .or_else(|| {
+            after("/io.containerd.grpc.v1.cri/sandboxes/", "/").map(Mounted::ContainerdSandbox)
+        })
 }
 
 fn containerenv_signal(env: &dyn Env) -> Option<Signal> {
