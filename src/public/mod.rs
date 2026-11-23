@@ -17,6 +17,7 @@ use crate::Context;
 use crate::cli::Options;
 use crate::http::{Family, Fetch, FetchError, FetchOptions};
 use crate::legacy::detail;
+use crate::output;
 use provider::MAX_ANSWER_BYTES;
 
 const NO_ANSWER: &str = "no provider returned a valid public address";
@@ -171,8 +172,10 @@ pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
 
 fn emit(report: &PublicReport, options: &Options, ctx: &mut Context<'_>) -> u8 {
     let code = report.code();
-    let written = if options.json {
-        writeln!(ctx.out, "{}", report.to_json().render(false))
+    let document = output::document(&report.to_json(), options.format());
+    let is_document = document.is_some();
+    let written = if let Some(document) = document {
+        ctx.out.write_all(document.as_bytes())
     } else if let Some(headline) = report.headline() {
         writeln!(ctx.out, "{}", headline.ip)
     } else if code == 3 {
@@ -182,8 +185,8 @@ fn emit(report: &PublicReport, options: &Options, ctx: &mut Context<'_>) -> u8 {
     };
     if let Some(error) = report.error() {
         let _ = writeln!(ctx.err, "myip: {error}");
-        // With -v the attempts have been printed as they happened, and JSON carries them.
-        if code == 1 && !options.json && !options.verbose {
+        // With -v the attempts have been printed as they happened, and a document carries them.
+        if code == 1 && !is_document && !options.verbose {
             let _ = write!(ctx.err, "{}", render::attempt_list(report));
         }
     }

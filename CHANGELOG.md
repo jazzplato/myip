@@ -6,6 +6,7 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ### Added
 
+- `--format text|json|json-pretty|yaml` chooses how `public`, `local`, `where` and `all` write their result. `json-pretty` is the `--json` document indented, and `yaml` is the same document as block-style YAML in which every string is double-quoted and no control character is printed raw. `--json` is now exactly `--format json` and its output is unchanged byte for byte; combining the two is a usage error (exit 2), as is `--format` with the ipinfo.io lookup (`FIELD`, `public FIELD`, or no command), before any request. Exit codes and the stdout/stderr split do not change. Only `json` is stable byte for byte; `json-pretty` and `yaml` promise the document, not the whitespace. See [ADR 0002](docs/adr/0002-output-formats-and-styled-text.md).
 - `myip --version` in a release binary also shows the short commit it was built from and that commit's date in UTC, for example `myip 0.2.0 (f02e182 2026-11-22)`. A build without that information (`cargo install myip`, a plain `cargo build`) still prints just `myip 0.2.0`. The release workflow now checks the exact text on all five targets. There is no build timestamp and no update check.
 
 ## [0.1.1] - 2026-11-22

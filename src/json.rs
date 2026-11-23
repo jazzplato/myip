@@ -33,7 +33,7 @@ impl Json {
             Self::Null => out.push_str("null"),
             Self::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
             Self::Int(value) => out.push_str(&value.to_string()),
-            Self::Str(value) => write_string(out, value),
+            Self::Str(value) => write_quoted(out, value, false),
             Self::Array(items) => write_seq(out, pretty, depth, ('[', ']'), items, |out, item| {
                 item.write(out, pretty, depth + 1);
             }),
@@ -45,7 +45,7 @@ impl Json {
                     ('{', '}'),
                     fields,
                     |out, (key, value)| {
-                        write_string(out, key);
+                        write_quoted(out, key, false);
                         out.push(':');
                         if pretty {
                             out.push(' ');
@@ -89,7 +89,10 @@ fn newline(out: &mut String, depth: usize) {
     }
 }
 
-fn write_string(out: &mut String, value: &str) {
+/// Writes `value` as a double-quoted string, escaping everything [`sanitize::is_unsafe`]
+/// flags. With `yaml` it also escapes U+FFFE and U+FFFF: JSON may carry those raw, a YAML
+/// stream may not. The escapes used are valid in both.
+pub(crate) fn write_quoted(out: &mut String, value: &str, yaml: bool) {
     out.push('"');
     for c in value.chars() {
         match c {
@@ -100,7 +103,9 @@ fn write_string(out: &mut String, value: &str) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            c if sanitize::is_unsafe(c) => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c if sanitize::is_unsafe(c) || (yaml && matches!(c, '\u{fffe}' | '\u{ffff}')) => {
+                out.push_str(&format!("\\u{:04x}", u32::from(c)));
+            }
             c => out.push(c),
         }
     }

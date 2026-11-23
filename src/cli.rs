@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 
 use clap::builder::TypedValueParser;
 use clap::error::ErrorKind;
-use clap::{Arg, Args, Command as ClapCommand, Parser, Subcommand};
+use clap::{Arg, Args, Command as ClapCommand, Parser, Subcommand, ValueEnum};
 
 use crate::http::{Family, ProxyMode};
 use crate::version::VERSION;
@@ -34,11 +34,35 @@ pub struct Cli {
     pub field: Option<String>,
 }
 
+/// How `public`, `local`, `where` and `all` write their result. The contract is ADR 0002.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// For people; the layout is not a stable interface
+    Text,
+    /// One compact JSON line; its bytes are stable (schema_version 1)
+    Json,
+    /// The same document, indented; stable to parse, not byte for byte
+    JsonPretty,
+    /// The same document as YAML; stable to parse, not byte for byte
+    Yaml,
+}
+
+impl Format {
+    /// Whether this is a machine-readable document, whose stdout is the whole answer.
+    pub fn is_document(self) -> bool {
+        self != Self::Text
+    }
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct Options {
-    /// Machine-readable output; with FIELD the ipinfo.io body is passed through unchanged
+    /// Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
     #[arg(long, global = true)]
     pub json: bool,
+
+    /// How public, local, where and all write their result (not with FIELD)
+    #[arg(long, value_name = "FORMAT", global = true, conflicts_with = "json")]
+    pub format: Option<Format>,
 
     /// Use IPv4 only
     #[arg(short = '4', global = true, conflicts_with = "ipv6")]
@@ -74,6 +98,15 @@ pub struct Options {
 }
 
 impl Options {
+    /// The format to write: `--json` is `--format json`, and the default is text.
+    pub fn format(&self) -> Format {
+        if self.json {
+            Format::Json
+        } else {
+            self.format.unwrap_or(Format::Text)
+        }
+    }
+
     pub fn family(&self) -> Family {
         match (self.ipv4, self.ipv6) {
             (true, _) => Family::V4,
