@@ -946,6 +946,97 @@ mod tests {
         assert_eq!(detect(&env).environment, Environment::Host);
     }
 
+    fn assert_not_a_container(mountinfo: &str) {
+        let env = FakeEnv::new()
+            .file(CGROUP, "0::/user.slice/user-1000.slice/session-3.scope\n")
+            .file(MOUNTINFO, mountinfo);
+        let location = detect(&env);
+        assert_eq!(location.environment, Environment::Host, "{mountinfo}");
+        assert!(!location.container.detected, "{mountinfo}");
+        assert!(location.container.id.is_none(), "{mountinfo}");
+        assert!(location.container.runtime.is_none(), "{mountinfo}");
+        assert!(location.container.evidence.is_empty(), "{mountinfo}");
+    }
+
+    #[test]
+    fn another_containers_hostname_mounted_somewhere_else_is_not_this_container() {
+        assert_not_a_container(&format!(
+            "2330 2315 8:1 /var/lib/docker/containers/{}/hostname /mnt/other/hostname ro - ext4 /dev/sda1 rw\n",
+            id64()
+        ));
+    }
+
+    #[test]
+    fn every_container_file_and_both_runtimes_need_the_container_mount_point() {
+        for file in ["hostname", "hosts", "resolv.conf"] {
+            for root in [
+                format!("/var/lib/docker/containers/{}/{file}", id64()),
+                format!(
+                    "/home/dev/.local/share/containers/storage/overlay-containers/{}/userdata/{file}",
+                    id64()
+                ),
+            ] {
+                assert_not_a_container(&format!(
+                    "2330 2315 8:1 {root} /inspect/{file} ro - ext4 /dev/sda1 rw\n"
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_exact_container_mount_points_count() {
+        for mount_point in [
+            "/",
+            "/etc",
+            "/etc/hostname.bak",
+            "/etc/hostname/",
+            "/etc/resolv.conf.d",
+            "/host/etc/hostname",
+            "/hostname",
+        ] {
+            assert_not_a_container(&format!(
+                "2330 2315 8:1 /var/lib/docker/containers/{}/hostname {mount_point} rw - ext4 /dev/sda1 rw\n",
+                id64()
+            ));
+        }
+    }
+
+    #[test]
+    fn a_container_at_the_conventional_mount_points_is_found_for_both_runtimes() {
+        let other = "f".repeat(64);
+        for (runtime, root) in [
+            ("docker", format!("/var/lib/docker/containers/{}", id64())),
+            (
+                "podman",
+                format!(
+                    "/home/dev/.local/share/containers/storage/overlay-containers/{}/userdata",
+                    id64()
+                ),
+            ),
+        ] {
+            for (file, mount_point) in [
+                ("hostname", "/etc/hostname"),
+                ("hosts", "/etc/hosts"),
+                ("resolv.conf", "/etc/resolv.conf"),
+            ] {
+                let mountinfo = format!(
+                    "2300 2299 0:140 / /mnt/other ro - ext4 /dev/sda1 rw\n\
+                     2301 2299 8:1 /var/lib/docker/containers/{other}/hostname /mnt/other/hostname ro - ext4 /dev/sda1 rw\n\
+                     2330 2315 8:1 {root}/{file} {mount_point} rw,relatime - ext4 /dev/sda1 rw\n"
+                );
+                let env = FakeEnv::new().file(MOUNTINFO, &mountinfo);
+                let location = detect(&env);
+                assert!(location.container.detected, "{mountinfo}");
+                assert_eq!(
+                    text(&location.container.runtime).as_deref(),
+                    Some(runtime),
+                    "{mountinfo}"
+                );
+                assert_eq!(text(&location.container.id), Some(id64()), "{mountinfo}");
+            }
+        }
+    }
+
     #[test]
     fn the_docker_daemon_cgroup_on_a_host_is_not_a_container() {
         let env = FakeEnv::new().file(
