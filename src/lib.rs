@@ -152,7 +152,7 @@ mod tests {
     use crate::env::RecordingEnv;
     use crate::env::testing::FakeEnv;
     use crate::http::testing::{FakeFetch, RouteFetch, ok, reply};
-    use crate::http::{Family, FetchError, ProxyMode};
+    use crate::http::{Family, FetchError, FetchOptions, ProxyMode, Response};
     use crate::ifaces::testing::{FakeInterfaces, iface};
     use crate::public::PROVIDERS;
     use crate::style::testing::{assert_balanced, strip};
@@ -2002,6 +2002,70 @@ mod tests {
         }
         out.push_str(rest);
         out
+    }
+
+    /// Delays its first request only, so that two runs of one command measure different
+    /// latencies, as two runs on a loaded machine do.
+    struct StallsOnce<'a> {
+        inner: &'a dyn Fetch,
+        stall: Duration,
+        stalled: std::sync::atomic::AtomicBool,
+    }
+
+    impl Fetch for StallsOnce<'_> {
+        fn get(&self, url: &str, opts: &FetchOptions) -> Result<Response, FetchError> {
+            if !self.stalled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(self.stall);
+            }
+            self.inner.get(url, opts)
+        }
+    }
+
+    #[test]
+    fn two_runs_that_measure_different_latencies_compare_equal() {
+        let inner = nobody_answers();
+        let slow = StallsOnce {
+            inner: &inner,
+            stall: Duration::from_millis(10),
+            stalled: std::sync::atomic::AtomicBool::new(false),
+        };
+        let (_, _, stalled) = run_on(&Machine::laptop().host(), &slow, &["public"]);
+        let (_, _, quick) = laptop_run(&nobody_answers(), &["public"]);
+
+        let first_attempt = stalled.lines().nth(1).unwrap_or_default();
+        let measured = first_attempt
+            .strip_suffix(" ms)")
+            .and_then(|line| line.rsplit_once(" ("))
+            .and_then(|(_, ms)| ms.parse::<u64>().ok());
+        assert!(measured >= Some(10), "the stall did not show: {stalled}");
+        assert_eq!(steady(&stalled), steady(&quick));
+    }
+
+    #[test]
+    fn steady_hides_a_measured_latency_and_nothing_else() {
+        for (text, want) in [
+            (" (12 ms)", " (N ms)"),
+            (
+                "name: down (0 ms)\nname2: HTTP 500 (1234 ms)\n",
+                "name: down (N ms)\nname2: HTTP 500 (N ms)\n",
+            ),
+            (r#"{"latency_ms":12,"x":1}"#, r#"{"latency_ms":N,"x":1}"#),
+            (
+                r#"{"latency_ms":3,"a":" (4 ms)"}"#,
+                r#"{"latency_ms":N,"a":" (N ms)"}"#,
+            ),
+            (" (12 s)", " (12 s)"),
+            (" (x ms)", " (x ms)"),
+            (" (-3 ms)", " (-3 ms)"),
+            (" (1 2 ms)", " (1 2 ms)"),
+            (" (12 ms", " (12 ms"),
+            ("(12 ms)", "(12 ms)"),
+            ("12 ms", "12 ms"),
+            (r#"{"latency_ms":null}"#, r#"{"latency_ms":null}"#),
+            ("took (12 ms) of 7 s (7 s)", "took (N ms) of 7 s (7 s)"),
+        ] {
+            assert_eq!(steady(text), want, "{text}");
+        }
     }
 
     /// What a real YAML parser reads from `text` (JSON is YAML), with every measured latency
