@@ -1306,4 +1306,76 @@ mod tests {
         );
         no_duplicate_notes(&r);
     }
+
+    /// The route files hold the main routing table only: policy routing (`ip rule`, other
+    /// tables) is invisible there, so every `-v` note about the gateway has to say so.
+    fn notes_naming<'a>(r: &'a Report, file: &str) -> Vec<&'a str> {
+        r.notes
+            .iter()
+            .map(String::as_str)
+            .filter(|n| n.contains(file))
+            .collect()
+    }
+
+    #[test]
+    fn a_reported_gateway_is_noted_as_read_from_the_main_routing_table() {
+        let r = report(
+            &container_env(),
+            &container(),
+            &container_probe(),
+            Family::Any,
+        );
+        assert!(r.ipv4.as_ref().unwrap().gateway.is_some());
+        let notes = notes_naming(&r, ROUTES_V4);
+        assert_eq!(notes.len(), 1, "{:?}", r.notes);
+        assert!(
+            notes[0].contains("main routing table") && notes[0].contains("ip rule"),
+            "{notes:?}"
+        );
+        no_duplicate_notes(&r);
+
+        let (r, gateway) = v6_egress_from(V6_ROUTES, "2001:db8::5");
+        assert!(gateway.is_some());
+        let notes = notes_naming(&r, ROUTES_V6);
+        assert_eq!(notes.len(), 1, "{:?}", r.notes);
+        assert!(notes[0].contains("main routing table"), "{notes:?}");
+    }
+
+    #[test]
+    fn every_note_that_leaves_the_gateway_unknown_names_the_main_routing_table() {
+        let ambiguous = FakeEnv::new().file(
+            ROUTES_V4,
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+             eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n\
+             eth0\t00000000\t020011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n",
+        );
+        let direct = FakeEnv::new().file(ROUTES_V4, DIRECT_BEATS_BACKUP);
+        let unreadable = FakeEnv::new();
+        for (env, why) in [
+            (&ambiguous, "ambiguous"),
+            (&direct, "direct default"),
+            (&unreadable, "unreadable table"),
+        ] {
+            let r = report(env, &container(), &container_probe(), Family::Any);
+            assert!(r.ipv4.as_ref().unwrap().gateway.is_none(), "{why}");
+            let notes = notes_naming(&r, ROUTES_V4);
+            assert!(!notes.is_empty(), "{why}: {:?}", r.notes);
+            for note in notes {
+                assert!(note.contains("main routing table"), "{why}: {note}");
+            }
+        }
+
+        let table = [
+            v6_direct(10, "eth0"),
+            v6_default(None, "fe80::a", 100, "eth0"),
+        ]
+        .concat();
+        let (r, gateway) = v6_egress_from(&table, "2001:db8:2::5");
+        assert_eq!(gateway, None);
+        let notes = notes_naming(&r, ROUTES_V6);
+        assert!(!notes.is_empty(), "{:?}", r.notes);
+        for note in notes {
+            assert!(note.contains("main routing table"), "{note}");
+        }
+    }
 }
