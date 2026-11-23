@@ -7,6 +7,7 @@ use crate::cli::{Format, Options};
 use crate::env::RecordingEnv;
 use crate::json::Json;
 use crate::sanitize;
+use crate::style::Style;
 use crate::yaml;
 
 /// `json` as the document `format` asks for, ending with a newline; `None` for text, which
@@ -30,12 +31,13 @@ pub fn emit(
     options: &Options,
     json: &Json,
     text: Option<&str>,
+    style: Style,
     out: &mut dyn Write,
 ) -> io::Result<()> {
     if let Some(document) = document(json, options.format()) {
         out.write_all(document.as_bytes())
     } else if let Some(text) = text {
-        out.write_all(sanitize::escape_keeping_newlines(text).as_bytes())
+        out.write_all(style.clean(text).as_bytes())
     } else {
         Ok(())
     }
@@ -82,7 +84,7 @@ mod tests {
 
     fn printed(args: &[&str], json: &Json, text: Option<&str>) -> String {
         let mut out = Vec::new();
-        emit(&options(args), json, text, &mut out).unwrap();
+        emit(&options(args), json, text, Style::Plain, &mut out).unwrap();
         String::from_utf8(out).unwrap()
     }
 

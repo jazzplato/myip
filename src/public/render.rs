@@ -8,6 +8,7 @@ use super::verdict::{Attempt, FamilyReport, Status, Verdict};
 use super::{Headline, PublicReport};
 use crate::json::Json;
 use crate::sanitize;
+use crate::style::Style;
 
 /// `name: 1.2.3.4 (42 ms)` or `name: reason`; a reason is text from the network, shown
 /// with its control characters escaped.
@@ -46,20 +47,22 @@ pub fn disagreement_summary(verdict: &Verdict) -> String {
 
 /// What `--verify` prints on stdout when it exits 3: who said what, per family, with the
 /// answers that differ from a clear majority marked.
-pub fn disagreement_report(report: &PublicReport) -> String {
+pub fn disagreement_report(report: &PublicReport, style: Style) -> String {
     let width = PROVIDERS.iter().map(|p| p.name.len()).max().unwrap_or(0);
     let mut text = String::new();
     for family in report.verdict().map_or(&[][..], |v| &v.families[..]) {
         text.push_str(&format!(
             "{}: {}\n",
-            family.family.as_str(),
-            summary(family)
+            style.bold(family.family.as_str()),
+            summary(family, style)
         ));
         let majority = family.majority();
         for answer in &family.answers {
             let mark = match majority {
-                Some(m) if family.status == Status::Disagree && m != answer.ip => "  <- differs",
-                _ => "",
+                Some(m) if family.status == Status::Disagree && m != answer.ip => {
+                    format!("  {}", style.bad("<- differs"))
+                }
+                _ => String::new(),
             };
             text.push_str(&format!(
                 "  {:<width$}  {}{mark}\n",
@@ -73,7 +76,8 @@ pub fn disagreement_report(report: &PublicReport) -> String {
         .filter(|a| a.outcome.is_err())
         .collect();
     if !failed.is_empty() {
-        text.push_str("no answer:\n");
+        text.push_str(&style.bad("no answer:"));
+        text.push('\n');
         for attempt in failed {
             let reason = attempt.outcome.as_ref().err().map_or("", String::as_str);
             text.push_str(&format!(
@@ -86,11 +90,18 @@ pub fn disagreement_report(report: &PublicReport) -> String {
     text
 }
 
-fn summary(family: &FamilyReport) -> String {
+/// The verdict of a family, in the colour of its status.
+fn summary(family: &FamilyReport, style: Style) -> String {
     match family.status {
-        Status::Verified => format!("verified, {} of {} agree", family.agree, family.total),
-        Status::Unverified => "unverified, 1 answer".to_owned(),
-        Status::Disagree => format!("DISAGREE, {} of {} agree", family.agree, family.total),
+        Status::Verified => style.good(&format!(
+            "verified, {} of {} agree",
+            family.agree, family.total
+        )),
+        Status::Unverified => style.warn("unverified, 1 answer"),
+        Status::Disagree => style.bad(&format!(
+            "DISAGREE, {} of {} agree",
+            family.agree, family.total
+        )),
     }
 }
 
@@ -258,7 +269,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            disagreement_report(&report),
+            disagreement_report(&report, Style::Plain),
             "\
 ipv4: DISAGREE, 2 of 3 agree
   one.one.one.one        1.2.3.4
@@ -283,13 +294,65 @@ no answer:
             ],
             true,
         );
-        let text = disagreement_report(&report);
+        let text = disagreement_report(&report, Style::Plain);
         assert!(text.contains("ipv4: DISAGREE, 1 of 2 agree\n"), "{text}");
         assert!(text.contains("ipv6: verified, 2 of 2 agree\n"), "{text}");
         assert!(
             !text.contains("<- differs") && !text.contains("no answer"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_coloured_report_is_the_plain_one_with_each_status_and_mark_in_its_colour() {
+        let (b, y, r, g, z) = (
+            "\u{1b}[1m",
+            "\u{1b}[33m",
+            "\u{1b}[31m",
+            "\u{1b}[32m",
+            "\u{1b}[0m",
+        );
+        let report = PublicReport::from_attempts(
+            vec![
+                at(0, Ok("1.2.3.4"), Some(1)),
+                at(1, Ok("1.2.3.4"), Some(1)),
+                at(2, Ok("5.6.7.8"), Some(1)),
+                at(3, Err("timed out after 10s"), Some(10_000)),
+                at(4, Ok("2606:4700:4700::1111"), Some(1)),
+            ],
+            true,
+        );
+        assert_eq!(
+            disagreement_report(&report, Style::Ansi),
+            format!(
+                "\
+{b}ipv4{z}: {r}DISAGREE, 2 of 3 agree{z}
+  one.one.one.one        1.2.3.4
+  api64.ipify.org        1.2.3.4
+  checkip.amazonaws.com  5.6.7.8  {r}<- differs{z}
+{b}ipv6{z}: {y}unverified, 1 answer{z}
+  ident.me               2606:4700:4700::1111
+{r}no answer:{z}
+  icanhazip.com          timed out after 10s
+"
+            )
+        );
+
+        let report = PublicReport::from_attempts(
+            vec![
+                at(0, Ok("1.2.3.4"), Some(1)),
+                at(1, Ok("5.6.7.8"), Some(1)),
+                at(2, Ok("2606:4700:4700::1111"), Some(1)),
+                at(3, Ok("2606:4700:4700::1111"), Some(1)),
+            ],
+            true,
+        );
+        let text = disagreement_report(&report, Style::Ansi);
+        assert!(
+            text.contains(&format!("{b}ipv6{z}: {g}verified, 2 of 2 agree{z}\n")),
+            "{text}"
+        );
+        assert_eq!(text.matches(r).count(), 1, "{text}");
     }
 
     #[test]
@@ -346,7 +409,7 @@ no answer:
                 ],
                 true,
             );
-            disagreement_report(&report)
+            disagreement_report(&report, Style::Plain)
         });
     }
 

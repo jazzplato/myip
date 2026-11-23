@@ -16,6 +16,7 @@ pub mod output;
 pub mod public;
 pub mod redact;
 pub mod sanitize;
+pub mod style;
 pub mod version;
 pub mod yaml;
 
@@ -29,6 +30,7 @@ use egress::{EgressProbe, UdpProbe};
 use env::{Env, SystemEnv};
 use http::Fetch;
 use ifaces::{Interfaces, SystemInterfaces};
+use style::{Style, Terminal};
 
 /// The machine `local`, `where` and `all` look at. Tests substitute fixtures for all three.
 pub struct Host<'a> {
@@ -52,8 +54,21 @@ impl Host<'static> {
 pub struct Context<'a> {
     pub fetch: &'a dyn Fetch,
     pub host: &'a Host<'a>,
+    /// What is known about stdout and the colour variables; only decides colour.
+    pub terminal: Terminal,
     pub out: &'a mut dyn Write,
     pub err: &'a mut dyn Write,
+}
+
+impl Context<'_> {
+    /// How text on stdout is written. Documents are never styled, whatever `--color` says.
+    pub fn style(&self, options: &cli::Options) -> Style {
+        if options.format().is_document() {
+            Style::Plain
+        } else {
+            Style::choose(options.color, &self.terminal)
+        }
+    }
 }
 
 /// Runs the CLI with the arguments after the program name and returns the exit code.
@@ -133,6 +148,7 @@ mod tests {
     use crate::http::{Family, FetchError, ProxyMode};
     use crate::ifaces::testing::{FakeInterfaces, iface};
     use crate::public::PROVIDERS;
+    use crate::style::testing::{assert_balanced, strip};
 
     /// A global address, so the public lookup accepts it.
     const PUBLIC_IP: &str = "1.2.3.4";
@@ -174,6 +190,19 @@ mod tests {
             }
         }
 
+        /// A pod that declares some of its identity and leaves the rest unknown.
+        fn pod() -> Self {
+            Self {
+                env: FakeEnv::new()
+                    .var("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+                    .var("POD_NAME", "web-0")
+                    .var("POD_IP", "10.244.1.7")
+                    .var("HOST_IP", "192.168.49.2")
+                    .file(SERVICE_ACCOUNT_NAMESPACE, "prod\n"),
+                ..Self::laptop()
+            }
+        }
+
         fn host(&self) -> Host<'_> {
             Host {
                 env: &self.env,
@@ -184,12 +213,23 @@ mod tests {
     }
 
     fn run_on(host: &Host<'_>, fetch: &dyn Fetch, args: &[&str]) -> (u8, String, String) {
+        run_in(host, fetch, Terminal::default(), args)
+    }
+
+    /// Like [`run_on`], on a terminal with these facts.
+    fn run_in(
+        host: &Host<'_>,
+        fetch: &dyn Fetch,
+        terminal: Terminal,
+        args: &[&str],
+    ) -> (u8, String, String) {
         let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = {
             let mut ctx = Context {
                 fetch,
                 host,
+                terminal,
                 out: &mut out,
                 err: &mut err,
             };
@@ -2092,6 +2132,626 @@ mod tests {
                 "no document carried {bad:?}, so nothing was proved"
             );
         }
+    }
+
+    // ---- --color (ADR 0002) ----
+
+    const BOLD: &str = "\u{1b}[1m";
+    const DIM: &str = "\u{1b}[2m";
+    const GREEN: &str = "\u{1b}[32m";
+    const YELLOW: &str = "\u{1b}[33m";
+    const RED: &str = "\u{1b}[31m";
+    const RESET: &str = "\u{1b}[0m";
+
+    /// One coloured span, spelled out here so the expectations do not use the code under test.
+    fn span(code: &str, text: &str) -> String {
+        format!("{code}{text}{RESET}")
+    }
+
+    /// A terminal that supports colour, with nothing in the environment.
+    fn tty() -> Terminal {
+        Terminal::from_lookup(true, false, |_| None)
+    }
+
+    fn terminal_with(is_tty: bool, vars: &'static [(&'static str, &'static str)]) -> Terminal {
+        Terminal::from_lookup(is_tty, false, |name| {
+            vars.iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| (*value).to_owned())
+        })
+    }
+
+    fn coloured(machine: &Machine, fetch: &dyn Fetch, args: &[&str]) -> (u8, String, String) {
+        run_on(
+            &machine.host(),
+            fetch,
+            &[&["--color", "always"][..], args].concat(),
+        )
+    }
+
+    type Build = fn() -> Machine;
+
+    /// Every machine against every text outcome: a headline, an agreeing and a disagreeing
+    /// `--verify`, a total failure, and each dimension command.
+    fn text_cases() -> Vec<(Build, &'static [&'static str], Fixture)> {
+        let outcomes: [(&[&str], Fixture); 10] = [
+            (&["local"], agree),
+            (&["where"], agree),
+            (&["all"], agree),
+            (&["all"], nobody_answers),
+            (&["all", "--verify"], agree),
+            (&["all", "--verify"], split),
+            (&["public"], agree),
+            (&["public"], nobody_answers),
+            (&["public", "--verify"], agree),
+            (&["public", "--verify"], split),
+        ];
+        let machines: [Build; 4] = [
+            Machine::quiet,
+            Machine::laptop,
+            Machine::pod,
+            Machine::without_interface_access,
+        ];
+        let mut cases = Vec::new();
+        for machine in machines {
+            for (args, fixture) in outcomes {
+                cases.push((machine, args, fixture));
+            }
+        }
+        cases
+    }
+
+    fn flagged<'a>(flags: &[&'a str], args: &[&'a str]) -> Vec<&'a str> {
+        [flags, args].concat()
+    }
+
+    #[test]
+    fn without_colour_the_text_is_unchanged_whatever_the_terminal_says() {
+        for (machine, args, fixture) in text_cases() {
+            let want = run_on(&machine().host(), &fixture(), args);
+            assert!(!want.1.contains('\u{1b}'), "{args:?}: {:?}", want.1);
+            assert!(!want.2.contains('\u{1b}'), "{args:?}: {:?}", want.2);
+            let forms = [
+                (Terminal::default(), flagged(&["--color", "auto"], args)),
+                (tty(), flagged(&["--color", "never"], args)),
+                (tty(), flagged(&["--color=never"], args)),
+                (terminal_with(true, &[("NO_COLOR", "1")]), args.to_vec()),
+                (terminal_with(true, &[("CLICOLOR", "0")]), args.to_vec()),
+                (terminal_with(true, &[("TERM", "dumb")]), args.to_vec()),
+                (
+                    terminal_with(false, &[("CLICOLOR_FORCE", "1")]),
+                    flagged(&["--color", "never"], args),
+                ),
+            ];
+            for (terminal, spelled) in forms {
+                let got = run_in(&machine().host(), &fixture(), terminal.clone(), &spelled);
+                assert_eq!(got, want, "{spelled:?} on {terminal:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn colour_is_the_plain_text_with_codes_added_and_nothing_else() {
+        let mut coloured_runs = 0;
+        for (machine, args, fixture) in text_cases() {
+            let (plain_code, plain, plain_err) = run_on(
+                &machine().host(),
+                &fixture(),
+                &flagged(&["--color", "never"], args),
+            );
+            let (code, out, err) = run_on(
+                &machine().host(),
+                &fixture(),
+                &flagged(&["--color", "always"], args),
+            );
+            let label = format!("{args:?} (exit {plain_code})");
+            assert_eq!((code, &err), (plain_code, &plain_err), "{label}");
+            assert_eq!(strip(&out), plain, "{label}");
+            assert!(
+                !strip(&out).contains('\u{1b}'),
+                "{label}: a code that is not ours in {out:?}"
+            );
+            assert_balanced(&out);
+            let has_styled_text = matches!(args[0], "local" | "where" | "all")
+                || (args == ["public", "--verify"] && plain_code == 3);
+            assert_eq!(
+                out.contains('\u{1b}'),
+                has_styled_text && !plain.is_empty(),
+                "{label}: {out:?}"
+            );
+            coloured_runs += usize::from(out.contains('\u{1b}'));
+        }
+        assert!(
+            coloured_runs > 20,
+            "only {coloured_runs} runs were coloured"
+        );
+    }
+
+    #[test]
+    fn auto_follows_the_terminal_and_the_environment_and_the_flag_wins() {
+        let cases: [(Terminal, &[&str], bool); 14] = [
+            (Terminal::default(), &["where"], false),
+            (tty(), &["where"], true),
+            (tty(), &["--color", "auto", "where"], true),
+            (terminal_with(true, &[("NO_COLOR", "1")]), &["where"], false),
+            (
+                terminal_with(true, &[("NO_COLOR", "1")]),
+                &["--color", "always", "where"],
+                true,
+            ),
+            (
+                terminal_with(false, &[("CLICOLOR_FORCE", "1")]),
+                &["where"],
+                true,
+            ),
+            (
+                terminal_with(false, &[("CLICOLOR_FORCE", "1")]),
+                &["--color", "never", "where"],
+                false,
+            ),
+            (
+                terminal_with(true, &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")]),
+                &["where"],
+                false,
+            ),
+            (terminal_with(true, &[("TERM", "dumb")]), &["where"], false),
+            (tty(), &["--format", "json", "where"], false),
+            (tty(), &["--json", "where"], false),
+            (tty(), &["--format", "yaml", "where"], false),
+            (
+                tty(),
+                &["--color", "always", "--format", "json-pretty", "where"],
+                false,
+            ),
+            (tty(), &["--color", "always", "--json", "where"], false),
+        ];
+        for (terminal, args, colour) in cases {
+            let (code, out, err) = run_in(
+                &Machine::pod().host(),
+                &no_network(),
+                terminal.clone(),
+                args,
+            );
+            assert_eq!(code, 0, "{args:?}: {err}");
+            assert_eq!(
+                out.contains('\u{1b}'),
+                colour,
+                "{args:?} on {terminal:?}: {out:?}"
+            );
+            assert!(!err.contains('\u{1b}'), "{args:?}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn local_styles_names_provenance_guesses_and_failures() {
+        let (code, out, err) = coloured(&Machine::laptop(), &no_network(), &["local"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_balanced(&out);
+        let heading = format!("{}{}\n", span(BOLD, "interfaces"), span(DIM, " (observed)"));
+        assert!(out.starts_with(&heading), "{out:?}");
+        assert!(
+            out.contains(&format!(
+                "\n  {} {}\n",
+                span(BOLD, "lo"),
+                span(YELLOW, "(likely virtual)")
+            )),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&format!("\n  {}\n", span(BOLD, "en0"))),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&format!(
+                "\n  {} {}\n",
+                span(BOLD, "utun3"),
+                span(YELLOW, "(likely virtual)")
+            )),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&format!(
+                "\n{}{DIM} (observed: a UDP connect() towards ",
+                span(BOLD, "egress")
+            )),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&format!("which sends nothing){RESET}\n")),
+            "{out:?}"
+        );
+        let guess = "\"likely virtual\" is a guess from the interface name, not a fact.";
+        assert!(out.contains(&format!("{}\n", span(DIM, guess))), "{out:?}");
+        assert!(out.contains("  primary egress (IPv4)\n"), "{out:?}");
+        assert!(!out.contains(GREEN) && !out.contains(RED), "{out:?}");
+
+        let (_, out, _) = coloured(&Machine::quiet(), &no_network(), &["local"]);
+        assert!(out.contains("\n  no interfaces found\n"), "{out:?}");
+        let unknown = format!(
+            "  IPv4  {}{}\n",
+            span(YELLOW, "unknown"),
+            span(DIM, " (the egress probe found no address; -v shows why)")
+        );
+        assert!(out.contains(&unknown), "{out:?}");
+
+        let (code, out, _) = coloured(
+            &Machine::without_interface_access(),
+            &everyone_says(PUBLIC_IP),
+            &["all"],
+        );
+        assert_eq!(code, 0);
+        let failed = format!("  {}: ", span(RED, "unavailable"));
+        assert_eq!(out.matches(&failed).count(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn where_styles_field_names_provenance_and_what_is_unknown() {
+        let (code, out, err) = coloured(&Machine::laptop(), &no_network(), &["where"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let declared = "\"declared\" values were handed to this process (environment, files an orchestrator wrote); \"observed\" ones were measured here.";
+        assert_eq!(
+            out,
+            format!(
+                "{}    host (no container or Kubernetes signals found)\n{}\n",
+                span(BOLD, "environment"),
+                span(DIM, declared)
+            )
+        );
+
+        let (code, out, _) = coloured(&Machine::pod(), &no_network(), &["where"]);
+        assert_eq!(code, 0);
+        assert_balanced(&out);
+        let lines = [
+            format!("{}    kubernetes (a pod)\n", span(BOLD, "environment")),
+            format!(
+                "{}       web-0{}\n",
+                span(BOLD, "pod name"),
+                span(DIM, "  (declared: env:POD_NAME)")
+            ),
+            format!(
+                "{}         10.244.1.7{}\n",
+                span(BOLD, "pod ip"),
+                span(DIM, "  (declared: env:POD_IP)")
+            ),
+            format!(
+                "{}        {}{}\n",
+                span(BOLD, "pod ips"),
+                span(YELLOW, "unknown"),
+                span(DIM, " (expose POD_IPS with the Downward API)")
+            ),
+            format!(
+                "{}   {}\n",
+                span(BOLD, "service port"),
+                span(YELLOW, "unknown")
+            ),
+            format!("{}\n", span(DIM, declared)),
+        ];
+        for line in lines {
+            assert!(out.contains(&line), "{line:?} missing in {out:?}");
+        }
+        let evidence = out
+            .split_once(&format!("{}\n", span(BOLD, "evidence")))
+            .unwrap_or_else(|| panic!("no evidence block in {out:?}"))
+            .1;
+        let listed: Vec<&str> = evidence
+            .lines()
+            .take_while(|l| l.starts_with("  "))
+            .collect();
+        assert!(!listed.is_empty(), "{out:?}");
+        for line in listed {
+            assert!(
+                line.starts_with(&format!("  {DIM}- ")) && line.ends_with(RESET),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_styles_its_blocks_the_headline_the_nat_verdict_and_the_pod_summary() {
+        let (code, out, err) = coloured(&Machine::pod(), &everyone_says(PUBLIC_IP), &["all"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert_balanced(&out);
+        for heading in ["[public]", "[local]", "[where]", "[highlights]"] {
+            assert!(
+                out.contains(&format!("{}\n", span(BOLD, heading))),
+                "{out:?}"
+            );
+        }
+        let lines = [
+            format!(
+                "  1.2.3.4 {}\n",
+                span(DIM, "(IPv4, observed by one.one.one.one)")
+            ),
+            format!(
+                "  {}{}\n",
+                span(
+                    YELLOW,
+                    "NAT: this machine sends from 192.168.1.23 (private) but the internet sees 1.2.3.4 (IPv4);"
+                ),
+                span(
+                    DIM,
+                    " something in between (NAT, a proxy or a VPN) rewrites the address"
+                )
+            ),
+            format!(
+                "  {}  pod 10.244.1.7, node 192.168.49.2, egress 192.168.1.23, public 1.2.3.4\n  {}\n",
+                span(BOLD, "kubernetes"),
+                span(
+                    DIM,
+                    "(pod and node addresses are declared by the Pod spec; egress and public are observed)"
+                )
+            ),
+        ];
+        for line in lines {
+            assert!(out.contains(&line), "{line:?} missing in {out:?}");
+        }
+
+        let (_, out, _) = coloured(
+            &Machine::laptop(),
+            &everyone_says(PUBLIC_IP),
+            &["all", "--verify"],
+        );
+        let verified = format!(
+            "  1.2.3.4 {DIM}(IPv4, observed by one.one.one.one{RESET}{}{DIM}){RESET}\n",
+            span(GREEN, ", verified: 6 of 6 providers agree")
+        );
+        assert!(out.contains(&verified), "{out:?}");
+
+        let mut direct = Machine::laptop();
+        direct.probe = FakeProbe::new().route(PROBE_V4, PUBLIC_IP);
+        let (_, out, _) = coloured(&direct, &everyone_says(PUBLIC_IP), &["all"]);
+        let none = format!(
+            "  {}\n",
+            span(
+                GREEN,
+                "no NAT: the egress address 1.2.3.4 is the address the internet sees (IPv4)"
+            )
+        );
+        assert!(out.contains(&none), "{out:?}");
+        let highlights = out
+            .split_once(&format!("{}\n", span(BOLD, "[highlights]")))
+            .unwrap_or_else(|| panic!("no highlights in {out:?}"))
+            .1;
+        assert_eq!(highlights, none, "no NAT leaves nothing else to say");
+
+        let (_, out, _) = coloured(&Machine::pod(), &nobody_answers(), &["all"]);
+        assert_balanced(&out);
+        let lines = [
+            format!("  {}: ", span(RED, "unavailable")),
+            format!(
+                "  {}{}\n",
+                span(YELLOW, "NAT: unknown"),
+                span(
+                    DIM,
+                    " (needs a public answer and a local egress address of the same IP family)"
+                )
+            ),
+            format!("public {}\n", span(YELLOW, "unknown")),
+        ];
+        for line in lines {
+            assert!(out.contains(&line), "{line:?} missing in {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_disagreement_is_styled_in_the_report_and_inside_all() {
+        let (code, out, _) = coloured(&Machine::quiet(), &split(), &["public", "--verify"]);
+        assert_eq!(code, 3);
+        assert_balanced(&out);
+        let report = [
+            format!(
+                "{}: {}\n",
+                span(BOLD, "ipv4"),
+                span(RED, "DISAGREE, 2 of 3 agree")
+            ),
+            format!("5.6.7.8  {}\n", span(RED, "<- differs")),
+            format!("{}\n", span(RED, "no answer:")),
+        ];
+        assert!(out.starts_with(&report[0]), "{out:?}");
+        for line in &report[1..] {
+            assert!(out.contains(line.as_str()), "{line:?} missing in {out:?}");
+        }
+
+        let (code, out, _) = coloured(&Machine::laptop(), &split(), &["all", "--verify"]);
+        assert_eq!(code, 3);
+        assert_balanced(&out);
+        for line in &report {
+            assert!(
+                out.contains(&format!("  {line}")),
+                "{line:?} missing, indented, in {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn colour_never_reaches_the_headline_the_passthrough_a_failure_or_a_document() {
+        for (args, fixture) in [
+            (&["public"][..], agree as Fixture),
+            (&["public", "--verify"], agree),
+            (&["public"], nobody_answers),
+            (&["public", "--verify"], nobody_answers),
+        ] {
+            let (code, out, err) = coloured(&Machine::laptop(), &fixture(), args);
+            let (want_code, want_out, want_err) = laptop_run(&fixture(), args);
+            assert_eq!(
+                (code, &out, &err),
+                (want_code, &want_out, &want_err),
+                "{args:?}"
+            );
+            assert!(
+                !out.contains('\u{1b}') && !err.contains('\u{1b}'),
+                "{args:?}"
+            );
+        }
+        let (_, out, _) = coloured(&Machine::laptop(), &agree(), &["public"]);
+        assert_eq!(out, "1.2.3.4\n");
+
+        for spelled in [
+            &["--color", "always", "city"][..],
+            &["city", "--color", "always"],
+            &["--color=always", "public", "city"],
+            &["--json", "--color", "always", "city"],
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "Seattle\n")]);
+            let (code, out, err) = exec(&fetch, spelled);
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (0, "Seattle\n", ""),
+                "{spelled:?}"
+            );
+            assert_eq!(requested(&fetch).len(), 1, "{spelled:?}");
+        }
+
+        for (args, code, fixture) in documents() {
+            for format in ["json", "json-pretty", "yaml"] {
+                let plain = laptop_run(&fixture(), &flagged(&["--format", format], args));
+                let styled = laptop_run(
+                    &fixture(),
+                    &flagged(&["--color", "always", "--format", format], args),
+                );
+                assert_eq!(plain.0, code, "{args:?}");
+                assert_eq!(
+                    (styled.0, steady(&styled.1), styled.2),
+                    (plain.0, steady(&plain.1), plain.2),
+                    "{format} {args:?}"
+                );
+                assert!(!styled.1.contains('\u{1b}'), "{format} {args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn stderr_and_help_are_never_coloured() {
+        for args in [
+            &["-v", "all"][..],
+            &["-v", "local"],
+            &["-v", "where"],
+            &["-v", "all", "--verify"],
+        ] {
+            let (code, out, err) = coloured(&Machine::pod(), &split(), args);
+            let (want_code, _, want_err) = run_on(
+                &Machine::pod().host(),
+                &split(),
+                &flagged(&["--color", "never"], args),
+            );
+            assert_eq!(code, want_code, "{args:?}");
+            assert_eq!(err, want_err, "{args:?}");
+            assert!(
+                err.contains("myip: "),
+                "{args:?} must log something: {err:?}"
+            );
+            assert!(!err.contains('\u{1b}'), "{args:?}: {err:?}");
+            assert!(out.contains('\u{1b}'), "{args:?} must still colour stdout");
+        }
+        for args in [
+            &["--color", "always", "--help"][..],
+            &["--color", "always", "where", "--help"],
+            &["--color", "always", "--version"],
+            &["--color", "always", "--format", "toml"],
+        ] {
+            let (_, out, err) = exec(&no_network(), args);
+            assert!(
+                !out.contains('\u{1b}') && !err.contains('\u{1b}'),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn colour_options_are_validated_and_the_last_spelling_wins() {
+        for args in [
+            &["--color", "rainbow", "where"][..],
+            &["--color=ALWAYS", "where"],
+            &["--color", "", "where"],
+            &["--color", "where"],
+            &["where", "--color"],
+            &["--color", "always", "--color", "never", "where"],
+            &["where", "--color", "always", "--color", "never"],
+            &["-C", "always", "where"],
+        ] {
+            let fetch = no_network();
+            let (code, out, err) = exec(&fetch, args);
+            assert_eq!(code, 2, "{args:?}");
+            assert_eq!(out, "", "{args:?}");
+            assert!(requested(&fetch).is_empty(), "{args:?}");
+            assert!(err.starts_with("error: "), "{args:?}: {err}");
+        }
+        let (_, _, err) = exec(&no_network(), &["--color", "rainbow", "where"]);
+        for value in ["auto", "always", "never"] {
+            assert!(err.contains(value), "{value} missing in {err}");
+        }
+
+        let before = exec(
+            &no_network(),
+            &["--color", "always", "where", "--color", "never"],
+        );
+        let after = exec(
+            &no_network(),
+            &["--color", "never", "where", "--color", "always"],
+        );
+        assert!(!before.1.contains('\u{1b}'), "{:?}", before.1);
+        assert!(after.1.contains('\u{1b}'), "{:?}", after.1);
+        let (code, out, _) = exec(&no_network(), &["where", "--color", "always"]);
+        assert_eq!(code, 0);
+        assert!(out.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn help_lists_the_colour_flag_and_its_values() {
+        for args in [
+            &["--help"][..],
+            &["-h"],
+            &["where", "--help"],
+            &["all", "--help"],
+        ] {
+            let (code, out, _) = exec(&no_network(), args);
+            assert_eq!(code, 0, "{args:?}");
+            assert!(out.contains("--color <WHEN>"), "{args:?}\n{out}");
+            for value in ["auto", "always", "never"] {
+                assert!(out.contains(value), "{value} missing in\n{out}");
+            }
+        }
+    }
+
+    #[test]
+    fn hostile_text_stays_visible_and_unstyled_in_colour_too() {
+        let commands: [&[&str]; 4] = [&["local"], &["where"], &["all"], &["all", "--verify"]];
+        let mut coloured_runs = 0;
+        for source in SOURCES {
+            for bad in HOSTILE {
+                let payload = format!("a{bad}INJECT");
+                for command in commands {
+                    let label = format!("{source} / {bad:?} / {command:?}");
+                    let plain = run_on(
+                        &machine_with(source, &payload).host(),
+                        &everyone_says(PUBLIC_IP),
+                        &flagged(&["--color", "never"], command),
+                    );
+                    let (code, out, err) = run_on(
+                        &machine_with(source, &payload).host(),
+                        &everyone_says(PUBLIC_IP),
+                        &flagged(&["--color", "always"], command),
+                    );
+                    assert_eq!((code, &err), (plain.0, &plain.2), "{label}");
+                    assert_eq!(strip(&out), plain.1, "{label}");
+                    assert_balanced(&out);
+                    for forbidden in [
+                        '\u{1b}', '\r', '\0', '\u{85}', '\u{202e}', '\u{2028}', '\u{2029}',
+                        '\u{feff}', '\u{fffe}', '\u{ffff}',
+                    ] {
+                        assert!(
+                            !strip(&out).contains(forbidden),
+                            "{label}: {forbidden:?} reached the terminal\n{out:?}"
+                        );
+                    }
+                    coloured_runs += usize::from(out.contains('\u{1b}'));
+                }
+            }
+        }
+        assert!(
+            coloured_runs > 800,
+            "only {coloured_runs} runs were coloured"
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::fact::{Fact, SCHEMA_VERSION, Value};
 use crate::json::Json;
 use crate::output;
 use crate::sanitize;
+use crate::style::Style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -111,10 +112,12 @@ pub fn run(options: &Options, ctx: &mut Context<'_>) -> u8 {
     let env = RecordingEnv::new(ctx.host.env);
     let location = detect(&env);
     output::trace(options, &env, &[], ctx.err);
+    let style = ctx.style(options);
     let written = output::emit(
         options,
         &location.to_json(),
-        Some(&location.render_text()),
+        Some(&location.render(style)),
+        style,
         ctx.out,
     );
     output::exit_code(written, 0)
@@ -653,26 +656,32 @@ impl Location {
     }
 
     /// Human-readable report. Not a stable format; `--json` is the contract.
-    pub fn render_text(&self) -> String {
+    pub fn render(&self, style: Style) -> String {
         let mut out = String::new();
         let headline = match self.environment {
             Environment::Host => "host (no container or Kubernetes signals found)",
             Environment::Container => "container",
             Environment::Kubernetes => "kubernetes (a pod)",
         };
-        row(&mut out, "environment", headline.to_owned());
+        row(&mut out, style, "environment", headline.to_owned());
         let c = &self.container;
         if c.detected {
-            row(&mut out, "runtime", fact_or(&c.runtime, "unknown", whole));
             row(
                 &mut out,
+                style,
+                "runtime",
+                fact_or(&c.runtime, "", whole, style),
+            );
+            row(
+                &mut out,
+                style,
                 "container id",
-                fact_or(&c.id, "unknown", short_id),
+                fact_or(&c.id, "", short_id, style),
             );
         }
         let k = &self.kubernetes;
         if k.detected {
-            let downward = |var: &str| format!("unknown (expose {var} with the Downward API)");
+            let downward = |var: &str| format!(" (expose {var} with the Downward API)");
             let rows = [
                 ("namespace", &k.namespace, downward("POD_NAMESPACE")),
                 ("pod name", &k.pod_name, downward("POD_NAME")),
@@ -683,41 +692,48 @@ impl Location {
                 (
                     "host network",
                     &k.host_network,
-                    "unknown (needs both HOST_IP and POD_IP)".to_owned(),
+                    " (needs both HOST_IP and POD_IP)".to_owned(),
                 ),
-                ("service host", &k.service_host, "unknown".to_owned()),
-                ("service port", &k.service_port, "unknown".to_owned()),
+                ("service host", &k.service_host, String::new()),
+                ("service port", &k.service_port, String::new()),
                 (
                     "cluster dns",
                     &k.cluster_dns,
-                    "unknown (resolv.conf has no cluster search path)".to_owned(),
+                    " (resolv.conf has no cluster search path)".to_owned(),
                 ),
                 (
                     "cluster domain",
                     &k.cluster_domain,
-                    "unknown (resolv.conf has no cluster search path)".to_owned(),
+                    " (resolv.conf has no cluster search path)".to_owned(),
                 ),
             ];
-            for (label, fact, missing) in rows {
-                row(&mut out, label, fact_or(fact, &missing, whole));
+            for (label, fact, why) in rows {
+                row(&mut out, style, label, fact_or(fact, &why, whole, style));
             }
         }
         let evidence: Vec<&String> = c.evidence.iter().chain(&k.evidence).collect();
         if !evidence.is_empty() {
-            out.push_str("evidence\n");
+            out.push_str(&style.bold("evidence"));
+            out.push('\n');
             for line in evidence {
-                out.push_str(&format!("  - {}\n", sanitize::escape(line)));
+                out.push_str(&format!(
+                    "  {}\n",
+                    style.dim(&format!("- {}", sanitize::escape(line)))
+                ));
             }
         }
-        out.push_str(
-            "\"declared\" values were handed to this process (environment, files an orchestrator wrote); \"observed\" ones were measured here.\n",
-        );
+        out.push_str(&style.dim(
+            "\"declared\" values were handed to this process (environment, files an orchestrator wrote); \"observed\" ones were measured here.",
+        ));
+        out.push('\n');
         out
     }
 }
 
-fn row(out: &mut String, label: &str, value: String) {
-    out.push_str(&format!("{label:<15}{value}\n"));
+/// A row: the label in bold, padded to the value column outside the span.
+fn row(out: &mut String, style: Style, label: &str, value: String) {
+    let pad = " ".repeat(15usize.saturating_sub(label.chars().count()));
+    out.push_str(&format!("{}{pad}{value}\n", style.bold(label)));
 }
 
 fn short_id(text: &str) -> String {
@@ -733,15 +749,27 @@ fn whole(text: &str) -> String {
     text.to_owned()
 }
 
-fn fact_or(fact: &Option<Fact>, missing: &str, shorten: fn(&str) -> String) -> String {
+/// A fact with its provenance dimmed, or `unknown` in yellow followed by `why` dimmed.
+fn fact_or(fact: &Option<Fact>, why: &str, shorten: fn(&str) -> String, style: Style) -> String {
     match fact {
         Some(fact) => format!(
-            "{}  ({}: {})",
+            "{}{}",
             sanitize::escape(&shorten(&fact.text())),
-            fact.basis.as_str(),
-            sanitize::escape(&fact.source)
+            style.dim(&format!(
+                "  ({}: {})",
+                fact.basis.as_str(),
+                sanitize::escape(&fact.source)
+            ))
         ),
-        None => missing.to_owned(),
+        None => format!("{}{}", style.warn("unknown"), style.dim(why)),
+    }
+}
+
+#[cfg(test)]
+impl Location {
+    /// The plain text, the oracle of the colour tests: what 0.1.1 printed.
+    pub fn render_text(&self) -> String {
+        self.render(Style::Plain)
     }
 }
 

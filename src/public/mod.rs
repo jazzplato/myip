@@ -179,7 +179,11 @@ fn emit(report: &PublicReport, options: &Options, ctx: &mut Context<'_>) -> u8 {
     } else if let Some(headline) = report.headline() {
         writeln!(ctx.out, "{}", headline.ip)
     } else if code == 3 {
-        write!(ctx.out, "{}", render::disagreement_report(report))
+        write!(
+            ctx.out,
+            "{}",
+            render::disagreement_report(report, ctx.style(options))
+        )
     } else {
         Ok(())
     };
@@ -349,6 +353,7 @@ mod tests {
                 &mut Context {
                     fetch,
                     host,
+                    terminal: crate::style::Terminal::default(),
                     out: &mut out,
                     err: &mut err,
                 },
@@ -1432,6 +1437,7 @@ no answer:
                     &mut Context {
                         fetch: &fetch,
                         host,
+                        terminal: crate::style::Terminal::default(),
                         out: &mut Closed,
                         err: &mut err,
                     },

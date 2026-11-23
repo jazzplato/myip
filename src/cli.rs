@@ -54,6 +54,19 @@ impl Format {
     }
 }
 
+/// When the text of `local`, `where`, `all` and a `--verify` disagreement carries colour. The
+/// contract is ADR 0002.
+#[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ColorChoice {
+    /// Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
+    #[default]
+    Auto,
+    /// Whatever stdout is
+    Always,
+    /// Never
+    Never,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct Options {
     /// Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
@@ -63,6 +76,16 @@ pub struct Options {
     /// How public, local, where and all write their result (not with FIELD)
     #[arg(long, value_name = "FORMAT", global = true, conflicts_with = "json")]
     pub format: Option<Format>,
+
+    /// Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+    #[arg(
+        long,
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = ColorChoice::Auto,
+        global = true
+    )]
+    pub color: ColorChoice,
 
     /// Use IPv4 only
     #[arg(short = '4', global = true, conflicts_with = "ipv6")]

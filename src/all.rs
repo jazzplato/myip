@@ -21,6 +21,7 @@ use crate::location::{self, Environment, Location};
 use crate::output;
 use crate::public::{self, PublicReport};
 use crate::sanitize;
+use crate::style::Style;
 
 #[derive(Debug)]
 pub struct Overview {
@@ -66,10 +67,12 @@ pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
     for note in overview.notes() {
         output::diagnostic(ctx.err, &note);
     }
+    let style = ctx.style(options);
     let written = output::emit(
         options,
         &overview.to_json(),
-        Some(&overview.render_text()),
+        Some(&overview.render(style)),
+        style,
         ctx.out,
     );
     output::exit_code(written, overview.exit_code())
@@ -109,17 +112,17 @@ impl Overview {
         ])
     }
 
-    pub fn render_text(&self) -> String {
-        let mut out = String::from("[public]\n");
-        out.push_str(&self.public_lines());
-        out.push_str("\n[local]\n");
-        out.push_str(&self.local.render_text());
-        out.push_str("\n[where]\n");
-        out.push_str(&self.location.render_text());
-        out.push_str("\n[highlights]\n");
-        out.push_str(&self.nat_line());
+    pub fn render(&self, style: Style) -> String {
+        let mut out = format!("{}\n", style.bold("[public]"));
+        out.push_str(&self.public_lines(style));
+        out.push_str(&format!("\n{}\n", style.bold("[local]")));
+        out.push_str(&self.local.render(style));
+        out.push_str(&format!("\n{}\n", style.bold("[where]")));
+        out.push_str(&self.location.render(style));
+        out.push_str(&format!("\n{}\n", style.bold("[highlights]")));
+        out.push_str(&self.nat_line(style));
         if self.location.environment == Environment::Kubernetes {
-            out.push_str(&self.kubernetes_lines());
+            out.push_str(&self.kubernetes_lines(style));
         }
         out
     }
@@ -140,26 +143,31 @@ impl Overview {
         self.public.headline().map(|headline| headline.ip)
     }
 
-    fn public_lines(&self) -> String {
+    fn public_lines(&self, style: Style) -> String {
         if let Some(headline) = self.public.headline() {
-            let verified = headline
-                .verified
-                .map_or_else(String::new, |(agree, total)| {
-                    format!(", verified: {agree} of {total} providers agree")
-                });
-            return format!(
-                "  {} ({}, observed by {}{verified})\n",
-                headline.ip,
+            let observed = format!(
+                "({}, observed by {}",
                 family_label(headline.ip),
                 headline.provider.name
             );
+            return match headline.verified {
+                None => format!("  {} {}\n", headline.ip, style.dim(&format!("{observed})"))),
+                Some((agree, total)) => format!(
+                    "  {} {}{}{}\n",
+                    headline.ip,
+                    style.dim(&observed),
+                    style.good(&format!(", verified: {agree} of {total} providers agree")),
+                    style.dim(")")
+                ),
+            };
         }
         let mut lines = format!(
-            "  unavailable: {}\n",
+            "  {}: {}\n",
+            style.bad("unavailable"),
             sanitize::escape(self.public.error().unwrap_or("no answer"))
         );
         if self.public.code() == 3 {
-            for line in public::disagreement_report(&self.public).lines() {
+            for line in public::disagreement_report(&self.public, style).lines() {
                 lines.push_str(&format!("  {line}\n"));
             }
         }
@@ -187,23 +195,35 @@ impl Overview {
         ])
     }
 
-    fn nat_line(&self) -> String {
+    fn nat_line(&self, style: Style) -> String {
         let Some(nat) = self.nat() else {
-            return "  NAT: unknown (needs a public answer and a local egress address of the same IP family)\n"
-                .to_owned();
+            return format!(
+                "  {}{}\n",
+                style.warn("NAT: unknown"),
+                style.dim(
+                    " (needs a public answer and a local egress address of the same IP family)"
+                )
+            );
         };
         let family = family_label(nat.public);
         if nat.translated() {
             format!(
-                "  NAT: this machine sends from {} ({}) but the internet sees {} ({family}); something in between (NAT, a proxy or a VPN) rewrites the address\n",
-                nat.local.address,
-                nat.local.scope.as_str(),
-                nat.public
+                "  {}{}\n",
+                style.warn(&format!(
+                    "NAT: this machine sends from {} ({}) but the internet sees {} ({family});",
+                    nat.local.address,
+                    nat.local.scope.as_str(),
+                    nat.public
+                )),
+                style.dim(" something in between (NAT, a proxy or a VPN) rewrites the address")
             )
         } else {
             format!(
-                "  no NAT: the egress address {} is the address the internet sees ({family})\n",
-                nat.public
+                "  {}\n",
+                style.good(&format!(
+                    "no NAT: the egress address {} is the address the internet sees ({family})",
+                    nat.public
+                ))
             )
         }
     }
@@ -225,9 +245,9 @@ impl Overview {
         ])
     }
 
-    fn kubernetes_lines(&self) -> String {
+    fn kubernetes_lines(&self, style: Style) -> String {
         let k = &self.location.kubernetes;
-        let unknown = || "unknown".to_owned();
+        let unknown = || style.warn("unknown");
         let egress: Vec<String> = [&self.local.ipv4, &self.local.ipv6]
             .into_iter()
             .filter_map(egress_text)
@@ -238,10 +258,14 @@ impl Overview {
             egress.join(", ")
         };
         format!(
-            "  kubernetes  pod {}, node {}, egress {egress}, public {}\n  (pod and node addresses are declared by the Pod spec; egress and public are observed)\n",
+            "  {}  pod {}, node {}, egress {egress}, public {}\n  {}\n",
+            style.bold("kubernetes"),
             fact_text(&k.pod_ip).map_or_else(unknown, |text| sanitize::escape(&text)),
             fact_text(&k.host_ip).map_or_else(unknown, |text| sanitize::escape(&text)),
             self.public_ip().map_or_else(unknown, |ip| ip.to_string()),
+            style.dim(
+                "(pod and node addresses are declared by the Pod spec; egress and public are observed)"
+            ),
         )
     }
 }
@@ -272,6 +296,14 @@ fn without_schema_version(json: Json) -> Json {
                 .collect(),
         ),
         other => other,
+    }
+}
+
+#[cfg(test)]
+impl Overview {
+    /// The plain text, the oracle of the colour tests: what 0.1.1 printed.
+    pub fn render_text(&self) -> String {
+        self.render(Style::Plain)
     }
 }
 
