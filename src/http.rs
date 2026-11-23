@@ -173,6 +173,7 @@ fn map_error(e: ureq::Error) -> FetchError {
     match e {
         ureq::Error::Timeout(_) => FetchError::Timeout(e.to_string()),
         ureq::Error::Io(ref io) if is_lookup_failure(io) => FetchError::Resolve(e.to_string()),
+        ureq::Error::HostNotFound => FetchError::NoAddress(e.to_string()),
         other => FetchError::Transport(other.to_string()),
     }
 }
@@ -194,8 +195,21 @@ const MAX_REDIRECTS: usize = 5;
 /// and the one that has to have an address of the wanted family. With no proxy, or one from
 /// the environment, we cannot tell that it is in play, so nothing is said.
 pub fn proxy_family_hint(error: &FetchError, options: &FetchOptions) -> Option<String> {
-    let _ = (error, options);
-    None
+    if !matches!(error, FetchError::Resolve(_) | FetchError::NoAddress(_)) {
+        return None;
+    }
+    if !matches!(options.proxy, ProxyMode::Url(_)) {
+        return None;
+    }
+    let (flag, example) = match options.family {
+        Family::V6 => ("-6", "http://[::1]:PORT"),
+        Family::V4 => ("-4", "http://127.0.0.1:PORT"),
+        Family::Any => return None,
+    };
+    Some(format!(
+        "{flag} also applies to the proxy host; give the proxy an address of that family, \
+         such as {example}, or drop {flag}"
+    ))
 }
 
 /// Resolves a `Location` against `base`, accepting only a target on the same scheme

@@ -15,7 +15,7 @@ pub use verdict::{Answer, Attempt, FamilyReport, IpFamily, Status, Verdict};
 
 use crate::Context;
 use crate::cli::Options;
-use crate::http::{Family, Fetch, FetchError, FetchOptions};
+use crate::http::{Family, Fetch, FetchError, FetchOptions, proxy_family_hint};
 use crate::legacy::detail;
 use crate::output;
 use provider::MAX_ANSWER_BYTES;
@@ -227,19 +227,20 @@ const OFFLINE_STOP: &str = "not asked: two lookups in a row could not resolve a 
 impl Query<'_> {
     fn ask_in_order(&self, seen: &mut dyn FnMut(&Attempt)) -> Vec<Attempt> {
         let mut attempts = Vec::new();
-        let (mut unresolved_in_a_row, mut responded) = (0, false);
+        let (mut unresolved_in_a_row, mut responded, mut hinted) = (0, false, false);
         for provider in &PROVIDERS {
             let stopped = !responded && unresolved_in_a_row >= UNRESOLVED_LIMIT;
-            let (attempt, reach) = if stopped {
+            let (mut attempt, reach, hint) = if stopped {
                 let reason = if self.lacks_ipv6(provider) {
                     NO_IPV6
                 } else {
                     OFFLINE_STOP
                 };
-                (Self::not_asked(provider, reason), Reach::Skipped)
+                (Self::not_asked(provider, reason), Reach::Skipped, None)
             } else {
                 self.ask(provider)
             };
+            add_hint_once(&mut attempt, hint, &mut hinted);
             seen(&attempt);
             let answered = attempt.outcome.is_ok();
             attempts.push(attempt);
@@ -259,20 +260,26 @@ impl Query<'_> {
     /// All providers at once, so the run takes about one timeout. The attempts come back in
     /// provider order whatever order the answers arrived in.
     fn ask_all(&self) -> Vec<Attempt> {
+        let mut hinted = false;
         thread::scope(|scope| {
             let handles: Vec<_> = PROVIDERS
                 .iter()
-                .map(|provider| scope.spawn(move || self.ask(provider).0))
+                .map(|provider| scope.spawn(move || self.ask(provider)))
                 .collect();
             handles
                 .into_iter()
                 .zip(&PROVIDERS)
                 .map(|(handle, provider)| {
-                    handle.join().unwrap_or_else(|_| Attempt {
-                        provider,
-                        outcome: Err("the lookup failed unexpectedly".to_owned()),
-                        latency: None,
-                    })
+                    let (mut attempt, _, hint) = handle.join().unwrap_or_else(|_| {
+                        let attempt = Attempt {
+                            provider,
+                            outcome: Err("the lookup failed unexpectedly".to_owned()),
+                            latency: None,
+                        };
+                        (attempt, Reach::Failed, None)
+                    });
+                    add_hint_once(&mut attempt, hint, &mut hinted);
+                    attempt
                 })
                 .collect()
         })
@@ -290,9 +297,9 @@ impl Query<'_> {
         }
     }
 
-    fn ask(&self, provider: &'static Provider) -> (Attempt, Reach) {
+    fn ask(&self, provider: &'static Provider) -> (Attempt, Reach, Option<String>) {
         if self.lacks_ipv6(provider) {
-            return (Self::not_asked(provider, NO_IPV6), Reach::Skipped);
+            return (Self::not_asked(provider, NO_IPV6), Reach::Skipped, None);
         }
         let started = Instant::now();
         let response = self.fetch.get(provider.url, &self.options);
@@ -304,6 +311,10 @@ impl Query<'_> {
                 Reach::Failed
             }
         };
+        let hint = response
+            .as_ref()
+            .err()
+            .and_then(|error| proxy_family_hint(error, &self.options));
         let outcome = match response {
             Ok(response) => read_answer(provider.parser, &response, self.options.family)
                 .map_err(|reject| reject.to_string()),
@@ -314,7 +325,7 @@ impl Query<'_> {
             outcome,
             latency: Some(latency),
         };
-        (attempt, reach)
+        (attempt, reach, hint)
     }
 
     /// Transport messages can name the proxy URL, so they go through the redacting `detail`.
@@ -327,6 +338,19 @@ impl Query<'_> {
             | FetchError::Rejected(message)
             | FetchError::Transport(message) => detail(message),
         }
+    }
+}
+
+/// Puts `hint` on the first attempt that has one, so that it is said once and not once per
+/// provider. The hint is fixed text, so it is added after `detail` has bounded the message.
+fn add_hint_once(attempt: &mut Attempt, hint: Option<String>, hinted: &mut bool) {
+    if *hinted {
+        return;
+    }
+    if let (Some(hint), Err(message)) = (hint, &mut attempt.outcome) {
+        message.push_str("; hint: ");
+        message.push_str(&hint);
+        *hinted = true;
     }
 }
 
@@ -795,7 +819,11 @@ mod tests {
     fn the_hint_sits_on_the_first_provider_that_was_asked() {
         let (_, _, err) = go(&board(all(NoAddr)), &["-6", "--proxy", PROXY_URL, "public"]);
         let lines: Vec<&str> = err.lines().collect();
-        assert!(lines[1].starts_with("  ipinfo.io: host not found"), "{err}");
+        let first = PROVIDERS[0].name;
+        assert!(
+            lines[1].starts_with(&format!("  {first}: host not found")),
+            "{err}"
+        );
         assert!(lines[1].contains(PROXY_HINT), "{err}");
         assert!(!lines[2].contains(PROXY_HINT), "{err}");
     }

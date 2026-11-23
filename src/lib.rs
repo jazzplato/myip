@@ -92,13 +92,13 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             }
         };
     match (cli.command, cli.field.as_deref()) {
-        (Some(Command::Public(args)), None) => match args.field.as_deref() {
-            Some(field) => passthrough(Some(field), &cli.options, ctx),
-            None => public::run(&cli.options, args.verify, ctx),
+        (Some(Command::Public(public)), None) => match public.field.as_deref() {
+            Some(field) => passthrough(Some(field), args, &cli.options, ctx),
+            None => public::run(&cli.options, public.verify, ctx),
         },
         (Some(Command::Local), None) => local::run(&cli.options, ctx),
         (Some(Command::Where), None) => location::run(&cli.options, ctx),
-        (Some(Command::All(args)), None) => all::run(&cli.options, args.verify, ctx),
+        (Some(Command::All(all)), None) => all::run(&cli.options, all.verify, ctx),
         (Some(command), Some(_)) => {
             let _ = writeln!(
                 ctx.err,
@@ -107,13 +107,19 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             );
             2
         }
-        (None, field) => passthrough(field, &cli.options, ctx),
+        (None, field) => passthrough(field, args, &cli.options, ctx),
     }
 }
 
 /// Prints what ipinfo.io returns for `field`. That body is passed through as it came, so
 /// `--format` has nothing to shape and is a usage error here (ADR 0002), before any request.
-fn passthrough(field: Option<&str>, options: &cli::Options, ctx: &mut Context<'_>) -> u8 {
+/// `args` is the command line, so that an error body cannot echo a value from it.
+fn passthrough(
+    field: Option<&str>,
+    args: &[String],
+    options: &cli::Options,
+    ctx: &mut Context<'_>,
+) -> u8 {
     if options.format.is_some() {
         let _ = writeln!(
             ctx.err,
@@ -122,7 +128,7 @@ fn passthrough(field: Option<&str>, options: &cli::Options, ctx: &mut Context<'_
         );
         return 2;
     }
-    legacy::run(field, options, ctx)
+    legacy::run(field, args, options, ctx)
 }
 
 /// Converts OS arguments to UTF-8 without altering them. A non-Unicode argument is

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use crate::Context;
 use crate::cli::Options;
-use crate::http::{FetchError, FetchOptions, Response};
-use crate::redact::{redact_query, redact_userinfo};
+use crate::http::{FetchError, FetchOptions, Response, proxy_family_hint};
+use crate::redact::{redact_arg_values, redact_query, redact_userinfo};
 use crate::sanitize;
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
@@ -17,7 +17,7 @@ fn redact_credentials(text: &str) -> String {
     redact_query(&redact_userinfo(text))
 }
 
-pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 {
+pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Context<'_>) -> u8 {
     let fetch_options = FetchOptions {
         timeout: Duration::from_secs(options.timeout),
         max_bytes: MAX_BODY_BYTES,
@@ -33,7 +33,14 @@ pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 
 
     let response = match ctx.fetch.get(&url, &fetch_options) {
         Ok(response) => response,
-        Err(e) => return fail(ctx, &describe(&e, options.timeout)),
+        Err(e) => {
+            let mut message = describe(&e, options.timeout);
+            if let Some(hint) = proxy_family_hint(&e, &fetch_options) {
+                message.push_str("; hint: ");
+                message.push_str(&hint);
+            }
+            return fail(ctx, &message);
+        }
     };
     if options.verbose {
         let _ = writeln!(
@@ -43,7 +50,7 @@ pub fn run(field: Option<&str>, options: &Options, ctx: &mut Context<'_>) -> u8 
             response.body.len()
         );
     }
-    match answer(&response) {
+    match answer(&response, args) {
         Ok(body) => print_line(ctx, body),
         Err(message) => fail(ctx, &message),
     }
@@ -84,13 +91,16 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
 /// Accepts only a real answer: 2xx, non-empty, and not a web page.
 /// ipinfo.io labels plain-text answers (`city`, `8.8.8.8/org`) as text/html, so the
 /// content type cannot be trusted and the body is inspected instead.
-fn answer(response: &Response) -> Result<&str, String> {
+///
+/// An error body may echo a query value from the command line (a rejected token, say), so
+/// those values are masked first, and before `detail` cuts the body to its length limit.
+fn answer<'a>(response: &'a Response, args: &[String]) -> Result<&'a str, String> {
     let html = looks_like_html(&response.body);
     if !(200..300).contains(&response.status) {
         let mut message = format!("ipinfo.io returned HTTP {}", response.status);
         if !html && !response.body.trim().is_empty() {
             message.push_str(": ");
-            message.push_str(&detail(&response.body));
+            message.push_str(&detail(&redact_arg_values(&response.body, args)));
         }
         return Err(message);
     }

@@ -105,9 +105,64 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
     out
 }
 
+/// The shortest query value that is masked wherever `text` has it. Anything shorter (`1`,
+/// `on`, `12`) cannot be told from ordinary words and numbers, and masking it would garble
+/// the message without hiding anything worth hiding.
+const MIN_MASKED_VALUE_CHARS: usize = 4;
+
 /// Replaces, wherever `text` has it, every query value that one of `args` carries with `***`.
-pub fn redact_arg_values(text: &str, _args: &[String]) -> String {
-    text.to_owned()
+///
+/// A server may echo a value back in an error body (`token SECRET rejected`), with no `?`
+/// or `scheme://` around it, so `redact_arg_queries` and `redact_query` cannot see it. The
+/// values are the part after the first `=` of each `&`-separated pair of a `?query` (the
+/// whole pair when it has no `=`), up to a `#`. A percent-decoded form is masked as well,
+/// since the server sees that one. Values shorter than `MIN_MASKED_VALUE_CHARS` are left
+/// alone. Longer values go first so that one that contains another cannot leave a tail behind.
+pub fn redact_arg_values(text: &str, args: &[String]) -> String {
+    let mut values: Vec<String> = Vec::new();
+    for (_, query) in args.iter().filter_map(|arg| arg.split_once('?')) {
+        let query = query.split_once('#').map_or(query, |(query, _)| query);
+        for pair in query.split('&') {
+            let value = pair.split_once('=').map_or(pair, |(_, value)| value);
+            values.extend(percent_decode(value));
+            values.push(value.to_owned());
+        }
+    }
+    values.retain(|value| value.chars().count() >= MIN_MASKED_VALUE_CHARS);
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    let mut out = text.to_owned();
+    for value in values {
+        out = out.replace(&value, "***");
+    }
+    out
+}
+
+/// The `%XX`-decoded form of `value`, if it has one that is text.
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = match bytes.get(i..i + 3) {
+            Some([b'%', high, low]) => {
+                let digit = |b: &u8| char::from(*b).to_digit(16);
+                digit(high).zip(digit(low)).map(|(h, l)| (h * 16 + l) as u8)
+            }
+            _ => None,
+        };
+        match escaped {
+            Some(byte) => {
+                decoded.push(byte);
+                i += 3;
+            }
+            None => {
+                decoded.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).ok().filter(|text| text != value)
 }
 
 #[cfg(test)]

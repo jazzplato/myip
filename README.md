@@ -51,7 +51,7 @@ The providers are asked one at a time, in this order, until one gives a valid an
 
 A provider's answer counts only if it is a 2xx response of at most 4 KiB that holds exactly one IP address, and that address is a public one. HTML, an empty body, a private, loopback, link-local or other non-public address, and an address of the wrong family are errors, and the next provider is asked. If every provider fails, nothing goes to stdout, the exit code is 1, and each provider's error is listed on stderr. A provider's answer text is never echoed, only a short reason.
 
-`-4` and `-6` limit the lookup to one address family. With `-6` the providers without an IPv6 address (3 and 6) are not asked and are listed as errors.
+`-4` and `-6` limit the lookup to one address family. With `-6` the providers without an IPv6 address (3 and 6) are not asked and are listed as errors. With `--proxy URL` the family applies to the proxy host too, since that is the host the connection goes to: `-6 --proxy http://127.0.0.1:3128` fails with `host not found` because an IPv4 address is not an IPv6 one. Give the proxy an address of that family (`http://[::1]:3128`) or drop the flag, and when a lookup fails that way the error says so.
 
 When the host names of two providers in a row cannot be resolved (no DNS, usually no network) and no provider has responded yet, the remaining providers are not asked: each would cost the resolver's timeout again. They are listed as not asked, so the attempt list stays complete, and the exit code is 1 as before. A timeout, a TLS error or a refused connection starts the count over, and once any provider has responded over HTTP, even with an error status, the rest are asked as usual. `--timeout` still applies to each request, and `--verify` always asks all six.
 
@@ -145,7 +145,7 @@ myip 8.8.8.8/org
 myip 'json?token=YOUR_TOKEN'
 ```
 
-A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
+A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. If an HTTP error body from ipinfo.io repeats a value from your command line (`token abc123 rejected`), the value is shown as `***` too; a value shorter than 4 characters is not masked, and neither is one that you did not type on the command line. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
 
 > To get full information in JSON format
 
@@ -295,7 +295,7 @@ In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read 
 | Option | Meaning |
 |--------|---------|
 | `--timeout <SECS>` | Give up on a request after 1 to 600 seconds (default 10) |
-| `-4` / `-6` | Use IPv4 or IPv6 only (mutually exclusive); filters `local` and `all` |
+| `-4` / `-6` | Use IPv4 or IPv6 only (mutually exclusive); filters `local` and `all`. With `--proxy URL` it applies to the proxy host too |
 | `--proxy none\|env\|URL` | `none` (default) ignores proxy environment variables; `env` honors `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`; or give an `http://HOST:PORT` URL |
 | `--json` | With `public`, `local`, `where` and `all`: one line of JSON (see above); the same as `--format json`. For the ipinfo.io lookup it changes nothing, the ipinfo.io body is already passed through unchanged |
 | `--format <FORMAT>` | With `public`, `local`, `where` and `all`: `text` (default), `json`, `json-pretty` or `yaml` (see [Output formats](#output-formats)). Not with `--json`, and not with the ipinfo.io lookup |
