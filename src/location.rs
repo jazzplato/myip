@@ -274,14 +274,25 @@ fn systemd_signal(env: &dyn Env) -> Option<Signal> {
     })
 }
 
+/// The files a container runtime bind-mounts from its own directory into the container.
+const CONTAINER_MOUNT_POINTS: [&str; 3] = ["/etc/hostname", "/etc/hosts", "/etc/resolv.conf"];
+
 /// Under a private cgroup namespace `/proc/self/cgroup` is just `0::/`, but the runtime's
 /// bind mounts of `hostname`, `hosts` and `resolv.conf` still carry the container id in
-/// their source path (field 4 of each mountinfo line).
+/// their source path (field 4 of each mountinfo line). Only a mount at the container's own
+/// `/etc/hostname`, `/etc/hosts` or `/etc/resolv.conf` (field 5) counts: a host-side tool
+/// can show another container's files at any other path.
 fn mountinfo_signal(env: &dyn Env) -> Option<Signal> {
     let content = env.read_to_string(MOUNTINFO).ok()?;
     let (runtime, id) = content
         .lines()
-        .filter_map(|line| line.split(' ').nth(3))
+        .filter_map(|line| {
+            let mut fields = line.split(' ');
+            let (root, mount_point) = (fields.nth(3)?, fields.next()?);
+            CONTAINER_MOUNT_POINTS
+                .contains(&mount_point)
+                .then_some(root)
+        })
         .find_map(container_mount)?;
     Some(Signal {
         source: format!("file:{MOUNTINFO}"),
