@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-11-10
 - Issue: #12
+- Extended by: [0002](0002-output-formats-and-styled-text.md) (`--format` and `--color`)
 
 ## Context
 `myip` prints the body of `https://ipinfo.io/<arg>` and nothing else. "What is my IP?" has several honest answers depending on who is asking and from where: a laptop has many interfaces (Wi-Fi, VPN `utun`, Docker bridges); a container has an address its host does not; a Kubernetes pod has a pod IP, a node IP and an egress (SNAT) address that differs from both. The single public-IP source is a single point of failure: one provider, rate limits, no validation, and HTML or captive-portal pages are printed as if they were the answer.
