@@ -527,6 +527,17 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_value_that_breaks_a_url_does_not_hide_its_credentials_from_the_redaction() {
+        // `:` is a legal query character; masking it first would destroy the `://`.
+        let body = "proxy http://user:S3CR3T@host:1/x refused";
+        let fetch = FakeFetch::new(vec![ok(403, body)]);
+        let (code, out, err) = exec(&fetch, &["json?x=:"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert!(err.contains("HTTP 403"), "{err}");
+        assert!(!err.contains("S3CR3T"), "{err}");
+    }
+
+    #[test]
     fn a_short_query_value_is_hidden_like_any_other() {
         let fetch = FakeFetch::new(vec![ok(403, r#"{"token":"abc"}"#)]);
         let (code, out, err) = exec(&fetch, &["json?token=abc"]);

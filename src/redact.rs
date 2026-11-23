@@ -335,6 +335,20 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_value_is_not_applied_once_per_repetition() {
+        // `*` is masked as `***`, which holds `*` again: a value repeated and interleaved with
+        // another of the same length must not make the text grow with every repetition.
+        let repeated = format!("ip?{}", vec!["a=%2A&b=x"; 10].join("&"));
+        assert_eq!(redact_arg_values("*", &[repeated]), "***");
+    }
+
+    #[test]
+    fn two_values_that_overlap_in_the_text_are_one_mask() {
+        let args = ["ip?a=abc&b=bcd".to_owned()];
+        assert_eq!(redact_arg_values("x abcd y", &args), "x *** y");
+    }
+
+    #[test]
     fn arguments_without_a_query_value_leave_the_text_alone() {
         let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
         for (text, list) in [
