@@ -180,19 +180,59 @@ fn value_spans(text: &str, args: &[String]) -> Vec<Range<usize>> {
     values.retain(|value| !value.is_empty());
     values.sort();
     values.dedup();
-    let mut spans = Vec::new();
+    // One flag per byte keeps the memory at the size of `text`, however many places the
+    // values match: a range per match would grow with the number of values times the text.
+    let mut covered = vec![false; text.len()];
     for value in &values {
-        // `str::match_indices` skips an occurrence that overlaps the previous one, so the
-        // search resumes one character after the start of each match instead.
-        let step = value.chars().next().map_or(1, char::len_utf8);
-        let mut from = 0;
-        while let Some(at) = text[from..].find(value.as_str()) {
-            let start = from + at;
-            spans.push(start..start + value.len());
-            from = start + step;
-        }
+        mark_occurrences(text.as_bytes(), value.as_bytes(), &mut covered);
+    }
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while let Some(start) = covered[at..].iter().position(|&flag| flag) {
+        let start = at + start;
+        let end = covered[start..]
+            .iter()
+            .position(|&flag| !flag)
+            .map_or(covered.len(), |len| start + len);
+        spans.push(start..end);
+        at = end;
     }
     spans
+}
+
+/// Flags every byte of `text` that lies in an occurrence of `value`, an occurrence that
+/// overlaps the previous one included (`str::match_indices` would skip it, and leave the
+/// tail of the value behind). Knuth-Morris-Pratt, so the time is linear in `text` however
+/// repetitive both are. Both are UTF-8, so a match always starts on a character boundary.
+fn mark_occurrences(text: &[u8], value: &[u8], covered: &mut [bool]) {
+    // `fallback[i]` is the length of the longest proper prefix of `value[..=i]` that is
+    // also a suffix of it.
+    let mut fallback = vec![0; value.len()];
+    let mut matched = 0;
+    for (i, &byte) in value.iter().enumerate().skip(1) {
+        while matched > 0 && byte != value[matched] {
+            matched = fallback[matched - 1];
+        }
+        if byte == value[matched] {
+            matched += 1;
+        }
+        fallback[i] = matched;
+    }
+    let (mut matched, mut marked) = (0, 0);
+    for (i, &byte) in text.iter().enumerate() {
+        while matched > 0 && byte != value[matched] {
+            matched = fallback[matched - 1];
+        }
+        if byte == value[matched] {
+            matched += 1;
+        }
+        if matched == value.len() {
+            let end = i + 1;
+            covered[(end - matched).max(marked)..end].fill(true);
+            marked = end;
+            matched = fallback[matched - 1];
+        }
+    }
 }
 
 /// The `%XX`-decoded form of `value`, if it has one that is text.
@@ -423,6 +463,34 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0], 0..body.len());
         assert_eq!(redact_arg_values(&body, &args), "***");
+    }
+
+    #[test]
+    fn every_occurrence_is_found_as_a_plain_search_at_each_offset_finds_it() {
+        let words = |max: usize| {
+            (1..=max).flat_map(|len| {
+                (0..1_usize << len).map(move |bits| {
+                    (0..len)
+                        .map(|i| if bits >> i & 1 == 0 { 'a' } else { 'b' })
+                        .collect::<String>()
+                })
+            })
+        };
+        for text in words(9) {
+            for value in words(4) {
+                let mut want = vec![false; text.len()];
+                for start in 0..text.len() {
+                    if text[start..].starts_with(&value) {
+                        want[start..start + value.len()].fill(true);
+                    }
+                }
+                let mut got = vec![false; text.len()];
+                mark_occurrences(text.as_bytes(), value.as_bytes(), &mut got);
+                assert_eq!(got, want, "{value} in {text}");
+            }
+        }
+        let args = ["ip?k=éé".to_owned()];
+        assert_eq!(redact_arg_values("xéééy", &args), "x***y");
     }
 
     #[test]
