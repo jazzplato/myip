@@ -4,6 +4,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-23
+
 ### Added
 
 - When every request of `myip public` or of the ipinfo.io lookup (`myip`, `myip FIELD`) fails because the system has no CA certificates (the transport error `No CA certificates were loaded from the system`, typical of a minimal container image), `myip` now prints one more line to stderr after the error and the attempt list: `hint: no CA certificates were found; install ca-certificates, or set SSL_CERT_FILE or SSL_CERT_DIR to a bundle`. It is printed once, never for other failures, and never in a `--json`, `--format` document. The exit code and stdout do not change. The README has a short troubleshooting note.
@@ -91,7 +93,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - Initial version: prints the body of `https://ipinfo.io/<FIELD>`.
 
-[Unreleased]: https://github.com/jazzplato/myip/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jazzplato/myip/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/jazzplato/myip/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jazzplato/myip/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jazzplato/myip/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jazzplato/myip/compare/v0.0.1...v0.1.0
