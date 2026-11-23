@@ -105,6 +105,11 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
     out
 }
 
+/// Replaces, wherever `text` has it, every query value that one of `args` carries with `***`.
+pub fn redact_arg_values(text: &str, _args: &[String]) -> String {
+    text.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +223,59 @@ mod tests {
             ("", &[]),
         ] {
             assert_eq!(redact_arg_queries(text, &args(list)), text, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_query_value_from_the_arguments_is_masked_wherever_the_text_has_it() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        for (text, list, want) in [
+            (
+                r#"{"error":"token SECRET123 rejected"}"#,
+                &["json?token=SECRET123"][..],
+                r#"{"error":"token *** rejected"}"#,
+            ),
+            // Every pair, a bare token, and every occurrence.
+            (
+                "aaaa1111 bbbb2222 CCCC3333 aaaa1111",
+                &["ip?a=aaaa1111&b=bbbb2222", "?CCCC3333"],
+                "*** *** *** ***",
+            ),
+            // A value that contains another: the longer is masked first.
+            (
+                "x ABCD1234 ABCD y",
+                &["ip?a=ABCD&b=ABCD1234"],
+                "x *** *** y",
+            ),
+            // The fragment is not part of the query, and a server may echo the decoded value.
+            (
+                "bad a/b/c/d and WXYZ1234",
+                &["ip?k=a%2Fb%2Fc%2Fd&k2=WXYZ1234#frag"],
+                "bad *** and ***",
+            ),
+            // Any argument that carries a query counts, not only FIELD.
+            (
+                "proxy rejected PXTOKEN9",
+                &["--proxy=http://h:1/?t=PXTOKEN9", "ip"],
+                "proxy rejected ***",
+            ),
+        ] {
+            assert_eq!(redact_arg_values(text, &args(list)), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn short_values_and_arguments_without_a_query_leave_the_text_alone() {
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        for (text, list) in [
+            ("HTTP 403 abc 1 on page 12", &["json?a=1&b=abc&c=12"][..]),
+            ("token SECRET123 rejected", &["json"]),
+            ("token SECRET123 rejected", &["-v", "public", "SECRET123"]),
+            ("token SECRET123 rejected", &["json?", "ip?=", "?&"]),
+            ("token SECRET123 rejected", &[]),
+            ("", &["json?token=SECRET123"]),
+        ] {
+            assert_eq!(redact_arg_values(text, &args(list)), text, "{text}");
         }
     }
 

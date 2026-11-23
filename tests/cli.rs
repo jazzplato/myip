@@ -96,6 +96,25 @@ fn a_query_is_accepted_but_its_value_is_never_printed() {
     assert!(!stderr.contains("S3CR3T"), "{stderr}");
 }
 
+// `-6` also applies to the proxy host. An IPv4 literal has no IPv6 address, so the lookup
+// fails before any connection is made, whatever the host can reach.
+#[test]
+fn a_family_flag_with_a_proxy_that_has_no_such_address_says_so() {
+    let out = myip(&["-6", "--proxy", "http://127.0.0.1:9", "json?token=S3CR3T"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = text(&out.stderr);
+    let hint = "also applies to the proxy host";
+    assert_eq!(stderr.matches(hint).count(), 1, "{stderr}");
+    assert!(stderr.contains("http://[::1]:PORT"), "{stderr}");
+    assert!(!stderr.contains("S3CR3T"), "{stderr}");
+
+    let out = myip(&["--proxy", "http://127.0.0.1:9", "--timeout", "2", "json"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!stderr.contains(hint), "{stderr}");
+}
+
 #[cfg(unix)]
 #[test]
 fn a_non_unicode_argument_exits_2_and_is_never_echoed() {

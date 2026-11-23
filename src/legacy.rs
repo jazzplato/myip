@@ -75,6 +75,7 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
             format!("response from ipinfo.io is larger than {limit} bytes")
         }
         FetchError::Resolve(message)
+        | FetchError::NoAddress(message)
         | FetchError::Rejected(message)
         | FetchError::Transport(message) => message.clone(),
     }

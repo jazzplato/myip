@@ -300,7 +300,9 @@ impl Query<'_> {
         let reach = match &response {
             Ok(_) | Err(FetchError::TooLarge(_) | FetchError::Rejected(_)) => Reach::Responded,
             Err(FetchError::Resolve(_)) => Reach::Unresolved,
-            Err(FetchError::Timeout(_) | FetchError::Transport(_)) => Reach::Failed,
+            Err(FetchError::Timeout(_) | FetchError::NoAddress(_) | FetchError::Transport(_)) => {
+                Reach::Failed
+            }
         };
         let outcome = match response {
             Ok(response) => read_answer(provider.parser, &response, self.options.family)
@@ -321,6 +323,7 @@ impl Query<'_> {
             FetchError::Timeout(_) => format!("timed out after {}s", self.timeout_secs),
             FetchError::TooLarge(_) => format!("answer larger than {MAX_ANSWER_BYTES} bytes"),
             FetchError::Resolve(message)
+            | FetchError::NoAddress(message)
             | FetchError::Rejected(message)
             | FetchError::Transport(message) => detail(message),
         }
@@ -363,6 +366,8 @@ mod tests {
         Rejected(&'static str),
         /// The host name cannot be resolved, as in a container without a network.
         Dns,
+        /// The host name resolved, but to no address of the requested family.
+        NoAddr,
     }
     use Slot::*;
 
@@ -390,6 +395,7 @@ mod tests {
                     Fail(message) => Err(FetchError::Transport(message.to_owned())),
                     Rejected(message) => Err(FetchError::Rejected(message.to_owned())),
                     Dns => Err(FetchError::Resolve(NO_DNS.to_owned())),
+                    NoAddr => Err(FetchError::NoAddress("host not found".to_owned())),
                 };
                 (provider.url, answer)
             })
@@ -761,6 +767,68 @@ mod tests {
             "{out}"
         );
         assert_eq!(fetch.requested_urls(), urls(&[0, 1]));
+    }
+
+    // ---- -4/-6 with a proxy URL: say which host is being resolved (#37) ----
+
+    const PROXY_URL: &str = "http://proxy.test:3128";
+    const PROXY_HINT: &str = "also applies to the proxy host";
+
+    #[test]
+    fn a_failed_lookup_under_a_family_and_a_proxy_url_carries_the_hint_once() {
+        for slot in [Dns, NoAddr] {
+            for (family, example) in [("-6", "http://[::1]:PORT"), ("-4", "http://127.0.0.1:PORT")]
+            {
+                for extra in [&["public"][..], &["-v", "public"], &["public", "--verify"]] {
+                    let mut args = vec![family, "--proxy", PROXY_URL];
+                    args.extend(extra);
+                    let (code, out, err) = go(&board(all(slot)), &args);
+                    assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+                    assert_eq!(err.matches(PROXY_HINT).count(), 1, "{args:?}: {err}");
+                    assert!(err.contains(example), "{args:?}: {err}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_hint_sits_on_the_first_provider_that_was_asked() {
+        let (_, _, err) = go(&board(all(NoAddr)), &["-6", "--proxy", PROXY_URL, "public"]);
+        let lines: Vec<&str> = err.lines().collect();
+        assert!(lines[1].starts_with("  ipinfo.io: host not found"), "{err}");
+        assert!(lines[1].contains(PROXY_HINT), "{err}");
+        assert!(!lines[2].contains(PROXY_HINT), "{err}");
+    }
+
+    #[test]
+    fn there_is_no_hint_without_a_family_a_proxy_url_or_a_failed_lookup() {
+        for args in [
+            &["--proxy", PROXY_URL, "public"][..],
+            &["-6", "public"],
+            &["-6", "--proxy", "env", "public"],
+            &["-6", "--proxy", "none", "public"],
+        ] {
+            for slot in [Dns, NoAddr] {
+                let (code, _, err) = go(&board(all(slot)), args);
+                assert_eq!(code, 1, "{args:?}");
+                assert!(!err.contains(PROXY_HINT), "{args:?}: {err}");
+            }
+        }
+        let args = ["-6", "--proxy", PROXY_URL, "public"];
+        for slot in [Fail("io: Connection refused"), Timeout, Status(503)] {
+            let (code, _, err) = go(&board(all(slot)), &args);
+            assert_eq!(code, 1, "{err}");
+            assert!(!err.contains(PROXY_HINT), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_host_with_no_address_of_the_family_does_not_stop_the_run() {
+        let fetch = board(all(NoAddr));
+        let (code, _, err) = go(&fetch, &["-6", "--proxy", PROXY_URL, "public"]);
+        assert_eq!(code, 1);
+        assert_eq!(fetch.requested_urls(), urls(&[0, 1, 3, 4]));
+        assert!(!err.contains("not asked: two lookups"), "{err}");
     }
 
     // ---- transport options (AC2) ----
