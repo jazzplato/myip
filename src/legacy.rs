@@ -6,6 +6,7 @@ use crate::Context;
 use crate::cli::Options;
 use crate::http::{FetchError, FetchOptions, Response};
 use crate::redact::{redact_query, redact_userinfo};
+use crate::sanitize;
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
 const DEFAULT_FIELD: &str = "json";
@@ -56,8 +57,14 @@ fn print_line(ctx: &mut Context<'_>, body: &str) -> u8 {
     }
 }
 
+/// Transport errors and error bodies come from the network, so they are shown with their
+/// control characters escaped, after the credentials are redacted.
 fn fail(ctx: &mut Context<'_>, message: &str) -> u8 {
-    let _ = writeln!(ctx.err, "myip: {}", redact_credentials(message));
+    let _ = writeln!(
+        ctx.err,
+        "myip: {}",
+        sanitize::escape(&redact_credentials(message))
+    );
     1
 }
 

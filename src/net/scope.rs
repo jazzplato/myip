@@ -56,8 +56,8 @@ impl Scope {
     }
 }
 
-/// Classifies an address. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is classified as
-/// the IPv4 address it carries.
+/// Classifies an address. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) and a 6to4 address
+/// (`2002::/16`, RFC 3056) are classified as the IPv4 address they carry.
 pub fn classify(ip: IpAddr) -> Scope {
     match ip {
         IpAddr::V4(v4) => classify_v4(v4),
@@ -104,6 +104,15 @@ fn classify_v6(ip: Ipv6Addr) -> Scope {
         // fec0::/10, the discard prefix 100::/64 and the NAT64 prefixes 64:ff9b::/96 and
         // 64:ff9b:1::/48, none of which is a host's public address.
         Scope::Reserved
+    } else if s[0] == 0x2002 {
+        // 6to4 carries an IPv4 address in bits 16..48; without this a provider could pass a
+        // private or loopback address off as a public one. `2002::` is not the unspecified address.
+        let [a, b] = s[1].to_be_bytes();
+        let [c, d] = s[2].to_be_bytes();
+        match classify_v4(Ipv4Addr::new(a, b, c, d)) {
+            Scope::Unspecified => Scope::Reserved,
+            embedded => embedded,
+        }
     } else if (s[0] == 0x2001 && s[1] == 0x0db8) || (s[0] == 0x3fff && s[1] <= 0x0fff) {
         Scope::Documentation
     } else if is_protocol_assignment_v6(&s) {
@@ -336,7 +345,6 @@ mod tests {
             "2001:4860:4860::8888",
             "2620:fe::fe",
             "2a00:1450:4001:81b::200e",
-            "2002:c000:204::1",
         ] {
             assert_eq!(scope_of(text), Scope::Global, "{text}");
         }
@@ -358,6 +366,33 @@ mod tests {
             ("::ffff:8.8.8.8", Global),
             ("::ffff:808:808", Global),
             ("::ffff:7f00:1", Loopback),
+        ]);
+    }
+
+    // 2002::/16 carries an IPv4 address in bits 16..48 (RFC 3056): the embedded address decides.
+    #[test]
+    fn six_to_four_is_classified_as_the_embedded_ipv4() {
+        use Scope::*;
+        check(&[
+            ("2002:0a00:0001::1", Private),
+            ("2002:ac10:1::1", Private),
+            ("2002:c0a8:0101::", Private),
+            ("2002:7f00:1::", Loopback),
+            ("2002:a9fe:1::1", LinkLocal),
+            ("2002:6440:1::1", Cgnat),
+            ("2002:e000:1::1", Multicast),
+            ("2002:c000:204::1", Documentation),
+            ("2002:ffff:ffff::1", Reserved),
+            ("2002:c000:1::1", Reserved),
+            // an embedded 0.0.0.0 is not the unspecified IPv6 address
+            ("2002::", Reserved),
+            ("2002:808:808::1", Global),
+            ("2002:808:808:1:2:3:4:5", Global),
+            ("2002:5db8:d822::1", Global),
+            // only the embedded address matters, and the neighbouring prefixes are plain IPv6
+            ("2002:808:808:a00:1::1", Global),
+            ("2001:ffff:a00::1", Global),
+            ("2003:a00:1::1", Global),
         ]);
     }
 
