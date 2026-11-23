@@ -336,7 +336,6 @@ mod tests {
             "2001:4860:4860::8888",
             "2620:fe::fe",
             "2a00:1450:4001:81b::200e",
-            "2002:c000:204::1",
         ] {
             assert_eq!(scope_of(text), Scope::Global, "{text}");
         }
@@ -358,6 +357,33 @@ mod tests {
             ("::ffff:8.8.8.8", Global),
             ("::ffff:808:808", Global),
             ("::ffff:7f00:1", Loopback),
+        ]);
+    }
+
+    // 2002::/16 carries an IPv4 address in bits 16..48 (RFC 3056): the embedded address decides.
+    #[test]
+    fn six_to_four_is_classified_as_the_embedded_ipv4() {
+        use Scope::*;
+        check(&[
+            ("2002:0a00:0001::1", Private),
+            ("2002:ac10:1::1", Private),
+            ("2002:c0a8:0101::", Private),
+            ("2002:7f00:1::", Loopback),
+            ("2002:a9fe:1::1", LinkLocal),
+            ("2002:6440:1::1", Cgnat),
+            ("2002:e000:1::1", Multicast),
+            ("2002:c000:204::1", Documentation),
+            ("2002:ffff:ffff::1", Reserved),
+            ("2002:c000:1::1", Reserved),
+            // an embedded 0.0.0.0 is not the unspecified IPv6 address
+            ("2002::", Reserved),
+            ("2002:808:808::1", Global),
+            ("2002:808:808:1:2:3:4:5", Global),
+            ("2002:5db8:d822::1", Global),
+            // only the embedded address matters, and the neighbouring prefixes are plain IPv6
+            ("2002:808:808:a00:1::1", Global),
+            ("2001:ffff:a00::1", Global),
+            ("2003:a00:1::1", Global),
         ]);
     }
 

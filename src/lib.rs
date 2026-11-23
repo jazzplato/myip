@@ -1585,6 +1585,21 @@ mod tests {
     }
 
     #[test]
+    fn a_hostile_ipinfo_error_reaches_stderr_only_as_visible_escapes() {
+        let transport = FakeFetch::new(vec![Err(FetchError::Transport(WORDED.to_owned()))]);
+        let (code, out, err) = exec(&transport, &["ip"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert_stderr_is_only_escaped_lines(&err, "transport error");
+        assert_eq!(err, format!("myip: {WORDED_ESCAPED}\n"));
+
+        let body = FakeFetch::new(vec![ok(403, WORDED)]);
+        let (code, out, err) = exec(&body, &["ip"]);
+        assert_eq!((code, out.as_str()), (1, ""));
+        assert_stderr_is_only_escaped_lines(&err, "error body");
+        assert!(err.contains("HTTP 403: a\\x1b[2J"), "{err:?}");
+    }
+
+    #[test]
     fn a_verbose_note_that_names_interfaces_shows_their_control_characters_visibly() {
         let machine = machine_with("shared address interface names", "\u{1b}[2J\n");
         let (code, _, err) = run_on(&machine.host(), &everyone_says(PUBLIC_IP), &["-v", "local"]);
