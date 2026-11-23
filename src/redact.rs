@@ -410,6 +410,22 @@ mod tests {
     }
 
     #[test]
+    fn many_overlapping_values_in_a_long_text_do_not_store_a_range_per_match() {
+        // 64 values `a`, `aa`, ... match at nearly every offset of a body of `a`s; the ranges
+        // that are kept must be the one run they make, not one per match.
+        let body = "a".repeat(64 * 1024);
+        let query = (1..=64)
+            .map(|n| format!("k{n}={}", "a".repeat(n)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let args = [format!("ip?{query}")];
+        let spans = value_spans(&body, &args);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0], 0..body.len());
+        assert_eq!(redact_arg_values(&body, &args), "***");
+    }
+
+    #[test]
     fn two_values_that_overlap_in_the_text_are_one_mask() {
         let args = ["ip?a=abc&b=bcd".to_owned()];
         assert_eq!(redact_arg_values("x abcd y", &args), "x *** y");
