@@ -43,6 +43,8 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.build-info.outputs.commit }}
+      date: ${{ steps.build-info.outputs.date }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,6 +70,15 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: The commit and date that `--version` will show
+        id: build-info
+        run: |
+          # The commit date, not the build time: the same commit always prints the same text.
+          commit=$(git rev-parse --short=7 "$GITHUB_SHA")
+          date=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%d "$GITHUB_SHA")
+          echo "$commit $date"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "date=$date" >> "$GITHUB_OUTPUT"
       - name: A release tag must point at a commit on master
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -112,6 +123,10 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.verify.outputs.version }}
+      # Read at compile time by `--version`; see src/version.rs.
+      MYIP_BUILD_COMMIT: ${{ needs.verify.outputs.commit }}
+      MYIP_BUILD_DATE: ${{ needs.verify.outputs.date }}
+      EXPECTED_VERSION_LINE: myip ${{ needs.verify.outputs.version }} (${{ needs.verify.outputs.commit }} ${{ needs.verify.outputs.date }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -139,8 +154,8 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then bin=$bin.exe; fi
           out=$("$bin" --version)
           echo "$out"
-          if [ "$out" != "myip $VERSION" ]; then
-            echo "::error::'$bin --version' printed '$out', expected 'myip $VERSION'"
+          if [ "$out" != "$EXPECTED_VERSION_LINE" ]; then
+            echo "::error::'$bin --version' printed '$out', expected '$EXPECTED_VERSION_LINE'"
             exit 1
           fi
       - name: The Linux binary is static (runs in an empty scratch container)
@@ -152,7 +167,7 @@ jobs:
           docker build --quiet --tag myip-scratch "$ctx"
           out=$(docker run --rm myip-scratch --version)
           echo "$out"
-          test "$out" = "myip $VERSION"
+          test "$out" = "$EXPECTED_VERSION_LINE"
       - name: The Windows binary does not import the Visual C++ runtime
         if: runner.os == 'Windows'
         run: |

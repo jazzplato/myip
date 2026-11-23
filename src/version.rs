@@ -14,8 +14,35 @@ pub static VERSION: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-fn render(version: &str, _commit: Option<&str>, _date: Option<&str>) -> String {
-    version.to_owned()
+fn render(version: &str, commit: Option<&str>, date: Option<&str>) -> String {
+    match (commit, date) {
+        (Some(commit), Some(date)) if is_commit(commit) && is_date(date) => {
+            format!("{version} ({commit} {date})")
+        }
+        _ => version.to_owned(),
+    }
+}
+
+/// An abbreviated git object name: seven or more lower-case hex digits, at most a full SHA-1.
+fn is_commit(text: &str) -> bool {
+    (7..=40).contains(&text.len()) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `YYYY-MM-DD`, month 01-12, day 01-31 (the calendar is not checked further).
+fn is_date(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let digits = |range: std::ops::Range<usize>| -> Option<u32> {
+        let part = &bytes[range];
+        part.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| part.iter().fold(0, |n, d| n * 10 + u32::from(d - b'0')))
+    };
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && digits(0..4).is_some()
+        && digits(5..7).is_some_and(|month| (1..=12).contains(&month))
+        && digits(8..10).is_some_and(|day| (1..=31).contains(&day))
 }
 
 #[cfg(test)]
