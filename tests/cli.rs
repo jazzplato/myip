@@ -24,12 +24,17 @@ fn help_exits_zero_and_documents_the_exit_codes() {
 }
 
 #[test]
-fn version_matches_cargo() {
+fn version_is_the_cargo_version_with_an_optional_build_suffix() {
     let out = myip(&["--version"]);
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(
-        text(&out.stdout),
-        concat!("myip ", env!("CARGO_PKG_VERSION"), "\n")
+    let stdout = text(&out.stdout);
+    let rest = stdout
+        .strip_prefix(concat!("myip ", env!("CARGO_PKG_VERSION")))
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .unwrap_or_else(|| panic!("unexpected version line {stdout:?}"));
+    assert!(
+        rest.is_empty() || (rest.starts_with(" (") && rest.ends_with(')')),
+        "unexpected version line {stdout:?}"
     );
 }
 

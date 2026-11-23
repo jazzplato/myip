@@ -28,7 +28,7 @@ Actions -> Release -> Run workflow on any branch. It verifies the tag/version ru
 ## What the workflow checks
 - the tag equals `v` + the `Cargo.toml` version, and (real tags only) the commit is reachable from `master`;
 - `cargo publish --dry-run --locked` succeeds (nothing is published);
-- every binary prints `myip <version>` from `--version`; the Linux binaries also run in an empty `scratch` container (static); the Windows binary does not import the Visual C++ runtime;
+- every binary prints `myip <version> (<short commit> <commit date, UTC>)` from `--version` (the `verify` job computes the commit and date once and the build reads them at compile time through `MYIP_BUILD_COMMIT` and `MYIP_BUILD_DATE`; `cargo publish` sets neither, so the crate prints the bare version); the Linux binaries also run in an empty `scratch` container (static) and print the same line; the Windows binary does not import the Visual C++ runtime;
 - exactly the five archives and `SHA256SUMS` exist, and `SHA256SUMS` matches them; the release job downloads only the `myip-*` and `SHA256SUMS` artifacts, re-checks that exact file set and the checksums, and only then attests and uploads.
 
 Build artifacts are kept for 30 days, the longest a `release` environment approval can stay pending. If an approval is older than that, the run fails; re-run all jobs to rebuild.

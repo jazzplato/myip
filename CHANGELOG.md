@@ -4,6 +4,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added
+
+- `myip --version` in a release binary also shows the short commit it was built from and that commit's date in UTC, for example `myip 0.2.0 (f02e182 2026-11-22)`. A build without that information (`cargo install myip`, a plain `cargo build`) still prints just `myip 0.2.0`. The release workflow now checks the exact text on all five targets. There is no build timestamp and no update check.
+
 ## [0.1.1] - 2026-11-22
 
 ### Added

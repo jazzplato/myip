@@ -7,6 +7,7 @@ use clap::error::ErrorKind;
 use clap::{Arg, Args, Command as ClapCommand, Parser, Subcommand};
 
 use crate::http::{Family, ProxyMode};
+use crate::version::VERSION;
 
 const EXIT_CODES: &str = "\
 Exit codes:
@@ -19,7 +20,7 @@ Exit codes:
 ///
 /// Without a subcommand, prints what ipinfo.io returns for FIELD (default: json).
 #[derive(Parser, Debug)]
-#[command(name = "myip", version, after_help = EXIT_CODES)]
+#[command(name = "myip", version = VERSION.as_str(), after_help = EXIT_CODES)]
 #[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(flatten)]
