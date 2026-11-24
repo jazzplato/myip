@@ -32,6 +32,7 @@ pub const ALLOWED_VARS: &[&str] = &[
     "POD_IPS",
     "NODE_NAME",
     "HOST_IP",
+    "IPINFO_TOKEN",
 ];
 
 /// Largest file `SystemEnv` reads; every allow-listed file is far smaller.
@@ -242,8 +243,24 @@ mod tests {
                 "POD_IPS",
                 "NODE_NAME",
                 "HOST_IP",
+                "IPINFO_TOKEN",
             ]
         );
+    }
+
+    #[test]
+    fn the_ipinfo_token_variable_is_allowed_by_its_exact_name_and_the_service_account_one_is_not() {
+        assert!(SystemEnv::allows_var("IPINFO_TOKEN"));
+        for name in [
+            "ipinfo_token",
+            "IPINFO_TOKEN ",
+            " IPINFO_TOKEN",
+            "IPINFO_TOKENS",
+        ] {
+            assert!(!SystemEnv::allows_var(name), "{name:?}");
+            assert_eq!(SystemEnv.var(name), None, "{name:?}");
+        }
+        assert!(!SystemEnv::allows_path(TOKEN));
     }
 
     #[test]

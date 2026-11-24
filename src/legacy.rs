@@ -4,28 +4,52 @@ use std::time::Duration;
 
 use crate::Context;
 use crate::cli::Options;
+use crate::env::Env;
 use crate::hint;
 use crate::http::{FetchError, FetchOptions, Response, proxy_family_hint};
-use crate::redact::{redact_arg_values, redact_credentials, redact_query};
+use crate::redact::{Secret, redact_credentials, redact_query, redact_values};
 use crate::sanitize;
 
 const URL_IPINFO: &str = "https://ipinfo.io/";
 const DEFAULT_FIELD: &str = "json";
 const MAX_BODY_BYTES: usize = 1 << 20;
 const MAX_DETAIL_CHARS: usize = 200;
+const TOKEN_VAR: &str = "IPINFO_TOKEN";
+const MAX_TOKEN_LEN: usize = 256;
 
 pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Context<'_>) -> u8 {
+    let field = field.unwrap_or(DEFAULT_FIELD);
+    let bearer = match bearer_from_env(field, ctx.host.env) {
+        Ok(bearer) => bearer,
+        Err(InvalidToken) => {
+            // Never says what the value was: not the value, a character of it or its length.
+            let _ = writeln!(
+                ctx.err,
+                "error: {TOKEN_VAR} must have 1 to {MAX_TOKEN_LEN} characters, each a letter, \
+                 a digit or one of . _ ~ + / = - (unset it to send no token)"
+            );
+            return 2;
+        }
+    };
     let fetch_options = FetchOptions {
         timeout: Duration::from_secs(options.timeout),
         max_bytes: MAX_BODY_BYTES,
         family: options.family(),
         proxy: options.proxy.clone(),
         accept: "application/json",
+        bearer,
     };
-    let url = format!("{URL_IPINFO}{}", field.unwrap_or(DEFAULT_FIELD));
+    let secret = fetch_options.bearer.as_ref();
+    let url = format!("{URL_IPINFO}{field}");
     if options.verbose {
         // FIELD may carry an access token as a query parameter.
         let _ = writeln!(ctx.err, "myip: GET {}", redact_query(&url));
+        if secret.is_some() {
+            let _ = writeln!(
+                ctx.err,
+                "myip: Authorization: Bearer *** (from {TOKEN_VAR})"
+            );
+        }
     }
 
     let response = match ctx.fetch.get(&url, &fetch_options) {
@@ -36,7 +60,7 @@ pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Co
                 message.push_str("; hint: ");
                 message.push_str(&family_hint);
             }
-            let code = fail(ctx, &message);
+            let code = fail(ctx, &message, secret);
             if matches!(&e, FetchError::Transport(message) if hint::is_no_ca(message)) {
                 let _ = writeln!(ctx.err, "{}", hint::NO_CA_HINT);
             }
@@ -51,10 +75,70 @@ pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Co
             response.body.len()
         );
     }
-    match answer(&response, args) {
+    match answer(&response, args, secret) {
         Ok(body) => print_line(ctx, body),
-        Err(message) => fail(ctx, &message),
+        Err(message) => fail(ctx, &message, secret),
     }
+}
+
+struct InvalidToken;
+
+/// The token to send with the request, from `IPINFO_TOKEN` (ADR 0004). A `token` parameter
+/// in FIELD wins: the variable is then not read at all. A value that is not valid Unicode
+/// reads as unset, as `Env::var` gives `None` for it.
+fn bearer_from_env(field: &str, env: &dyn Env) -> Result<Option<Secret>, InvalidToken> {
+    if has_token_parameter(field) {
+        return Ok(None);
+    }
+    let Some(raw) = env.var(TOKEN_VAR) else {
+        return Ok(None);
+    };
+    let value = raw.trim_matches(|c: char| c.is_ascii_whitespace());
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let allowed = |byte: u8| byte.is_ascii_alphanumeric() || b"._~+/=-".contains(&byte);
+    if value.len() > MAX_TOKEN_LEN || !value.bytes().all(allowed) {
+        return Err(InvalidToken);
+    }
+    Ok(Some(Secret::new(value)))
+}
+
+/// Whether the query of `field` has a parameter named `token`, ignoring ASCII case after
+/// percent-decoding, with any value or none.
+fn has_token_parameter(field: &str) -> bool {
+    let Some((_, query)) = field.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|pair| {
+        let name = pair.split_once('=').map_or(pair, |(name, _)| name);
+        percent_decoded(name).eq_ignore_ascii_case(b"token")
+    })
+}
+
+/// `text` with each valid `%XX` replaced by its byte; anything else is kept as it is.
+fn percent_decoded(text: &str) -> Vec<u8> {
+    let hex = |byte: Option<&u8>| byte.and_then(|&b| char::from(b).to_digit(16));
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = match (bytes[i], hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+            (b'%', Some(high), Some(low)) => u8::try_from(high * 16 + low).ok(),
+            _ => None,
+        };
+        match escaped {
+            Some(byte) => {
+                decoded.push(byte);
+                i += 3;
+            }
+            None => {
+                decoded.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    decoded
 }
 
 fn print_line(ctx: &mut Context<'_>, body: &str) -> u8 {
@@ -66,12 +150,12 @@ fn print_line(ctx: &mut Context<'_>, body: &str) -> u8 {
 }
 
 /// Transport errors and error bodies come from the network, so they are shown with their
-/// control characters escaped, after the credentials are redacted.
-fn fail(ctx: &mut Context<'_>, message: &str) -> u8 {
+/// control characters escaped, after the credentials and the token are masked.
+fn fail(ctx: &mut Context<'_>, message: &str, secret: Option<&Secret>) -> u8 {
     let _ = writeln!(
         ctx.err,
         "myip: {}",
-        sanitize::escape(&redact_credentials(message))
+        sanitize::escape(&redact_values(message, &[], secret))
     );
     1
 }
@@ -93,18 +177,23 @@ fn describe(error: &FetchError, timeout_secs: u64) -> String {
 /// ipinfo.io labels plain-text answers (`city`, `8.8.8.8/org`) as text/html, so the
 /// content type cannot be trusted and the body is inspected instead.
 ///
-/// An error body may echo a query value from the command line (a rejected token, say), so
-/// those values are masked, and before `detail` cuts the body to its length limit. The
+/// An error body may echo a query value from the command line (a rejected token, say) or
+/// the token from the variable, so those are masked, and before `detail` cuts the body to
+/// its length limit. The 2xx body is the server's answer and is passed through as it is. The
 /// credentials and the values are found in the body together: masking the values first
 /// would destroy the `://` that finds the credentials (a value such as `:`), and hiding
 /// the credentials first would change a value that holds a URL, so it is no longer found.
-fn answer<'a>(response: &'a Response, args: &[String]) -> Result<&'a str, String> {
+fn answer<'a>(
+    response: &'a Response,
+    args: &[String],
+    secret: Option<&Secret>,
+) -> Result<&'a str, String> {
     let html = looks_like_html(&response.body);
     if !(200..300).contains(&response.status) {
         let mut message = format!("ipinfo.io returned HTTP {}", response.status);
         if !html && !response.body.trim().is_empty() {
             message.push_str(": ");
-            message.push_str(&detail(&redact_arg_values(&response.body, args)));
+            message.push_str(&detail(&redact_values(&response.body, args, secret)));
         }
         return Err(message);
     }

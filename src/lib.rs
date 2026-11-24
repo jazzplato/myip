@@ -149,8 +149,8 @@ mod tests {
     use super::*;
     use crate::egress::PROBE_V4;
     use crate::egress::testing::FakeProbe;
-    use crate::env::RecordingEnv;
     use crate::env::testing::FakeEnv;
+    use crate::env::{Access, RecordingEnv};
     use crate::http::testing::{FakeFetch, RouteFetch, ok, reply};
     use crate::http::{Family, FetchError, FetchOptions, ProxyMode, Response};
     use crate::ifaces::testing::{FakeInterfaces, iface};
@@ -1361,6 +1361,44 @@ mod tests {
     }
 
     #[test]
+    fn all_verify_with_answers_from_one_operator_is_reported_in_band_with_exit_0() {
+        let cloudflare_only = [Some(PUBLIC_IP), None, None, Some(PUBLIC_IP), None, None];
+        let (code, out, err) = run_on(
+            &Machine::laptop().host(),
+            &providers(cloudflare_only),
+            &["all", "--verify"],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            out.contains("[public]\n  unavailable: the address could not be verified"),
+            "{out}"
+        );
+        assert!(
+            err.contains(
+                "myip: public: the address could not be verified: fewer than two independent \
+                 operators answered in any address family"
+            ),
+            "{err}"
+        );
+
+        let (code, out, _) = run_on(
+            &Machine::laptop().host(),
+            &providers(cloudflare_only),
+            &["--json", "all", "--verify"],
+        );
+        assert_eq!(code, 0);
+        assert!(out.contains("\"public\":{\"ip\":null,"), "{out}");
+        assert!(
+            out.contains(
+                "\"families\":[{\"family\":\"ipv4\",\"status\":\"unverified\",\"ip\":\"1.2.3.4\",\
+                 \"agree\":2,\"total\":2,\"operators\":1,\"providers\":["
+            ),
+            "{out}"
+        );
+        assert!(out.contains("\"operator\":\"cloudflare\""), "{out}");
+    }
+
+    #[test]
     fn all_never_exits_1_when_no_provider_answers() {
         for args in [&["all"][..], &["all", "--verify"], &["--json", "all"]] {
             let fetch = nobody_answers();
@@ -1947,6 +1985,479 @@ mod tests {
         }
     }
 
+    // ---- IPINFO_TOKEN (ADR 0004) ----
+
+    const TOKEN_VALUE: &str = "Q7abc.DEF_123";
+
+    /// A machine whose environment has `IPINFO_TOKEN` set to `value`.
+    fn machine_with_token(value: &str) -> Machine {
+        Machine {
+            env: FakeEnv::new().var("IPINFO_TOKEN", value),
+            ..Machine::quiet()
+        }
+    }
+
+    fn token_run(value: &str, fetch: &dyn Fetch, args: &[&str]) -> (u8, String, String) {
+        run_on(&machine_with_token(value).host(), fetch, args)
+    }
+
+    /// The bearer each recorded request was made with.
+    fn bearers(fetch: &FakeFetch) -> Vec<Option<String>> {
+        fetch
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, options)| options.bearer.as_ref().map(|b| b.expose().to_owned()))
+            .collect()
+    }
+
+    fn asked_for_the_token(spy: &RecordingEnv<'_>) -> bool {
+        spy.accesses()
+            .iter()
+            .any(|a| matches!(a, Access::Var(name) if name == "IPINFO_TOKEN"))
+    }
+
+    #[test]
+    fn the_variable_is_sent_as_a_bearer_with_the_one_request_and_never_in_the_url() {
+        for args in [
+            &["json"][..],
+            &["city"],
+            &["8.8.8.8/org"],
+            &["public", "json"],
+            &["public", "ip?x=1"],
+            &[],
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, out, err) = token_run(TOKEN_VALUE, &fetch, args);
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (0, "x\n", ""),
+                "{args:?}"
+            );
+            assert_eq!(bearers(&fetch), [Some(TOKEN_VALUE.to_owned())], "{args:?}");
+            let urls = requested(&fetch);
+            assert_eq!(urls.len(), 1, "{args:?}: {urls:?}");
+            assert!(
+                !urls[0].to_ascii_lowercase().contains("token") && !urls[0].contains(TOKEN_VALUE),
+                "{args:?}: {urls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_the_variable_no_bearer_is_sent() {
+        let fetch = FakeFetch::new(vec![ok(200, "x")]);
+        assert_eq!(exec(&fetch, &["city"]).0, 0);
+        assert_eq!(bearers(&fetch), [None]);
+    }
+
+    #[test]
+    fn an_explicit_token_parameter_wins_and_the_variable_is_neither_read_nor_checked() {
+        // Without this the checks below prove nothing: the same variable is used otherwise.
+        let fetch = FakeFetch::new(vec![ok(200, "x")]);
+        token_run(TOKEN_VALUE, &fetch, &["json"]);
+        assert_eq!(bearers(&fetch), [Some(TOKEN_VALUE.to_owned())]);
+
+        for value in [TOKEN_VALUE, "a b", "bad\u{1}", ""] {
+            for field in [
+                "json?token=U",
+                "json?TOKEN=U",
+                "json?ToKeN=U",
+                "json?%74oken=U",
+                "json?%54OKEN=U",
+                "json?token=",
+                "json?token",
+                "json?a=1&token=U",
+                "json?a=1&token",
+                "?token=U",
+            ] {
+                let fake = FakeEnv::new().var("IPINFO_TOKEN", value);
+                let spy = RecordingEnv::new(&fake);
+                let machine = Machine::quiet();
+                let host = Host {
+                    env: &spy,
+                    interfaces: &machine.interfaces,
+                    probe: &machine.probe,
+                };
+                let fetch = FakeFetch::new(vec![ok(200, "x")]);
+                let (code, out, err) = run_on(&host, &fetch, &["-v", field]);
+                assert_eq!(
+                    (code, out.as_str()),
+                    (0, "x\n"),
+                    "{value:?} {field:?}: {err}"
+                );
+                assert_eq!(
+                    requested(&fetch),
+                    [format!("https://ipinfo.io/{field}")],
+                    "{value:?} {field:?}"
+                );
+                assert_eq!(bearers(&fetch), [None], "{value:?} {field:?}");
+                assert!(!asked_for_the_token(&spy), "{value:?} {field:?}");
+                assert!(!err.contains("Authorization"), "{value:?} {field:?}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_parameter_that_is_not_named_token_does_not_stop_the_variable() {
+        for field in [
+            "json?tokens=U",
+            "json?x=token",
+            "json?my_token=U",
+            "json?token_=U",
+            "json?%74oken%20=U",
+            "json?a=1&mytoken=2",
+            "token",
+            "json",
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, _, err) = token_run(TOKEN_VALUE, &fetch, &[field]);
+            assert_eq!(code, 0, "{field:?}: {err}");
+            assert_eq!(
+                requested(&fetch),
+                [format!("https://ipinfo.io/{field}")],
+                "{field:?}"
+            );
+            assert_eq!(bearers(&fetch), [Some(TOKEN_VALUE.to_owned())], "{field:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_passthrough_asks_for_the_variable() {
+        for value in [TOKEN_VALUE, "a b", ""] {
+            let fake = FakeEnv::new().var("IPINFO_TOKEN", value);
+            let machine = Machine::laptop();
+
+            // Without this the commands below prove nothing.
+            let spy = RecordingEnv::new(&fake);
+            let host = Host {
+                env: &spy,
+                interfaces: &machine.interfaces,
+                probe: &machine.probe,
+            };
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            run_on(&host, &fetch, &["city"]);
+            assert!(
+                asked_for_the_token(&spy),
+                "the passthrough reads it: {value:?}"
+            );
+
+            let commands: [&[&str]; 8] = [
+                &["public"],
+                &["public", "--verify"],
+                &["local"],
+                &["where"],
+                &["all"],
+                &["all", "--verify"],
+                &["--json", "-v", "public"],
+                &["-v", "--format", "yaml", "all"],
+            ];
+            for command in commands {
+                let spy = RecordingEnv::new(&fake);
+                let host = Host {
+                    env: &spy,
+                    interfaces: &machine.interfaces,
+                    probe: &machine.probe,
+                };
+                let fetch = everyone_says(PUBLIC_IP);
+                let (code, out, err) = run_on(&host, &fetch, command);
+                assert_eq!(code, 0, "{value:?} {command:?}: {err}");
+                assert!(!asked_for_the_token(&spy), "{value:?} {command:?}");
+                let sent = fetch.requests.lock().unwrap();
+                assert!(
+                    sent.iter().all(|(_, options)| options.bearer.is_none()),
+                    "{value:?} {command:?}"
+                );
+                if command[0] != "local" && command[0] != "where" {
+                    assert!(!sent.is_empty(), "{command:?}");
+                }
+                if value == TOKEN_VALUE {
+                    assert!(!format!("{out}{err}").contains(value), "{command:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn verbose_prints_one_fixed_line_about_the_token_and_never_the_value() {
+        for args in [&["-v", "city"][..], &["-v", "public", "city"]] {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, out, err) = token_run(TOKEN_VALUE, &fetch, args);
+            assert_eq!((code, out.as_str()), (0, "x\n"), "{args:?}");
+            assert_eq!(
+                err,
+                "myip: GET https://ipinfo.io/city\n\
+                 myip: Authorization: Bearer *** (from IPINFO_TOKEN)\n\
+                 myip: HTTP 200, 1 bytes\n",
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verbose_says_nothing_about_a_token_that_is_not_sent() {
+        // Without this the checks below prove nothing.
+        let fetch = FakeFetch::new(vec![ok(200, "x")]);
+        let (_, _, err) = token_run(TOKEN_VALUE, &fetch, &["-v", "city"]);
+        assert!(err.contains("Authorization: Bearer ***"), "{err}");
+
+        for (value, args) in [
+            ("", &["-v", "city"][..]),
+            (" \t\r\n", &["-v", "city"]),
+            (TOKEN_VALUE, &["-v", "city?token=U"]),
+            (TOKEN_VALUE, &["-v", "city?TOKEN=U"]),
+            (TOKEN_VALUE, &["-v", "public", "city?%74oken=U"]),
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, _, err) = token_run(value, &fetch, args);
+            assert_eq!(code, 0, "{args:?}: {err}");
+            assert!(
+                !err.contains("Authorization") && !err.contains("IPINFO_TOKEN"),
+                "{args:?}: {err}"
+            );
+            assert!(!err.contains(TOKEN_VALUE), "{args:?}: {err}");
+        }
+        for args in [&["-v", "where"][..], &["-v", "local"]] {
+            let (_, _, err) = run_on(
+                &Machine {
+                    env: FakeEnv::new().var("IPINFO_TOKEN", TOKEN_VALUE),
+                    ..Machine::laptop()
+                }
+                .host(),
+                &no_network(),
+                args,
+            );
+            assert!(
+                !err.contains("Authorization") && !err.contains(TOKEN_VALUE),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_error_body_that_echoes_the_variable_does_not_print_it() {
+        let echoing = format!(
+            r#"{{"status":403,"error":{{"title":"Unknown token","message":"{TOKEN_VALUE} is not known"}}}}"#
+        );
+        for args in [&["json"][..], &["-v", "json"], &["public", "city"]] {
+            let fetch = FakeFetch::new(vec![ok(403, &echoing)]);
+            let (code, out, err) = token_run(TOKEN_VALUE, &fetch, args);
+            assert_eq!((code, out.as_str()), (1, ""), "{args:?}");
+            assert_eq!(bearers(&fetch), [Some(TOKEN_VALUE.to_owned())], "{args:?}");
+            assert!(
+                err.contains(r#""message":"*** is not known""#),
+                "{args:?}: {err}"
+            );
+            assert!(
+                !err.contains(TOKEN_VALUE) && !err.contains("Q7"),
+                "{args:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_in_an_error_body_that_the_length_limit_would_cut_does_not_leave_its_start() {
+        let body = format!("{} {TOKEN_VALUE}", "x".repeat(196));
+        let fetch = FakeFetch::new(vec![ok(500, &body)]);
+        let (code, _, err) = token_run(TOKEN_VALUE, &fetch, &["json"]);
+        assert_eq!(code, 1);
+        assert_eq!(bearers(&fetch), [Some(TOKEN_VALUE.to_owned())]);
+        assert!(!err.contains("Q7") && err.contains(" ***"), "{err}");
+    }
+
+    #[test]
+    fn a_transport_failure_that_echoes_the_variable_does_not_print_it() {
+        let text = format!("connection to {TOKEN_VALUE} refused");
+        for error in [
+            FetchError::Transport(text.clone()),
+            FetchError::Rejected(text.clone()),
+            FetchError::Resolve(text.clone()),
+            FetchError::NoAddress(text.clone()),
+        ] {
+            let fetch = FakeFetch::new(vec![Err(error.clone())]);
+            let (code, out, err) = token_run(TOKEN_VALUE, &fetch, &["-v", "json"]);
+            assert_eq!((code, out.as_str()), (1, ""), "{error:?}");
+            assert_eq!(bearers(&fetch), [Some(TOKEN_VALUE.to_owned())], "{error:?}");
+            assert!(
+                err.contains("connection to *** refused"),
+                "{error:?}: {err}"
+            );
+            assert!(
+                !err.contains(TOKEN_VALUE) && !err.contains("Q7"),
+                "{error:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_options_a_request_carries_do_not_show_the_value_in_debug_output() {
+        let fetch = FakeFetch::new(vec![ok(200, "x")]);
+        token_run(TOKEN_VALUE, &fetch, &["json"]);
+        let recorded = fetch.requests.lock().unwrap();
+        let options = &recorded[0].1;
+        assert!(format!("{options:?}").contains("bearer: Some(***)"));
+        for shown in [
+            format!("{options:?}"),
+            format!("{options:#?}"),
+            format!("{recorded:?}"),
+            format!("{:?}", options.bearer),
+            format!("{}", options.bearer.as_ref().unwrap()),
+        ] {
+            assert!(
+                shown.contains("***") && !shown.contains(TOKEN_VALUE),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_successful_answer_is_the_servers_and_is_passed_through_raw() {
+        let body = format!(r#"{{"ip":"1.2.3.4","echo":"{TOKEN_VALUE}"}}"#);
+        let fetch = FakeFetch::new(vec![ok(200, &body)]);
+        let (code, out, err) = token_run(TOKEN_VALUE, &fetch, &["json"]);
+        assert_eq!(bearers(&fetch), [Some(TOKEN_VALUE.to_owned())]);
+        assert_eq!((code, out, err), (0, format!("{body}\n"), String::new()));
+    }
+
+    #[test]
+    fn whitespace_around_the_value_is_trimmed_and_a_blank_one_is_unset() {
+        for (value, want) in [
+            (TOKEN_VALUE.to_owned(), Some(TOKEN_VALUE)),
+            (format!("{TOKEN_VALUE}\n"), Some(TOKEN_VALUE)),
+            (format!(" \t{TOKEN_VALUE}\r\n"), Some(TOKEN_VALUE)),
+            (format!("\u{c}{TOKEN_VALUE}\u{c}"), Some(TOKEN_VALUE)),
+            (String::new(), None),
+            (" ".to_owned(), None),
+            (" \t\r\n\u{c}".to_owned(), None),
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, out, err) = token_run(&value, &fetch, &["json"]);
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (0, "x\n", ""),
+                "{value:?}"
+            );
+            assert_eq!(bearers(&fetch), [want.map(str::to_owned)], "{value:?}");
+        }
+    }
+
+    #[test]
+    fn every_allowed_character_and_the_longest_length_are_accepted() {
+        let longest = "a".repeat(256);
+        for value in [
+            "ABCXYZabcxyz0123456789",
+            ".",
+            "_",
+            "~",
+            "+",
+            "/",
+            "=",
+            "-",
+            "a.b_c~d+e/f=g-h",
+            "abc==",
+            longest.as_str(),
+        ] {
+            let fetch = FakeFetch::new(vec![ok(200, "x")]);
+            let (code, _, err) = token_run(value, &fetch, &["json"]);
+            assert_eq!(code, 0, "{value:?}: {err}");
+            assert_eq!(bearers(&fetch), [Some(value.to_owned())], "{value:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_value_is_a_usage_error_that_shows_nothing_about_it_and_asks_nothing() {
+        let too_long_257 = format!("Qz9{}", "a".repeat(254));
+        let too_long_300 = format!("Qz9{}", "a".repeat(297));
+        let mut values: Vec<String> = [
+            "a b",
+            "a\tb",
+            "a\u{1}b",
+            "a\u{b}",
+            "a\u{7f}b",
+            "a\u{0}b",
+            "é",
+            "a\u{a0}b",
+            "\u{feff}abc",
+            "a\"b",
+            "a,b",
+            "a;b",
+            "a\\b",
+            "a:b",
+            "a@b",
+            "a%41b",
+            "a?b",
+            "a&b",
+            "a#b",
+            "a!b",
+            "a$b",
+            "a*b",
+            "a'b",
+            "a(b",
+            "a{b",
+            "a|b",
+            "a^b",
+            "a<b",
+            "a\u{1f600}",
+        ]
+        .map(|bad| format!("Qz9{bad}Xw8"))
+        .into();
+        values.push(too_long_257);
+        values.push(too_long_300);
+        let mut messages = std::collections::BTreeSet::new();
+        for value in &values {
+            for args in [
+                &["city"][..],
+                &["-v", "city"],
+                &["public", "city"],
+                &[],
+                &["-v", "json?a=1"],
+            ] {
+                // An answer is ready so that a request made by mistake fails the assertions below.
+                let fetch = FakeFetch::new(vec![ok(200, "x")]);
+                let (code, out, err) = token_run(value, &fetch, args);
+                assert_eq!(code, 2, "{value:?} {args:?}");
+                assert_eq!(out, "", "{value:?} {args:?}");
+                assert!(requested(&fetch).is_empty(), "{value:?} {args:?}");
+                assert!(
+                    err.starts_with("error: ")
+                        && err.contains("IPINFO_TOKEN")
+                        && err.contains("256")
+                        && err.lines().count() == 1,
+                    "{value:?} {args:?}: {err}"
+                );
+                for shown in [
+                    "Qz9",
+                    "Xw8",
+                    "257",
+                    "300",
+                    "\u{1f600}",
+                    "\u{a0}",
+                    "\u{feff}",
+                ] {
+                    assert!(!err.contains(shown), "{value:?} {args:?}: {err}");
+                }
+                messages.insert(err);
+            }
+        }
+        assert_eq!(
+            messages.len(),
+            1,
+            "one message for every invalid value: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn the_format_usage_error_comes_before_the_value_check() {
+        let fetch = no_network();
+        let (code, _, err) = token_run("a b", &fetch, &["--format", "yaml", "city"]);
+        assert_eq!(code, 2);
+        assert!(
+            err.contains("--format") && !err.contains("IPINFO_TOKEN"),
+            "{err}"
+        );
+    }
+
     // ---- --format (ADR 0002) ----
 
     type Fixture = fn() -> RouteFetch;
@@ -1966,19 +2477,26 @@ mod tests {
         ])
     }
 
+    fn cloudflare_only() -> RouteFetch {
+        providers([Some(PUBLIC_IP), None, None, Some(PUBLIC_IP), None, None])
+    }
+
     /// Every outcome a document format has to carry: a headline, a verified answer, a
-    /// disagreement (exit 3), a total failure (exit 1) and each dimension command.
-    fn documents() -> [(&'static [&'static str], u8, Fixture); 10] {
+    /// disagreement (exit 3), answers from one operator only, a total failure (exit 1) and
+    /// each dimension command.
+    fn documents() -> [(&'static [&'static str], u8, Fixture); 12] {
         [
             (&["public"], 0, agree),
             (&["public", "--verify"], 0, agree),
             (&["public", "--verify"], 3, split),
+            (&["public", "--verify"], 1, cloudflare_only),
             (&["public"], 1, nobody_answers),
             (&["local"], 0, agree),
             (&["where"], 0, agree),
             (&["all"], 0, agree),
             (&["all", "--verify"], 0, agree),
             (&["all", "--verify"], 3, split),
+            (&["all", "--verify"], 0, cloudflare_only),
             (&["all"], 0, nobody_answers),
         ]
     }
@@ -2182,6 +2700,55 @@ mod tests {
             }
             assert_eq!(json.matches('\n').count(), 1, "{json}");
         }
+    }
+
+    #[test]
+    fn every_document_format_names_the_operators() {
+        let slugs = [
+            "cloudflare",
+            "ipify",
+            "amazon",
+            "cloudflare",
+            "ident.me",
+            "ipinfo",
+        ];
+        for format in ["json", "json-pretty", "yaml"] {
+            let (code, out, _) = laptop_run(&agree(), &["--format", format, "public", "--verify"]);
+            assert_eq!(code, 0, "{format}");
+            let tree = read(&out);
+            let family = &tree["families"][0];
+            assert_eq!(family["status"].as_str(), Some("verified"), "{format}");
+            assert_eq!(family["total"].as_i64(), Some(6), "{format}");
+            assert_eq!(family["operators"].as_i64(), Some(5), "{format}");
+            let named: Vec<_> = family["providers"]
+                .as_vec()
+                .unwrap()
+                .iter()
+                .map(|provider| provider["operator"].as_str().unwrap())
+                .collect();
+            assert_eq!(named, slugs, "{format}");
+
+            let (code, out, _) =
+                laptop_run(&cloudflare_only(), &["--format", format, "all", "--verify"]);
+            assert_eq!(code, 0, "{format}");
+            let tree = read(&out);
+            let family = &tree["public"]["families"][0];
+            assert_eq!(family["status"].as_str(), Some("unverified"), "{format}");
+            assert_eq!(family["agree"].as_i64(), Some(2), "{format}");
+            assert_eq!(family["total"].as_i64(), Some(2), "{format}");
+            assert_eq!(family["operators"].as_i64(), Some(1), "{format}");
+            assert_eq!(
+                family["providers"][1]["operator"].as_str(),
+                Some("cloudflare"),
+                "{format}"
+            );
+        }
+        let (_, yaml, _) = laptop_run(
+            &cloudflare_only(),
+            &["--format", "yaml", "public", "--verify"],
+        );
+        assert!(yaml.contains("operators: 1\n"), "{yaml}");
+        assert!(yaml.contains("operator: \"cloudflare\"\n"), "{yaml}");
     }
 
     #[test]
