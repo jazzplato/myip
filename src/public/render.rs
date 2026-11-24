@@ -94,15 +94,24 @@ pub fn disagreement_report(report: &PublicReport, style: Style) -> String {
 fn summary(family: &FamilyReport, style: Style) -> String {
     match family.status {
         Status::Verified => style.good(&format!(
-            "verified, {} of {} agree",
-            family.agree, family.total
+            "verified, {} of {} agree, {} operators",
+            family.agree, family.total, family.operators
         )),
-        Status::Unverified => style.warn("unverified, 1 answer"),
+        Status::Unverified => style.warn(&format!(
+            "unverified, {} from {}",
+            counted(family.total, "answer"),
+            counted(family.operators, "operator")
+        )),
         Status::Disagree => style.bad(&format!(
             "DISAGREE, {} of {} agree",
             family.agree, family.total
         )),
     }
+}
+
+fn counted(n: usize, noun: &str) -> String {
+    let s = if n == 1 { "" } else { "s" };
+    format!("{n} {noun}{s}")
 }
 
 impl PublicReport {
@@ -181,6 +190,7 @@ fn family(family: &FamilyReport) -> Json {
             ("provider", answer.provider.name.into()),
             ("ip", ip(answer.ip)),
             ("latency_ms", answer.latency.map_or(Json::Null, millis)),
+            ("operator", answer.provider.operator.into()),
         ])
     });
     Json::object([
@@ -189,6 +199,7 @@ fn family(family: &FamilyReport) -> Json {
         ("ip", family.ip.map_or(Json::Null, ip)),
         ("agree", int(family.agree)),
         ("total", int(family.total)),
+        ("operators", int(family.operators)),
         ("providers", Json::Array(providers.collect())),
     ])
 }

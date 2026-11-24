@@ -27,6 +27,8 @@ pub struct Provider {
     /// Whether the host has an IPv6 address; without one it cannot answer under `-6`.
     pub ipv6: bool,
     pub parser: Parser,
+    /// The party that authors the answer (ADR 0003). Two providers with the same operator
+    /// are one opinion, however many hostnames they use.
     pub operator: &'static str,
 }
 
@@ -37,42 +39,42 @@ pub static PROVIDERS: [Provider; 6] = [
         url: "https://one.one.one.one/cdn-cgi/trace",
         ipv6: true,
         parser: Parser::CloudflareTrace,
-        operator: "",
+        operator: "cloudflare",
     },
     Provider {
         name: "api64.ipify.org",
         url: "https://api64.ipify.org",
         ipv6: true,
         parser: Parser::PlainText,
-        operator: "",
+        operator: "ipify",
     },
     Provider {
         name: "checkip.amazonaws.com",
         url: "https://checkip.amazonaws.com",
         ipv6: false,
         parser: Parser::PlainText,
-        operator: "",
+        operator: "amazon",
     },
     Provider {
         name: "icanhazip.com",
         url: "https://icanhazip.com",
         ipv6: true,
         parser: Parser::PlainText,
-        operator: "",
+        operator: "cloudflare",
     },
     Provider {
         name: "ident.me",
         url: "https://ident.me",
         ipv6: true,
         parser: Parser::PlainText,
-        operator: "",
+        operator: "ident.me",
     },
     Provider {
         name: "ipinfo.io",
         url: "https://ipinfo.io/ip",
         ipv6: false,
         parser: Parser::PlainText,
-        operator: "",
+        operator: "ipinfo",
     },
 ];
 

@@ -7,6 +7,10 @@ use std::time::Duration;
 
 use super::provider::Provider;
 
+/// The fewest distinct operators whose agreeing answers verify an address (ADR 0003). A
+/// constant, not a flag: it is a floor, and unanimity above it is still required.
+pub const MIN_OPERATORS: usize = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpFamily {
     V4,
@@ -51,11 +55,12 @@ pub struct Attempt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// At least two answers, all equal.
+    /// Answers from at least `MIN_OPERATORS` distinct operators, all equal.
     Verified,
-    /// A single answer.
+    /// Answers all equal but from fewer than `MIN_OPERATORS` operators. There may be several
+    /// answers: two providers of one operator are one opinion.
     Unverified,
-    /// At least two answers that are not all equal.
+    /// At least two answers that are not all equal, whichever operators they come from.
     Disagree,
 }
 
@@ -87,7 +92,9 @@ pub struct FamilyReport {
     pub ip: Option<IpAddr>,
     /// Size of the largest group of equal answers.
     pub agree: usize,
+    /// How many answers there are, not how many operators gave them.
     pub total: usize,
+    /// How many distinct operators gave the answers.
     pub operators: usize,
     /// In provider order, never empty.
     pub answers: Vec<Answer>,
@@ -102,12 +109,16 @@ impl FamilyReport {
         let first = answers.first()?.ip;
         let total = answers.len();
         let agree = answers.iter().map(|a| count(&answers, a.ip)).max()?;
-        let (status, ip) = if total == 1 {
-            (Status::Unverified, Some(first))
-        } else if agree == total {
+        let mut named: Vec<&str> = answers.iter().map(|a| a.provider.operator).collect();
+        named.sort_unstable();
+        named.dedup();
+        let operators = named.len();
+        let (status, ip) = if agree < total {
+            (Status::Disagree, None)
+        } else if operators >= MIN_OPERATORS {
             (Status::Verified, Some(first))
         } else {
-            (Status::Disagree, None)
+            (Status::Unverified, Some(first))
         };
         Some(Self {
             family,
@@ -115,7 +126,7 @@ impl FamilyReport {
             ip,
             agree,
             total,
-            operators: 0,
+            operators,
             answers,
         })
     }

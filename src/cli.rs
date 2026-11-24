@@ -166,14 +166,14 @@ pub enum Command {
 
 #[derive(Args, Debug, Clone, Copy)]
 pub struct AllArgs {
-    /// Ask every provider for the public address and require at least two answers per family to agree; exit 3 if they differ
+    /// Ask every provider for the public address and require agreeing answers from at least two independent operators per family; exit 3 if they differ
     #[arg(long)]
     pub verify: bool,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct PublicArgs {
-    /// Ask every provider and require at least two answers per family to agree; exit 3 if they differ
+    /// Ask every provider and require agreeing answers from at least two independent operators per family; exit 3 if they differ
     #[arg(long, conflicts_with = "field")]
     pub verify: bool,
 

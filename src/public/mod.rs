@@ -22,8 +22,8 @@ use crate::output;
 use provider::MAX_ANSWER_BYTES;
 
 const NO_ANSWER: &str = "no provider returned a valid public address";
-const NOT_VERIFIED: &str = "the address could not be verified: fewer than two providers answered \
-in any address family";
+const NOT_VERIFIED: &str = "the address could not be verified: fewer than two independent \
+operators answered in any address family";
 
 /// The single answer a run stands for.
 #[derive(Debug, Clone, PartialEq, Eq)]
