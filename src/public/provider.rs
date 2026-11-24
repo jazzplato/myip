@@ -27,6 +27,7 @@ pub struct Provider {
     /// Whether the host has an IPv6 address; without one it cannot answer under `-6`.
     pub ipv6: bool,
     pub parser: Parser,
+    pub operator: &'static str,
 }
 
 /// Normative and ordered: changing a URL, the list or its order needs a new ADR.
@@ -36,36 +37,42 @@ pub static PROVIDERS: [Provider; 6] = [
         url: "https://one.one.one.one/cdn-cgi/trace",
         ipv6: true,
         parser: Parser::CloudflareTrace,
+        operator: "",
     },
     Provider {
         name: "api64.ipify.org",
         url: "https://api64.ipify.org",
         ipv6: true,
         parser: Parser::PlainText,
+        operator: "",
     },
     Provider {
         name: "checkip.amazonaws.com",
         url: "https://checkip.amazonaws.com",
         ipv6: false,
         parser: Parser::PlainText,
+        operator: "",
     },
     Provider {
         name: "icanhazip.com",
         url: "https://icanhazip.com",
         ipv6: true,
         parser: Parser::PlainText,
+        operator: "",
     },
     Provider {
         name: "ident.me",
         url: "https://ident.me",
         ipv6: true,
         parser: Parser::PlainText,
+        operator: "",
     },
     Provider {
         name: "ipinfo.io",
         url: "https://ipinfo.io/ip",
         ipv6: false,
         parser: Parser::PlainText,
+        operator: "",
     },
 ];
 
@@ -189,24 +196,29 @@ tls=TLSv1.3\nsni=plaintext\nwarp=off\ngateway=off\nrbi=off\nkex=X25519\n";
 
     #[test]
     fn the_provider_list_is_the_adr_list_in_order() {
-        let table: Vec<_> = PROVIDERS.iter().map(|p| (p.name, p.url, p.ipv6)).collect();
+        let table: Vec<_> = PROVIDERS
+            .iter()
+            .map(|p| (p.name, p.url, p.ipv6, p.operator))
+            .collect();
         assert_eq!(
             table,
             [
                 (
                     "one.one.one.one",
                     "https://one.one.one.one/cdn-cgi/trace",
-                    true
+                    true,
+                    "cloudflare"
                 ),
-                ("api64.ipify.org", "https://api64.ipify.org", true),
+                ("api64.ipify.org", "https://api64.ipify.org", true, "ipify"),
                 (
                     "checkip.amazonaws.com",
                     "https://checkip.amazonaws.com",
-                    false
+                    false,
+                    "amazon"
                 ),
-                ("icanhazip.com", "https://icanhazip.com", true),
-                ("ident.me", "https://ident.me", true),
-                ("ipinfo.io", "https://ipinfo.io/ip", false),
+                ("icanhazip.com", "https://icanhazip.com", true, "cloudflare"),
+                ("ident.me", "https://ident.me", true, "ident.me"),
+                ("ipinfo.io", "https://ipinfo.io/ip", false, "ipinfo"),
             ]
         );
         assert_eq!(PROVIDERS[0].parser, Parser::CloudflareTrace);

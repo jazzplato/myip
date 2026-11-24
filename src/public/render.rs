@@ -275,11 +275,45 @@ ipv4: DISAGREE, 2 of 3 agree
   one.one.one.one        1.2.3.4
   api64.ipify.org        1.2.3.4
   checkip.amazonaws.com  5.6.7.8  <- differs
-ipv6: unverified, 1 answer
+ipv6: unverified, 1 answer from 1 operator
   ident.me               2606:4700:4700::1111
 no answer:
   icanhazip.com          timed out after 10s
 "
+        );
+    }
+
+    #[test]
+    fn the_family_summary_counts_answers_and_operators_apart() {
+        let report = PublicReport::from_attempts(
+            vec![
+                at(1, Ok("1.2.3.4"), Some(1)),
+                at(2, Ok("5.6.7.8"), Some(1)),
+                at(0, Ok("2606:4700:4700::1111"), Some(1)),
+                at(3, Ok("2606:4700:4700::1111"), Some(1)),
+            ],
+            true,
+        );
+        let text = disagreement_report(&report, Style::Plain);
+        assert!(
+            text.contains("ipv6: unverified, 2 answers from 1 operator\n"),
+            "{text}"
+        );
+
+        let report = PublicReport::from_attempts(
+            vec![
+                at(1, Ok("1.2.3.4"), Some(1)),
+                at(2, Ok("5.6.7.8"), Some(1)),
+                at(0, Ok("2606:4700:4700::1111"), Some(1)),
+                at(3, Ok("2606:4700:4700::1111"), Some(1)),
+                at(4, Ok("2606:4700:4700::1111"), Some(1)),
+            ],
+            true,
+        );
+        let text = disagreement_report(&report, Style::Plain);
+        assert!(
+            text.contains("ipv6: verified, 3 of 3 agree, 2 operators\n"),
+            "{text}"
         );
     }
 
@@ -296,7 +330,10 @@ no answer:
         );
         let text = disagreement_report(&report, Style::Plain);
         assert!(text.contains("ipv4: DISAGREE, 1 of 2 agree\n"), "{text}");
-        assert!(text.contains("ipv6: verified, 2 of 2 agree\n"), "{text}");
+        assert!(
+            text.contains("ipv6: verified, 2 of 2 agree, 2 operators\n"),
+            "{text}"
+        );
         assert!(
             !text.contains("<- differs") && !text.contains("no answer"),
             "{text}"
@@ -330,7 +367,7 @@ no answer:
   one.one.one.one        1.2.3.4
   api64.ipify.org        1.2.3.4
   checkip.amazonaws.com  5.6.7.8  {r}<- differs{z}
-{b}ipv6{z}: {y}unverified, 1 answer{z}
+{b}ipv6{z}: {y}unverified, 1 answer from 1 operator{z}
   ident.me               2606:4700:4700::1111
 {r}no answer:{z}
   icanhazip.com          timed out after 10s
@@ -349,7 +386,9 @@ no answer:
         );
         let text = disagreement_report(&report, Style::Ansi);
         assert!(
-            text.contains(&format!("{b}ipv6{z}: {g}verified, 2 of 2 agree{z}\n")),
+            text.contains(&format!(
+                "{b}ipv6{z}: {g}verified, 2 of 2 agree, 2 operators{z}\n"
+            )),
             "{text}"
         );
         assert_eq!(text.matches(r).count(), 1, "{text}");

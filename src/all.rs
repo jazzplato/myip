@@ -670,6 +670,35 @@ mod tests {
     }
 
     #[test]
+    fn two_answers_from_one_operator_are_reported_in_band_with_exit_0() {
+        let cloudflare = Some("203.0.113.7");
+        let only = report([cloudflare, None, None, cloudflare, None, None], true);
+        let all = overview(&FakeEnv::new(), &v4_only(), only);
+        assert_eq!(all.exit_code(), 0, "all never exits 1");
+        let json = all.to_json();
+        assert_eq!(at(&json, &["public", "ip"]), &Json::Null);
+        assert_eq!(at(&json, &["public", "verified"]), &Json::Null);
+        assert!(
+            matches!(at(&json, &["public", "error"]), Json::Str(e) if e.contains("fewer than two independent operators")),
+            "{json:?}"
+        );
+        let family = at(&json, &["public", "families"]);
+        let Json::Array(families) = family else {
+            panic!("families is not an array: {family:?}");
+        };
+        assert_eq!(families.len(), 1);
+        assert_eq!(at(&families[0], &["status"]), &s("unverified"));
+        assert_eq!(at(&families[0], &["total"]), &Json::Int(2));
+        assert_eq!(at(&families[0], &["operators"]), &Json::Int(1));
+        assert!(
+            all.render_text()
+                .contains("[public]\n  unavailable: the address could not be verified"),
+            "{}",
+            all.render_text()
+        );
+    }
+
+    #[test]
     fn the_text_has_one_heading_per_section_in_order() {
         let text = overview(&FakeEnv::new(), &v4_only(), answered("203.0.113.7")).render_text();
         let at_heading = |heading: &str| {
