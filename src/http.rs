@@ -118,14 +118,16 @@ impl Fetch for UreqFetch {
         }
         let agent: ureq::Agent = builder.build().into();
 
+        let authorization = opts.bearer.as_ref().map(bearer_header).transpose()?;
         let mut current = url.to_owned();
         let mut hops = 0;
         let mut response = loop {
-            let response = agent
-                .get(&current)
-                .header("Accept", opts.accept)
-                .call()
-                .map_err(map_error)?;
+            let mut request = agent.get(&current).header("Accept", opts.accept);
+            // Only the first request carries the token: a followed redirect never does.
+            if let Some(value) = authorization.as_ref().filter(|_| hops == 0) {
+                request = request.header("Authorization", value.clone());
+            }
+            let response = request.call().map_err(map_error)?;
             let location = match response.status().as_u16() {
                 301 | 302 | 303 | 307 | 308 => response
                     .headers()
@@ -172,6 +174,17 @@ impl Fetch for UreqFetch {
             body: String::from_utf8_lossy(&raw).into_owned(),
         })
     }
+}
+
+/// `Bearer <token>` as a header value, marked sensitive so that even the `Debug` of the
+/// header hides it. The error never carries the token.
+fn bearer_header(token: &Secret) -> Result<ureq::http::HeaderValue, FetchError> {
+    let mut value = ureq::http::HeaderValue::from_str(&format!("Bearer {}", token.expose()))
+        .map_err(|_| {
+            FetchError::Rejected("the access token cannot be sent as a header value".to_owned())
+        })?;
+    value.set_sensitive(true);
+    Ok(value)
 }
 
 fn map_error(e: ureq::Error) -> FetchError {

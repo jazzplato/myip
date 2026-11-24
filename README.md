@@ -152,10 +152,25 @@ myip 8.8.8.8/org
 > To use an ipinfo.io access token
 
 ```bash
+export IPINFO_TOKEN=YOUR_TOKEN
+myip
+```
+
+There are two ways to pass a token: the `IPINFO_TOKEN` environment variable (preferred), or a `token` parameter in the `?query`:
+
+```bash
 myip 'json?token=YOUR_TOKEN'
 ```
 
-A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. If an HTTP error body from ipinfo.io repeats a value from your command line (`token abc123 rejected`), the value is shown as `***` too, wherever the body has it, even a short one (so a value such as `1` also hides every `1` of the body); a value that you did not type on the command line is not masked. The token is still visible in your shell history and in the process list, so prefer a token scoped for this use.
+A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits and `. _ ~ - % = & + , :`), and a single leading `/` is accepted (`myip /ip`), as in 0.0.1. `myip` never prints a query value: `-v`, error messages and usage errors show `?token=***`. If an HTTP error body from ipinfo.io repeats a value from your command line (`token abc123 rejected`), the value is shown as `***` too, wherever the body has it, even a short one (so a value such as `1` also hides every `1` of the body); a value that you did not type on the command line (other than the `IPINFO_TOKEN` value, see below) is not masked. A token written as `?token=` is still visible in your shell history, in the process list and in CI logs, so prefer `IPINFO_TOKEN`, or at least a token scoped for this use.
+
+#### `IPINFO_TOKEN`
+
+- `myip`, `myip FIELD` and `myip public FIELD` send the value as an `Authorization: Bearer` header on the one request, never in the URL, and not on a redirect that `myip` follows (a redirect to another host or to `http` is still an error). The variable keeps the token out of your shell history, the process list and CI logs, which `?token=` does not.
+- A `token` parameter in FIELD wins (the name is matched ignoring case, with any value, even an empty one). The variable is then not read, not checked, and no header is sent.
+- Spaces, tabs and line breaks around the value are ignored. A variable that is unset, empty, blank or not valid Unicode means no token, as before. Otherwise the value must have 1 to 256 characters, each a letter, a digit or one of `. _ ~ + / = -`; anything else is a usage error (exit code 2) before any request, whose message names the variable and the rule but never shows the value.
+- Only these three forms read it. `myip public` (without a FIELD), `public --verify`, `local`, `where` and `all` never read it and never send it. A host that exports `IPINFO_TOKEN` (a CI job, a container) authenticates every one of these lookups with it.
+- With `-v`, `myip` prints one fixed line, `myip: Authorization: Bearer *** (from IPINFO_TOKEN)`, never the value, and an error message or body that repeats the value shows `***` instead. A successful answer is ipinfo.io's and is printed as it came, so `myip` cannot hide a token that the server echoes in it.
 
 > To get full information in JSON format
 

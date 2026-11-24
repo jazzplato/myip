@@ -32,6 +32,7 @@ pub const ALLOWED_VARS: &[&str] = &[
     "POD_IPS",
     "NODE_NAME",
     "HOST_IP",
+    "IPINFO_TOKEN",
 ];
 
 /// Largest file `SystemEnv` reads; every allow-listed file is far smaller.

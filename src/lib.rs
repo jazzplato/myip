@@ -2258,7 +2258,7 @@ mod tests {
 
     #[test]
     fn a_value_in_an_error_body_that_the_length_limit_would_cut_does_not_leave_its_start() {
-        let body = format!("{} {TOKEN_VALUE}", "x".repeat(197));
+        let body = format!("{} {TOKEN_VALUE}", "x".repeat(196));
         let fetch = FakeFetch::new(vec![ok(500, &body)]);
         let (code, _, err) = token_run(TOKEN_VALUE, &fetch, &["json"]);
         assert_eq!(code, 1);
@@ -2416,6 +2416,7 @@ mod tests {
                 // An answer is ready so that a request made by mistake fails the assertions below.
                 let fetch = FakeFetch::new(vec![ok(200, "x")]);
                 let (code, out, err) = token_run(value, &fetch, args);
+                assert_eq!(code, 2, "{value:?} {args:?}");
                 assert_eq!(out, "", "{value:?} {args:?}");
                 assert!(requested(&fetch).is_empty(), "{value:?} {args:?}");
                 assert!(

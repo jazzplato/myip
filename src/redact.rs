@@ -195,14 +195,22 @@ pub fn redact_arg_values(text: &str, args: &[String]) -> String {
 }
 
 /// `redact_arg_values`, and the exact value of `secret` as well, wherever `text` has it.
-/// The secret is one more value to hide, found and masked together with the others.
-pub fn redact_values(text: &str, args: &[String], _secret: Option<&Secret>) -> String {
+/// The secret is one more value to hide, found and masked together with the others, so a
+/// secret that overlaps a credential or a value of the command line leaves no tail behind.
+pub fn redact_values(text: &str, args: &[String], secret: Option<&Secret>) -> String {
     let mut spans = credential_spans(text);
-    spans.extend(value_spans(text, args));
+    spans.extend(value_spans(text, args, secret));
     mask(text, spans)
 }
 
-fn value_spans(text: &str, args: &[String]) -> Vec<Range<usize>> {
+fn value_spans(text: &str, args: &[String], secret: Option<&Secret>) -> Vec<Range<usize>> {
+    let mut values = argument_values(args);
+    values.extend(secret.map(|secret| secret.expose().to_owned()));
+    occurrences(text, values)
+}
+
+/// The values of the queries of `args`, and their percent-decoded forms.
+fn argument_values(args: &[String]) -> Vec<String> {
     let mut values: Vec<String> = Vec::new();
     for (_, query) in args.iter().filter_map(|arg| arg.trim().split_once('?')) {
         let query = query.split_once('#').map_or(query, |(query, _)| query);
@@ -212,6 +220,11 @@ fn value_spans(text: &str, args: &[String]) -> Vec<Range<usize>> {
             values.push(value.to_owned());
         }
     }
+    values
+}
+
+/// The runs of `text` that are made of occurrences of any of `values`.
+fn occurrences(text: &str, mut values: Vec<String>) -> Vec<Range<usize>> {
     values.retain(|value| !value.is_empty());
     values.sort();
     values.dedup();
@@ -509,7 +522,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("&");
         let args = [format!("ip?{query}")];
-        let spans = value_spans(&body, &args);
+        let spans = value_spans(&body, &args, None);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0], 0..body.len());
         assert_eq!(redact_arg_values(&body, &args), "***");
