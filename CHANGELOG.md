@@ -4,6 +4,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
 ### Changed
 
 - `myip public --verify` (and `myip all --verify`) now counts independent operators, not URLs ([ADR 0003](docs/adr/0003-operator-quorum.md)). Each provider has an operator (`one.one.one.one` and `icanhazip.com` are both `cloudflare`, the other four are their own), and a family is `verified` only when answers from at least two distinct operators were received and all answers agree. Two answers from one operator, which used to be `verified`, are now `unverified`. Any two different answers still make a family `disagree` (exit 3), and 5 of 6 agreeing is still a disagreement.
@@ -106,7 +108,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - Initial version: prints the body of `https://ipinfo.io/<FIELD>`.
 
-[Unreleased]: https://github.com/jazzplato/myip/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/jazzplato/myip/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jazzplato/myip/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jazzplato/myip/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jazzplato/myip/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jazzplato/myip/compare/v0.1.0...v0.1.1
