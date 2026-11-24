@@ -152,9 +152,11 @@ myip 8.8.8.8/org
 > To use an ipinfo.io access token
 
 ```bash
-export IPINFO_TOKEN=YOUR_TOKEN
+read -rs IPINFO_TOKEN && export IPINFO_TOKEN   # prompts without echo, so the token is not recorded in your shell history
 myip
 ```
+
+In a script, a container or a CI job, inject the token from your secret manager or CI secret store rather than writing it in a file or on a command line.
 
 There are two ways to pass a token: the `IPINFO_TOKEN` environment variable (preferred), or a `token` parameter in the `?query`:
 
@@ -166,7 +168,7 @@ A `?query` after the path is sent to ipinfo.io as is (allowed: letters, digits a
 
 #### `IPINFO_TOKEN`
 
-- `myip`, `myip FIELD` and `myip public FIELD` send the value as an `Authorization: Bearer` header on the one request, never in the URL, and not on a redirect that `myip` follows (a redirect to another host or to `http` is still an error). The variable keeps the token out of your shell history, the process list and CI logs, which `?token=` does not.
+- `myip`, `myip FIELD` and `myip public FIELD` send the value as an `Authorization: Bearer` header on the one request, never in the URL, and not on a redirect that `myip` follows (a redirect to another host or to `http` is still an error). The variable keeps the token off the command line, so it is not in the process list or in a CI log that echoes the command; set it without typing the value into a command (see above), or your shell history records it like any other command.
 - A `token` parameter in FIELD wins (the name is matched ignoring case, with any value, even an empty one). The variable is then not read, not checked, and no header is sent.
 - Spaces, tabs and line breaks around the value are ignored. A variable that is unset, empty, blank or not valid Unicode means no token, as before. Otherwise the value must have 1 to 256 characters, each a letter, a digit or one of `. _ ~ + / = -`; anything else is a usage error (exit code 2) before any request, whose message names the variable and the rule but never shows the value.
 - Only these three forms read it. `myip public` (without a FIELD), `public --verify`, `local`, `where` and `all` never read it and never send it. A host that exports `IPINFO_TOKEN` (a CI job, a container) authenticates every one of these lookups with it.
