@@ -4,6 +4,17 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Changed
+
+- `myip public --verify` (and `myip all --verify`) now counts independent operators, not URLs ([ADR 0003](docs/adr/0003-operator-quorum.md)). Each provider has an operator (`one.one.one.one` and `icanhazip.com` are both `cloudflare`, the other four are their own), and a family is `verified` only when answers from at least two distinct operators were received and all answers agree. Two answers from one operator, which used to be `verified`, are now `unverified`. Any two different answers still make a family `disagree` (exit 3), and 5 of 6 agreeing is still a disagreement.
+- **Behaviour change: a run where only Cloudflare answered (providers 1 and 4) goes from exit 0 to exit 1.** It prints nothing on stdout and says on stderr `the address could not be verified: fewer than two independent operators answered in any address family`. The same applies to `-6 --verify`, which now needs two of Cloudflare, ipify and ident.me. `all --verify` is unchanged: it reports the unverifiable result in band and still exits 0. A family that is `unverified` next to a verified one still does not fail the run.
+- The documented meaning of the JSON `status` is tightened without a `schema_version` bump, as an explicit exception that ADR 0003 records for this one change: `verified` is "answers from at least two operators, all agree" and `unverified` is "answers from fewer than two operators, all agree", which can now have `total` 2 or more. The field names, the three values and the exit codes are unchanged. Read `status` or the exit code; do not infer it from `agree == total >= 2`. `agree` and `total` still count answers.
+- The text report of a disagreement now says `verified, N of M agree, K operators` and `unverified, N answers from K operators`.
+
+### Added
+
+- `--verify` documents (`--json`, `--format json-pretty`, `--format yaml`) gain `families[].operators`, the number of distinct operators among a family's answers, and `families[].providers[].operator`, the operator of each answer. The README lists the operator of each provider.
+
 ## [0.2.1] - 2026-11-23
 
 ### Added

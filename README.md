@@ -46,14 +46,16 @@ myip public
 
 The providers are asked one at a time, in this order, until one gives a valid answer:
 
-| # | Provider | URL | IPv6 |
-|---|----------|-----|------|
-| 1 | one.one.one.one | `https://one.one.one.one/cdn-cgi/trace` | yes |
-| 2 | api64.ipify.org | `https://api64.ipify.org` | yes |
-| 3 | checkip.amazonaws.com | `https://checkip.amazonaws.com` | no |
-| 4 | icanhazip.com | `https://icanhazip.com` | yes |
-| 5 | ident.me | `https://ident.me` | yes |
-| 6 | ipinfo.io | `https://ipinfo.io/ip` | no |
+| # | Provider | URL | IPv6 | Operator |
+|---|----------|-----|------|----------|
+| 1 | one.one.one.one | `https://one.one.one.one/cdn-cgi/trace` | yes | cloudflare |
+| 2 | api64.ipify.org | `https://api64.ipify.org` | yes | ipify |
+| 3 | checkip.amazonaws.com | `https://checkip.amazonaws.com` | no | amazon |
+| 4 | icanhazip.com | `https://icanhazip.com` | yes | cloudflare |
+| 5 | ident.me | `https://ident.me` | yes | ident.me |
+| 6 | ipinfo.io | `https://ipinfo.io/ip` | no | ipinfo |
+
+The operator is the party that writes the answer, so two providers of one operator are one opinion for `--verify` (see below). Hosting does not make an operator: a service that runs on rented machines is its own operator.
 
 A provider's answer counts only if it is a 2xx response of at most 4 KiB that holds exactly one IP address, and that address is a public one. HTML, an empty body, a private, loopback, link-local or other non-public address, and an address of the wrong family are errors, and the next provider is asked. If every provider fails, nothing goes to stdout, the exit code is 1, and each provider's error is listed on stderr. A provider's answer text is never echoed, only a short reason.
 
@@ -67,7 +69,7 @@ When the host names of two providers in a row cannot be resolved (no DNS, usuall
 myip public --verify
 ```
 
-`--verify` asks all six providers at the same time and groups the answers per address family. A family is verified when at least two providers answered and all of them agree. The address of the verified family is printed and the exit code is 0, even if a provider failed or the other family had only one answer. If both families are verified, the one whose first answer came from the earlier provider in the table is printed. If the providers of one family give different addresses the exit code is 3 and the answers are listed on stdout, so you can see who said what:
+`--verify` asks all six providers at the same time and groups the answers per address family. A family is verified when answers from at least two independent operators (the last column of the table above) were received and all of the answers agree. The address of the verified family is printed and the exit code is 0, even if a provider failed or the other family was not verified. If both families are verified, the one whose first answer came from the earlier provider in the table is printed. If two answers of one family differ, whichever operators they come from, the exit code is 3 and the answers are listed on stdout, so you can see who said what:
 
 ```
 ipv4: DISAGREE, 2 of 3 agree
@@ -78,7 +80,7 @@ no answer:
   icanhazip.com          timed out after 10s
 ```
 
-If fewer than two providers answered in every family, the address cannot be verified and the exit code is 1.
+If no family could be verified because fewer than two independent operators answered in every family, the exit code is 1 and stderr says so. Two answers from Cloudflare (providers 1 and 4) are one opinion, so a run where only Cloudflare answered, which used to print the address and exit 0, now exits 1. `-6 --verify` needs answers from two of Cloudflare (1 or 4), ipify (2) and ident.me (5), because the other providers have no IPv6 address.
 
 > To see every attempt
 
@@ -113,7 +115,9 @@ myip --json public
 | `verified` | `{"agree": N, "total": M}` for the headline family with `--verify`, otherwise `null` |
 | `error` | The reason when there is no headline, otherwise `null` |
 | `attempts` | One object per provider in ADR order: `provider`, `url`, `ip`, `latency_ms` (`null` when not asked) and `error` |
-| `families` | Only with `--verify`: `family`, `status` (`verified`, `unverified` or `disagree`), `ip` (`null` on disagree), `agree`, `total` and the `providers` that answered |
+| `families` | Only with `--verify`: one object per family that answered, with `family`, `status`, `ip` (`null` on disagree), `agree`, `total`, `operators` and the `providers` that answered, each with `provider`, `ip`, `latency_ms` and `operator`. `agree` and `total` count answers; `operators` counts the distinct operators among them |
+
+`status` is `verified` when the answers come from at least two operators and all agree, `unverified` when all agree but they come from fewer than two operators (so `total` can be 2 or more), and `disagree` when two answers differ. Read `status` or the exit code: `agree == total` and `total >= 2` no longer imply `verified`.
 
 ### ipinfo.io lookup
 
@@ -315,7 +319,7 @@ Credentials in a proxy URL are never printed. They are visible to other local us
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | No answer: network, provider or HTTP error (details on stderr); for `public --verify`, also when no family could be verified. `local` exits 1 only when the interface list cannot be read; `where` always exits 0 and `all` never exits 1 |
+| 1 | No answer: network, provider or HTTP error (details on stderr); for `public --verify`, also when no family could be verified (fewer than two independent operators answered in every family). `local` exits 1 only when the interface list cannot be read; `where` always exits 0 and `all` never exits 1 |
 | 2 | Usage error |
 | 3 | `public --verify` or `all --verify`: the providers of an address family disagree |
 
@@ -333,7 +337,7 @@ The answer goes to stdout and diagnostics to stderr, so `ip=$(myip public) || ex
 
 `myip` sends its requests from your machine, so the provider you ask sees your public address (that is the point). The ipinfo.io lookup contacts only ipinfo.io. `myip public` (and the public section of `myip all`) contacts the providers in the table above, one at a time until one answers, or all six with `--verify`. There is no telemetry and no other host is contacted.
 
-`one.one.one.one` and `icanhazip.com` are both served by Cloudflare, so `--verify` does not make them two independent opinions.
+`one.one.one.one` and `icanhazip.com` are both served by Cloudflare, so they are one operator: `--verify` counts operators, not URLs, and needs answers from at least two of them (see the table of providers). It does not see behind a provider: two providers that sat behind one third-party proxy would still share that proxy's view of your address.
 
 `local` and `where` send nothing: the egress address is found by asking the operating system to route a UDP socket towards a public address (`connect()`), which transmits no packet. They only read the interface list and the allow-listed environment variables and files above. The container id, pod name and addresses they print are not sent anywhere; `all` asks the providers for the public address only.
 

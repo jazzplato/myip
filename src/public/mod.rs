@@ -22,8 +22,8 @@ use crate::output;
 use provider::MAX_ANSWER_BYTES;
 
 const NO_ANSWER: &str = "no provider returned a valid public address";
-const NOT_VERIFIED: &str = "the address could not be verified: fewer than two providers answered \
-in any address family";
+const NOT_VERIFIED: &str = "the address could not be verified: fewer than two independent \
+operators answered in any address family";
 
 /// The single answer a run stands for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1038,7 +1038,10 @@ no answer:
         let (code, out, err) = go(&fetch, &["public", "--verify"]);
         assert_eq!(code, 3, "{out}{err}");
         assert!(out.contains("ipv4: DISAGREE, 2 of 4 agree"), "{out}");
-        assert!(out.contains("ipv6: verified, 2 of 2 agree"), "{out}");
+        assert!(
+            out.contains("ipv6: verified, 2 of 2 agree, 2 operators"),
+            "{out}"
+        );
         assert_eq!(err, "myip: providers disagree: ipv4 (2 of 4 agree)\n");
     }
 
@@ -1068,14 +1071,15 @@ no answer:
         );
     }
 
+    const NOT_VERIFIED_TEXT: &str = "myip: the address could not be verified: fewer than two \
+                                     independent operators answered in any address family\n";
+
     #[test]
     fn fewer_than_two_answers_in_every_family_is_exit_1() {
         let fetch = board([Ip(A), Timeout, Fail("down"), Status(500), Raw(""), Ip(V6)]);
         let (code, out, err) = go(&fetch, &["public", "--verify"]);
         assert_eq!((code, out.as_str()), (1, ""));
-        let first = "myip: the address could not be verified: fewer than two providers \
-                     answered in any address family\n";
-        assert!(err.starts_with(first), "{err}");
+        assert!(err.starts_with(NOT_VERIFIED_TEXT), "{err}");
         assert_eq!(err.lines().count(), 1 + 6, "{err}");
 
         let (code, out, err) = go(&board(all(Fail("down"))), &["public", "--verify"]);
@@ -1083,6 +1087,41 @@ no answer:
         assert!(
             err.starts_with("myip: no provider returned a valid public address\n"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn two_answers_from_one_operator_verify_nothing_and_exit_1() {
+        let cloudflare_only = [Ip(A), Timeout, Timeout, Ip(A), Timeout, Timeout];
+        let (code, out, err) = go(&board(cloudflare_only), &["public", "--verify"]);
+        assert_eq!((code, out.as_str()), (1, ""), "{err}");
+        assert!(err.starts_with(NOT_VERIFIED_TEXT), "{err}");
+        assert_eq!(err.lines().count(), 1 + 6, "{err}");
+
+        let (code, out, err) = go(&board(cloudflare_only), &["--json", "public", "--verify"]);
+        assert_eq!((code, err.as_str()), (1, NOT_VERIFIED_TEXT));
+        let out = normalized(&out);
+        assert!(
+            out.starts_with(concat!(
+                r#"{"schema_version":1,"ip":null,"family":null,"provider":null,"latency_ms":null,"#,
+                r#""verified":null,"error":"the address could not be verified: fewer than two "#,
+                r#"independent operators answered in any address family","attempts":["#
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(concat!(
+                r#""families":[{"family":"ipv4","status":"unverified","ip":"1.2.3.4","agree":2,"total":2,"operators":1,"providers":["#,
+                r#"{"provider":"one.one.one.one","ip":"1.2.3.4","latency_ms":N,"operator":"cloudflare"},"#,
+                r#"{"provider":"icanhazip.com","ip":"1.2.3.4","latency_ms":N,"operator":"cloudflare"}]}]}"#
+            )),
+            "{out}"
+        );
+
+        let with_ipify = [Ip(A), Ip(A), Timeout, Ip(A), Timeout, Timeout];
+        assert_eq!(
+            go(&board(with_ipify), &["public", "--verify"]),
+            (0, format!("{A}\n"), String::new())
         );
     }
 
@@ -1153,7 +1192,7 @@ no answer:
     }
 
     #[test]
-    fn ipv6_verify_needs_two_of_the_four_providers_that_have_ipv6() {
+    fn ipv6_verify_needs_two_operators_among_the_four_providers_that_have_ipv6() {
         let fetch = board(all(Ip(V6)));
         assert_eq!(
             go(&fetch, &["-6", "public", "--verify"]),
@@ -1172,6 +1211,17 @@ no answer:
         let (code, out, err) = go(&fetch, &["-6", "public", "--verify"]);
         assert_eq!((code, out.as_str()), (1, ""), "{err}");
         assert!(err.contains("could not be verified"), "{err}");
+
+        let cloudflare_only = [Ip(V6), Timeout, Ip(V6), Ip(V6), Timeout, Ip(V6)];
+        let (code, out, err) = go(&board(cloudflare_only), &["-6", "public", "--verify"]);
+        assert_eq!((code, out.as_str()), (1, ""), "{err}");
+        assert!(err.starts_with(NOT_VERIFIED_TEXT), "{err}");
+
+        let cloudflare_and_ident = [Ip(V6), Timeout, Ip(V6), Ip(V6), Ip(V6), Ip(V6)];
+        assert_eq!(
+            go(&board(cloudflare_and_ident), &["-6", "public", "--verify"]),
+            (0, format!("{V6}\n"), String::new())
+        );
     }
 
     #[test]
@@ -1398,8 +1448,43 @@ no answer:
                 true,
                 1,
             ),
+            s(
+                "cloudflare only",
+                [Ip(A), Timeout, Timeout, Ip(A), Timeout, Timeout],
+                &[],
+                true,
+                1,
+            ),
+            s(
+                "cloudflare and ipify",
+                [Ip(A), Ip(A), Timeout, Ip(A), Timeout, Timeout],
+                &[],
+                true,
+                0,
+            ),
+            s(
+                "cloudflare disagrees with itself",
+                [Ip(A), Timeout, Timeout, Ip(B), Timeout, Timeout],
+                &[],
+                true,
+                3,
+            ),
+            s(
+                "dual stack, IPv6 from cloudflare only",
+                [Ip(V6), Ip(A), Ip(A), Ip(V6), Ip(A), Ip(A)],
+                &[],
+                true,
+                0,
+            ),
             s("nothing", all(Fail("down")), &[], true, 1),
             s("-6 verified", all(Ip(V6)), &["-6"], true, 0),
+            s(
+                "-6 cloudflare only",
+                [Ip(V6), Timeout, Ip(V6), Ip(V6), Timeout, Ip(V6)],
+                &["-6"],
+                true,
+                1,
+            ),
             s(
                 "-6 not verifiable",
                 [
@@ -1477,10 +1562,10 @@ no answer:
                 r#"{"provider":"icanhazip.com","url":"https://icanhazip.com","ip":null,"latency_ms":N,"error":"timed out after 10s"},"#,
                 r#"{"provider":"ident.me","url":"https://ident.me","ip":null,"latency_ms":N,"error":"down"},"#,
                 r#"{"provider":"ipinfo.io","url":"https://ipinfo.io/ip","ip":null,"latency_ms":N,"error":"HTTP 503"}],"#,
-                r#""families":[{"family":"ipv4","status":"disagree","ip":null,"agree":2,"total":3,"providers":["#,
-                r#"{"provider":"one.one.one.one","ip":"1.2.3.4","latency_ms":N},"#,
-                r#"{"provider":"api64.ipify.org","ip":"5.6.7.8","latency_ms":N},"#,
-                r#"{"provider":"checkip.amazonaws.com","ip":"1.2.3.4","latency_ms":N}]}]}"#,
+                r#""families":[{"family":"ipv4","status":"disagree","ip":null,"agree":2,"total":3,"operators":3,"providers":["#,
+                r#"{"provider":"one.one.one.one","ip":"1.2.3.4","latency_ms":N,"operator":"cloudflare"},"#,
+                r#"{"provider":"api64.ipify.org","ip":"5.6.7.8","latency_ms":N,"operator":"ipify"},"#,
+                r#"{"provider":"checkip.amazonaws.com","ip":"1.2.3.4","latency_ms":N,"operator":"amazon"}]}]}"#,
                 "\n"
             )
         );
@@ -1501,12 +1586,12 @@ no answer:
         );
         assert!(
             out.contains(concat!(
-                r#""families":[{"family":"ipv4","status":"verified","ip":"1.2.3.4","agree":2,"total":2,"providers":["#,
-                r#"{"provider":"checkip.amazonaws.com","ip":"1.2.3.4","latency_ms":N},"#,
-                r#"{"provider":"icanhazip.com","ip":"1.2.3.4","latency_ms":N}]},"#,
-                r#"{"family":"ipv6","status":"verified","ip":"2606:4700:4700::1111","agree":2,"total":2,"providers":["#,
-                r#"{"provider":"one.one.one.one","ip":"2606:4700:4700::1111","latency_ms":N},"#,
-                r#"{"provider":"api64.ipify.org","ip":"2606:4700:4700::1111","latency_ms":N}]}]}"#
+                r#""families":[{"family":"ipv4","status":"verified","ip":"1.2.3.4","agree":2,"total":2,"operators":2,"providers":["#,
+                r#"{"provider":"checkip.amazonaws.com","ip":"1.2.3.4","latency_ms":N,"operator":"amazon"},"#,
+                r#"{"provider":"icanhazip.com","ip":"1.2.3.4","latency_ms":N,"operator":"cloudflare"}]},"#,
+                r#"{"family":"ipv6","status":"verified","ip":"2606:4700:4700::1111","agree":2,"total":2,"operators":2,"providers":["#,
+                r#"{"provider":"one.one.one.one","ip":"2606:4700:4700::1111","latency_ms":N,"operator":"cloudflare"},"#,
+                r#"{"provider":"api64.ipify.org","ip":"2606:4700:4700::1111","latency_ms":N,"operator":"ipify"}]}]}"#
             )),
             "{out}"
         );
@@ -1633,6 +1718,11 @@ no answer:
             );
             assert!(int(get(top, "latency_ms")) >= 0);
         }
+        let families = if verify {
+            array(get(top, "families"))
+        } else {
+            &[]
+        };
         match (verify && headline, get(top, "verified")) {
             (false, verified) => assert!(is_null(verified)),
             (true, verified) => {
@@ -1640,6 +1730,17 @@ no answer:
                 assert_eq!(keys(verified), ["agree", "total"]);
                 let (agree, total) = (int(get(verified, "agree")), int(get(verified, "total")));
                 assert!(agree >= 2 && agree == total, "{agree} of {total}");
+                let family = families
+                    .iter()
+                    .map(object)
+                    .find(|f| text(get(f, "family")) == text(get(top, "family")))
+                    .expect("the headline family is listed");
+                assert_eq!(text(get(family, "status")), "verified");
+                assert!(int(get(family, "operators")) >= 2);
+                assert_eq!(
+                    (int(get(family, "agree")), int(get(family, "total"))),
+                    (agree, total)
+                );
             }
         }
 
@@ -1677,21 +1778,32 @@ no answer:
             return;
         }
         let mut counted = 0;
-        for family in array(get(top, "families")) {
+        for family in families {
             let family = object(family);
             assert_eq!(
                 keys(family),
-                ["family", "status", "ip", "agree", "total", "providers"]
+                [
+                    "family",
+                    "status",
+                    "ip",
+                    "agree",
+                    "total",
+                    "operators",
+                    "providers"
+                ]
             );
             assert!(["ipv4", "ipv6"].contains(&text(get(family, "family"))));
             let (agree, total) = (int(get(family, "agree")), int(get(family, "total")));
+            let operators = int(get(family, "operators"));
             match text(get(family, "status")) {
                 "verified" => {
                     assert!(total >= 2 && agree == total);
+                    assert!(operators >= 2, "{operators}");
                     global_address(get(family, "ip"));
                 }
                 "unverified" => {
-                    assert_eq!((agree, total), (1, 1));
+                    assert!(total >= 1 && agree == total);
+                    assert!(operators < 2, "{operators}");
                     global_address(get(family, "ip"));
                 }
                 "disagree" => {
@@ -1702,12 +1814,22 @@ no answer:
             }
             let providers = array(get(family, "providers"));
             assert_eq!(providers.len() as i64, total);
+            let mut slugs = Vec::new();
             for answer in providers {
                 let answer = object(answer);
-                assert_eq!(keys(answer), ["provider", "ip", "latency_ms"]);
+                assert_eq!(keys(answer), ["provider", "ip", "latency_ms", "operator"]);
                 let ip = global_address(get(answer, "ip"));
                 assert_eq!(IpFamily::of(ip).as_str(), text(get(family, "family")));
+                let provider = PROVIDERS
+                    .iter()
+                    .find(|p| p.name == text(get(answer, "provider")))
+                    .unwrap();
+                assert_eq!(text(get(answer, "operator")), provider.operator);
+                slugs.push(provider.operator);
             }
+            slugs.sort_unstable();
+            slugs.dedup();
+            assert_eq!(slugs.len() as i64, operators);
             counted += total;
         }
         assert_eq!(counted, answered);

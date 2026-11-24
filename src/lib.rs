@@ -1361,6 +1361,44 @@ mod tests {
     }
 
     #[test]
+    fn all_verify_with_answers_from_one_operator_is_reported_in_band_with_exit_0() {
+        let cloudflare_only = [Some(PUBLIC_IP), None, None, Some(PUBLIC_IP), None, None];
+        let (code, out, err) = run_on(
+            &Machine::laptop().host(),
+            &providers(cloudflare_only),
+            &["all", "--verify"],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            out.contains("[public]\n  unavailable: the address could not be verified"),
+            "{out}"
+        );
+        assert!(
+            err.contains(
+                "myip: public: the address could not be verified: fewer than two independent \
+                 operators answered in any address family"
+            ),
+            "{err}"
+        );
+
+        let (code, out, _) = run_on(
+            &Machine::laptop().host(),
+            &providers(cloudflare_only),
+            &["--json", "all", "--verify"],
+        );
+        assert_eq!(code, 0);
+        assert!(out.contains("\"public\":{\"ip\":null,"), "{out}");
+        assert!(
+            out.contains(
+                "\"families\":[{\"family\":\"ipv4\",\"status\":\"unverified\",\"ip\":\"1.2.3.4\",\
+                 \"agree\":2,\"total\":2,\"operators\":1,\"providers\":["
+            ),
+            "{out}"
+        );
+        assert!(out.contains("\"operator\":\"cloudflare\""), "{out}");
+    }
+
+    #[test]
     fn all_never_exits_1_when_no_provider_answers() {
         for args in [&["all"][..], &["all", "--verify"], &["--json", "all"]] {
             let fetch = nobody_answers();
@@ -1966,19 +2004,26 @@ mod tests {
         ])
     }
 
+    fn cloudflare_only() -> RouteFetch {
+        providers([Some(PUBLIC_IP), None, None, Some(PUBLIC_IP), None, None])
+    }
+
     /// Every outcome a document format has to carry: a headline, a verified answer, a
-    /// disagreement (exit 3), a total failure (exit 1) and each dimension command.
-    fn documents() -> [(&'static [&'static str], u8, Fixture); 10] {
+    /// disagreement (exit 3), answers from one operator only, a total failure (exit 1) and
+    /// each dimension command.
+    fn documents() -> [(&'static [&'static str], u8, Fixture); 12] {
         [
             (&["public"], 0, agree),
             (&["public", "--verify"], 0, agree),
             (&["public", "--verify"], 3, split),
+            (&["public", "--verify"], 1, cloudflare_only),
             (&["public"], 1, nobody_answers),
             (&["local"], 0, agree),
             (&["where"], 0, agree),
             (&["all"], 0, agree),
             (&["all", "--verify"], 0, agree),
             (&["all", "--verify"], 3, split),
+            (&["all", "--verify"], 0, cloudflare_only),
             (&["all"], 0, nobody_answers),
         ]
     }
@@ -2182,6 +2227,55 @@ mod tests {
             }
             assert_eq!(json.matches('\n').count(), 1, "{json}");
         }
+    }
+
+    #[test]
+    fn every_document_format_names_the_operators() {
+        let slugs = [
+            "cloudflare",
+            "ipify",
+            "amazon",
+            "cloudflare",
+            "ident.me",
+            "ipinfo",
+        ];
+        for format in ["json", "json-pretty", "yaml"] {
+            let (code, out, _) = laptop_run(&agree(), &["--format", format, "public", "--verify"]);
+            assert_eq!(code, 0, "{format}");
+            let tree = read(&out);
+            let family = &tree["families"][0];
+            assert_eq!(family["status"].as_str(), Some("verified"), "{format}");
+            assert_eq!(family["total"].as_i64(), Some(6), "{format}");
+            assert_eq!(family["operators"].as_i64(), Some(5), "{format}");
+            let named: Vec<_> = family["providers"]
+                .as_vec()
+                .unwrap()
+                .iter()
+                .map(|provider| provider["operator"].as_str().unwrap())
+                .collect();
+            assert_eq!(named, slugs, "{format}");
+
+            let (code, out, _) =
+                laptop_run(&cloudflare_only(), &["--format", format, "all", "--verify"]);
+            assert_eq!(code, 0, "{format}");
+            let tree = read(&out);
+            let family = &tree["public"]["families"][0];
+            assert_eq!(family["status"].as_str(), Some("unverified"), "{format}");
+            assert_eq!(family["agree"].as_i64(), Some(2), "{format}");
+            assert_eq!(family["total"].as_i64(), Some(2), "{format}");
+            assert_eq!(family["operators"].as_i64(), Some(1), "{format}");
+            assert_eq!(
+                family["providers"][1]["operator"].as_str(),
+                Some("cloudflare"),
+                "{format}"
+            );
+        }
+        let (_, yaml, _) = laptop_run(
+            &cloudflare_only(),
+            &["--format", "yaml", "public", "--verify"],
+        );
+        assert!(yaml.contains("operators: 1\n"), "{yaml}");
+        assert!(yaml.contains("operator: \"cloudflare\"\n"), "{yaml}");
     }
 
     #[test]

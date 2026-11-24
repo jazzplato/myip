@@ -7,6 +7,10 @@ use std::time::Duration;
 
 use super::provider::Provider;
 
+/// The fewest distinct operators whose agreeing answers verify an address (ADR 0003). A
+/// constant, not a flag: it is a floor, and unanimity above it is still required.
+pub const MIN_OPERATORS: usize = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpFamily {
     V4,
@@ -51,11 +55,12 @@ pub struct Attempt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// At least two answers, all equal.
+    /// Answers from at least `MIN_OPERATORS` distinct operators, all equal.
     Verified,
-    /// A single answer.
+    /// Answers all equal but from fewer than `MIN_OPERATORS` operators. There may be several
+    /// answers: two providers of one operator are one opinion.
     Unverified,
-    /// At least two answers that are not all equal.
+    /// At least two answers that are not all equal, whichever operators they come from.
     Disagree,
 }
 
@@ -87,7 +92,10 @@ pub struct FamilyReport {
     pub ip: Option<IpAddr>,
     /// Size of the largest group of equal answers.
     pub agree: usize,
+    /// How many answers there are, not how many operators gave them.
     pub total: usize,
+    /// How many distinct operators gave the answers.
+    pub operators: usize,
     /// In provider order, never empty.
     pub answers: Vec<Answer>,
 }
@@ -101,12 +109,16 @@ impl FamilyReport {
         let first = answers.first()?.ip;
         let total = answers.len();
         let agree = answers.iter().map(|a| count(&answers, a.ip)).max()?;
-        let (status, ip) = if total == 1 {
-            (Status::Unverified, Some(first))
-        } else if agree == total {
+        let mut named: Vec<&str> = answers.iter().map(|a| a.provider.operator).collect();
+        named.sort_unstable();
+        named.dedup();
+        let operators = named.len();
+        let (status, ip) = if agree < total {
+            (Status::Disagree, None)
+        } else if operators >= MIN_OPERATORS {
             (Status::Verified, Some(first))
         } else {
-            (Status::Disagree, None)
+            (Status::Unverified, Some(first))
         };
         Some(Self {
             family,
@@ -114,6 +126,7 @@ impl FamilyReport {
             ip,
             agree,
             total,
+            operators,
             answers,
         })
     }
@@ -228,7 +241,8 @@ mod tests {
 
     struct Expect {
         code: u8,
-        families: &'static [(&'static str, Status, usize, usize)],
+        /// `(family, status, agree, total, operators)`
+        families: &'static [(&'static str, Status, usize, usize, usize)],
         headline: Option<&'static str>,
     }
 
@@ -237,7 +251,7 @@ mod tests {
         let got: Vec<_> = verdict
             .families
             .iter()
-            .map(|f| (f.family.as_str(), f.status, f.agree, f.total))
+            .map(|f| (f.family.as_str(), f.status, f.agree, f.total, f.operators))
             .collect();
         assert_eq!(got, want.families, "{name}: families");
         assert_eq!(verdict.exit_code(), want.code, "{name}: exit code");
@@ -259,7 +273,7 @@ mod tests {
                 [a, a, a, a, a, a],
                 Expect {
                     code: 0,
-                    families: &[("ipv4", Status::Verified, 6, 6)],
+                    families: &[("ipv4", Status::Verified, 6, 6, 5)],
                     headline: Some("one.one.one.one"),
                 },
             ),
@@ -268,17 +282,44 @@ mod tests {
                 [n, a, n, a, a, n],
                 Expect {
                     code: 0,
-                    families: &[("ipv4", Status::Verified, 3, 3)],
+                    families: &[("ipv4", Status::Verified, 3, 3, 3)],
                     headline: Some("api64.ipify.org"),
                 },
             ),
             (
-                "two agree and nothing else",
+                "two operators agree and nothing else",
                 [n, n, n, n, a, a],
                 Expect {
                     code: 0,
-                    families: &[("ipv4", Status::Verified, 2, 2)],
+                    families: &[("ipv4", Status::Verified, 2, 2, 2)],
                     headline: Some("ident.me"),
+                },
+            ),
+            (
+                "providers 1 and 4 are one operator: two answers verify nothing",
+                [a, n, n, a, n, n],
+                Expect {
+                    code: 1,
+                    families: &[("ipv4", Status::Unverified, 2, 2, 1)],
+                    headline: None,
+                },
+            ),
+            (
+                "providers 1, 4 and 2 agree: a second operator verifies",
+                [a, a, n, a, n, n],
+                Expect {
+                    code: 0,
+                    families: &[("ipv4", Status::Verified, 3, 3, 2)],
+                    headline: Some("one.one.one.one"),
+                },
+            ),
+            (
+                "provider 1 says one address and provider 4 another: one operator can disagree with itself",
+                [a, n, n, b, n, n],
+                Expect {
+                    code: 3,
+                    families: &[("ipv4", Status::Disagree, 1, 2, 1)],
+                    headline: None,
                 },
             ),
             (
@@ -286,16 +327,16 @@ mod tests {
                 [a, a, b, n, n, n],
                 Expect {
                     code: 3,
-                    families: &[("ipv4", Status::Disagree, 2, 3)],
+                    families: &[("ipv4", Status::Disagree, 2, 3, 3)],
                     headline: None,
                 },
             ),
             (
-                "one dissenter among six disagrees",
+                "one dissenter among six disagrees: no majority rule",
                 [a, a, a, a, b, a],
                 Expect {
                     code: 3,
-                    families: &[("ipv4", Status::Disagree, 5, 6)],
+                    families: &[("ipv4", Status::Disagree, 5, 6, 5)],
                     headline: None,
                 },
             ),
@@ -304,7 +345,7 @@ mod tests {
                 [n, n, a, b, n, n],
                 Expect {
                     code: 3,
-                    families: &[("ipv4", Status::Disagree, 1, 2)],
+                    families: &[("ipv4", Status::Disagree, 1, 2, 2)],
                     headline: None,
                 },
             ),
@@ -313,7 +354,7 @@ mod tests {
                 [a, b, c, n, n, n],
                 Expect {
                     code: 3,
-                    families: &[("ipv4", Status::Disagree, 1, 3)],
+                    families: &[("ipv4", Status::Disagree, 1, 3, 3)],
                     headline: None,
                 },
             ),
@@ -322,7 +363,7 @@ mod tests {
                 [n, n, n, n, a, n],
                 Expect {
                     code: 1,
-                    families: &[("ipv4", Status::Unverified, 1, 1)],
+                    families: &[("ipv4", Status::Unverified, 1, 1, 1)],
                     headline: None,
                 },
             ),
@@ -341,8 +382,8 @@ mod tests {
                 Expect {
                     code: 0,
                     families: &[
-                        ("ipv4", Status::Verified, 5, 5),
-                        ("ipv6", Status::Unverified, 1, 1),
+                        ("ipv4", Status::Verified, 5, 5, 5),
+                        ("ipv6", Status::Unverified, 1, 1, 1),
                     ],
                     headline: Some("one.one.one.one"),
                 },
@@ -353,8 +394,8 @@ mod tests {
                 Expect {
                     code: 3,
                     families: &[
-                        ("ipv4", Status::Disagree, 2, 3),
-                        ("ipv6", Status::Unverified, 1, 1),
+                        ("ipv4", Status::Disagree, 2, 3, 3),
+                        ("ipv6", Status::Unverified, 1, 1, 1),
                     ],
                     headline: None,
                 },
@@ -365,20 +406,32 @@ mod tests {
                 Expect {
                     code: 1,
                     families: &[
-                        ("ipv4", Status::Unverified, 1, 1),
-                        ("ipv6", Status::Unverified, 1, 1),
+                        ("ipv4", Status::Unverified, 1, 1, 1),
+                        ("ipv6", Status::Unverified, 1, 1, 1),
                     ],
                     headline: None,
                 },
             ),
             (
-                "dual stack, each family agrees: the family answered first is the headline",
+                "dual stack, IPv6 only from providers 1 and 4: unverified next to a verified IPv4, exit 0",
                 [x, a, a, x, a, a],
                 Expect {
                     code: 0,
                     families: &[
-                        ("ipv4", Status::Verified, 4, 4),
-                        ("ipv6", Status::Verified, 2, 2),
+                        ("ipv4", Status::Verified, 4, 4, 4),
+                        ("ipv6", Status::Unverified, 2, 2, 1),
+                    ],
+                    headline: Some("api64.ipify.org"),
+                },
+            ),
+            (
+                "dual stack, each family has two operators: the family answered first is the headline",
+                [x, x, a, a, a, n],
+                Expect {
+                    code: 0,
+                    families: &[
+                        ("ipv4", Status::Verified, 3, 3, 3),
+                        ("ipv6", Status::Verified, 2, 2, 2),
                     ],
                     headline: Some("one.one.one.one"),
                 },
@@ -389,8 +442,8 @@ mod tests {
                 Expect {
                     code: 0,
                     families: &[
-                        ("ipv4", Status::Verified, 2, 2),
-                        ("ipv6", Status::Verified, 2, 2),
+                        ("ipv4", Status::Verified, 2, 2, 2),
+                        ("ipv6", Status::Verified, 2, 2, 2),
                     ],
                     headline: Some("one.one.one.one"),
                 },
@@ -401,8 +454,8 @@ mod tests {
                 Expect {
                     code: 0,
                     families: &[
-                        ("ipv4", Status::Verified, 3, 3),
-                        ("ipv6", Status::Verified, 2, 2),
+                        ("ipv4", Status::Verified, 3, 3, 3),
+                        ("ipv6", Status::Verified, 2, 2, 2),
                     ],
                     headline: Some("api64.ipify.org"),
                 },
@@ -413,8 +466,8 @@ mod tests {
                 Expect {
                     code: 3,
                     families: &[
-                        ("ipv4", Status::Disagree, 2, 3),
-                        ("ipv6", Status::Verified, 2, 2),
+                        ("ipv4", Status::Disagree, 2, 3, 3),
+                        ("ipv6", Status::Verified, 2, 2, 2),
                     ],
                     headline: None,
                 },
@@ -424,7 +477,7 @@ mod tests {
                 [x, y, n, n, n, n],
                 Expect {
                     code: 3,
-                    families: &[("ipv6", Status::Disagree, 1, 2)],
+                    families: &[("ipv6", Status::Disagree, 1, 2, 2)],
                     headline: None,
                 },
             ),
@@ -490,6 +543,12 @@ mod tests {
             Verdict::from_attempts(&attempts([None, Some(A), None, Some(A), None, Some(A)]));
         let ranks: Vec<_> = verdict.families[0].answers.iter().map(|a| a.rank).collect();
         assert_eq!(ranks, [1, 3, 5]);
+        let operators: Vec<_> = verdict.families[0]
+            .answers
+            .iter()
+            .map(|a| a.provider.operator)
+            .collect();
+        assert_eq!(operators, ["ipify", "cloudflare", "ipinfo"]);
     }
 
     #[test]
