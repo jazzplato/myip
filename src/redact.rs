@@ -3,7 +3,36 @@
 //! Every redaction finds the byte ranges of `text` to hide and replaces them with `***` in
 //! one go (`mask`), so that several redactions can be combined on the text as it was.
 
+use std::fmt;
 use std::ops::Range;
+
+/// A credential that `myip` holds but never prints. `Debug` and `Display` both show `***`,
+/// so a derived `Debug` of a struct that holds one (`FetchOptions`) cannot leak it; the
+/// value is reachable only through `expose`, which the transport calls to build the header.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("***")
+    }
+}
+
+impl fmt::Display for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("***")
+    }
+}
 
 /// Replaces the userinfo of every `scheme://user:password@host` in `text` with `***`.
 ///
@@ -162,12 +191,26 @@ pub fn redact_arg_queries(text: &str, args: &[String]) -> String {
 /// that holds another, two that overlap, or one that overlaps itself, are masked once, so no
 /// tail is left behind and a mask is never searched for a value again.
 pub fn redact_arg_values(text: &str, args: &[String]) -> String {
+    redact_values(text, args, None)
+}
+
+/// `redact_arg_values`, and the exact value of `secret` as well, wherever `text` has it.
+/// The secret is one more value to hide, found and masked together with the others, so a
+/// secret that overlaps a credential or a value of the command line leaves no tail behind.
+pub fn redact_values(text: &str, args: &[String], secret: Option<&Secret>) -> String {
     let mut spans = credential_spans(text);
-    spans.extend(value_spans(text, args));
+    spans.extend(value_spans(text, args, secret));
     mask(text, spans)
 }
 
-fn value_spans(text: &str, args: &[String]) -> Vec<Range<usize>> {
+fn value_spans(text: &str, args: &[String], secret: Option<&Secret>) -> Vec<Range<usize>> {
+    let mut values = argument_values(args);
+    values.extend(secret.map(|secret| secret.expose().to_owned()));
+    occurrences(text, values)
+}
+
+/// The values of the queries of `args`, and their percent-decoded forms.
+fn argument_values(args: &[String]) -> Vec<String> {
     let mut values: Vec<String> = Vec::new();
     for (_, query) in args.iter().filter_map(|arg| arg.trim().split_once('?')) {
         let query = query.split_once('#').map_or(query, |(query, _)| query);
@@ -177,6 +220,11 @@ fn value_spans(text: &str, args: &[String]) -> Vec<Range<usize>> {
             values.push(value.to_owned());
         }
     }
+    values
+}
+
+/// The runs of `text` that are made of occurrences of any of `values`.
+fn occurrences(text: &str, mut values: Vec<String>) -> Vec<Range<usize>> {
     values.retain(|value| !value.is_empty());
     values.sort();
     values.dedup();
@@ -474,7 +522,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("&");
         let args = [format!("ip?{query}")];
-        let spans = value_spans(&body, &args);
+        let spans = value_spans(&body, &args, None);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0], 0..body.len());
         assert_eq!(redact_arg_values(&body, &args), "***");
@@ -574,6 +622,65 @@ mod tests {
         ] {
             assert_eq!(redact_arg_values(text, &args(list)), text, "{text}");
         }
+    }
+
+    #[test]
+    fn a_secret_shows_as_stars_in_debug_and_display_and_reaches_the_header_only_through_expose() {
+        let secret = Secret::new("tok3n-S3CRET");
+        assert_eq!(format!("{secret}"), "***");
+        assert_eq!(format!("{secret:?}"), "***");
+        assert_eq!(format!("{secret:#?}"), "***");
+        assert_eq!(format!("{:?}", Some(&secret)), "Some(***)");
+        assert_eq!(secret.expose(), "tok3n-S3CRET");
+    }
+
+    #[test]
+    fn the_exact_value_of_a_secret_is_hidden_wherever_the_text_has_it() {
+        let secret = Secret::new("tok3n-S3CRET");
+        for (text, want) in [
+            ("bad token tok3n-S3CRET here", "bad token *** here"),
+            ("tok3n-S3CRETtok3n-S3CRET", "***"),
+            (
+                r#"{"auth":"Bearer tok3n-S3CRET"}"#,
+                r#"{"auth":"Bearer ***"}"#,
+            ),
+            // Together with a credential of the text: neither hides the other.
+            (
+                "proxy http://u:pw@h:1/x?k=tok3n-S3CRET refused",
+                "proxy http://***@h:1/x?k=*** refused",
+            ),
+            ("nothing to hide", "nothing to hide"),
+        ] {
+            assert_eq!(redact_values(text, &[], Some(&secret)), want, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_secret_and_the_command_line_values_are_hidden_in_the_same_pass() {
+        let args = ["json?x=ARGVAL".to_owned()];
+        let secret = Secret::new("tok3n");
+        assert_eq!(
+            redact_values("ARGVAL and tok3n and ARGVAL", &args, Some(&secret)),
+            "*** and *** and ***"
+        );
+        // Without a secret it is `redact_arg_values`.
+        assert_eq!(
+            redact_values("ARGVAL and tok3n", &args, None),
+            redact_arg_values("ARGVAL and tok3n", &args)
+        );
+        assert_eq!(
+            redact_values("ARGVAL and tok3n", &args, None),
+            "*** and tok3n"
+        );
+    }
+
+    #[test]
+    fn a_short_secret_is_hidden_like_any_other_value() {
+        let secret = Secret::new("1");
+        assert_eq!(
+            redact_values("retry 1 of 12", &[], Some(&secret)),
+            "retry *** of ***2"
+        );
     }
 
     #[test]

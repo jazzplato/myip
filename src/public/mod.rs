@@ -149,6 +149,7 @@ pub fn lookup(
             family: options.family(),
             proxy: options.proxy.clone(),
             accept: "text/plain",
+            bearer: None,
         },
     };
     let attempts = if verify {

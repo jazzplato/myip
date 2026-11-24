@@ -2,11 +2,16 @@
 
 use std::process::{Command, Output};
 
+/// Every process test starts without `IPINFO_TOKEN`, so a developer or CI job that exports
+/// one does not change what these tests see.
+fn command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_myip"));
+    command.env_remove("IPINFO_TOKEN");
+    command
+}
+
 fn myip(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_myip"))
-        .args(args)
-        .output()
-        .expect("spawn myip")
+    command().args(args).output().expect("spawn myip")
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -131,7 +136,7 @@ fn a_non_unicode_argument_exits_2_and_is_never_echoed() {
     use std::os::unix::ffi::OsStrExt;
 
     let secret = OsStr::from_bytes(b"user:S3CR3T@h/\xFF");
-    let out = Command::new(env!("CARGO_BIN_EXE_myip"))
+    let out = command()
         .arg("--proxy")
         .arg(secret)
         .output()
@@ -141,6 +146,102 @@ fn a_non_unicode_argument_exits_2_and_is_never_echoed() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("not valid UTF-8"), "{stderr}");
     assert!(!stderr.contains("S3CR3T"), "{stderr}");
+}
+
+/// A proxy that hangs up on every connection, so a request made through it fails in the
+/// transport without leaving the machine.
+fn hangup_proxy() -> String {
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", proxy.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in proxy.incoming() {
+            drop(stream);
+        }
+    });
+    url
+}
+
+#[test]
+fn an_invalid_token_variable_is_a_usage_error_that_never_shows_it() {
+    let proxy = hangup_proxy();
+    let out = command()
+        .env("IPINFO_TOKEN", "Qz9 not a token Xw8")
+        .args(["-v", "--timeout", "2", "--proxy", &proxy, "city"])
+        .output()
+        .expect("spawn myip");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("IPINFO_TOKEN"), "{stderr}");
+    assert!(
+        !stderr.contains("Qz9") && !stderr.contains("Xw8"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("GET"),
+        "no request line before the check: {stderr}"
+    );
+}
+
+#[test]
+fn a_valid_token_variable_is_announced_by_a_fixed_line_and_never_printed() {
+    let proxy = hangup_proxy();
+    let out = command()
+        .env("IPINFO_TOKEN", "Q7abc.DEF_123\n")
+        .args(["-v", "--timeout", "2", "--proxy", &proxy, "city"])
+        .output()
+        .expect("spawn myip");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("myip: Authorization: Bearer *** (from IPINFO_TOKEN)\n"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Q7abc") && !stderr.contains("DEF_123"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn only_the_passthrough_looks_at_the_token_variable() {
+    for args in [&["where"][..], &["--json", "where"]] {
+        let out = command()
+            .env("IPINFO_TOKEN", "not a token")
+            .args(args)
+            .output()
+            .expect("spawn myip");
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stderr.is_empty(), "{args:?}: {}", text(&out.stderr));
+    }
+}
+
+// `SystemEnv::var` is `std::env::var(name).ok()`, so a value that is not valid Unicode reads
+// as unset (ADR 0004): no check, no header and no message.
+#[cfg(unix)]
+#[test]
+fn a_token_variable_that_is_not_unicode_reads_as_unset() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let proxy = hangup_proxy();
+    let out = command()
+        .env("IPINFO_TOKEN", OsStr::from_bytes(b"Qz9\xFFXw8"))
+        .args(["-v", "--timeout", "2", "--proxy", &proxy, "city"])
+        .output()
+        .expect("spawn myip");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("GET https://ipinfo.io/city"), "{stderr}");
+    assert!(
+        !stderr.contains("Authorization") && !stderr.contains("IPINFO_TOKEN"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Qz9") && !stderr.contains("Xw8"),
+        "{stderr}"
+    );
 }
 
 // The two tests below assert only what holds on any host: they read the real machine.
@@ -224,7 +325,7 @@ const COLOUR_VARS: [&str; 7] = [
 ];
 
 fn myip_with(args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_myip"));
+    let mut command = command();
     command.args(args);
     for var in COLOUR_VARS {
         command.env_remove(var);
@@ -342,6 +443,7 @@ fn a_real_terminal_gets_colour_by_default_and_not_with_no_color() {
             env!("CARGO_BIN_EXE_myip").replace('\'', "'\\''")
         );
         let mut command = Command::new("script");
+        command.env_remove("IPINFO_TOKEN");
         command.args(["-qec", &quoted, "/dev/null"]);
         for var in COLOUR_VARS {
             command.env_remove(var);
