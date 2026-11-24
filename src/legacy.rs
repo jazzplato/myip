@@ -21,6 +21,7 @@ pub fn run(field: Option<&str>, args: &[String], options: &Options, ctx: &mut Co
         family: options.family(),
         proxy: options.proxy.clone(),
         accept: "application/json",
+        bearer: None,
     };
     let url = format!("{URL_IPINFO}{}", field.unwrap_or(DEFAULT_FIELD));
     if options.verbose {

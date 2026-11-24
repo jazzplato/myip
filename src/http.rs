@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use ureq::tls::{RootCerts, TlsConfig};
 
+use crate::redact::Secret;
+
 pub const USER_AGENT: &str = concat!("myip/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -31,6 +33,9 @@ pub struct FetchOptions {
     pub family: Family,
     pub proxy: ProxyMode,
     pub accept: &'static str,
+    /// Sent as `Authorization: Bearer` on the first request only, never on a followed
+    /// redirect. `Secret` keeps this derived `Debug` from printing it.
+    pub bearer: Option<Secret>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -463,6 +468,7 @@ mod tests {
             family: Family::Any,
             proxy: ProxyMode::None,
             accept: "application/json",
+            bearer: None,
         }
     }
 
@@ -501,6 +507,15 @@ mod tests {
 
     /// Reads one request head and returns its first line.
     fn drain_request(stream: &mut TcpStream) -> String {
+        read_head(stream)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Reads one request head, request line and headers.
+    fn read_head(stream: &mut TcpStream) -> String {
         let mut seen = Vec::new();
         let mut buf = [0u8; 512];
         while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -509,11 +524,24 @@ mod tests {
                 Ok(n) => seen.extend_from_slice(&buf[..n]),
             }
         }
-        String::from_utf8_lossy(&seen)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned()
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+
+    /// Like `serve_recording`, but reports the whole head of each request, lowercased so
+    /// header names can be matched whatever their case.
+    fn serve_heads(make: impl FnOnce(&str) -> Vec<Vec<u8>>) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let responses = make(&base);
+        let (seen, heads) = mpsc::channel();
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = seen.send(read_head(&mut stream).to_ascii_lowercase());
+                let _ = stream.write_all(&response);
+            }
+        });
+        (base, heads)
     }
 
     /// An HTTP proxy that tunnels one CONNECT and then answers the tunneled request.
@@ -757,6 +785,104 @@ mod tests {
         let base = serve(vec![http_response("302 Found", "", b"moved")]);
         let resp = UreqFetch.get(&base, &opts()).unwrap();
         assert_eq!((resp.status, resp.body.as_str()), (302, "moved"));
+    }
+
+    #[test]
+    fn a_bearer_is_sent_on_the_first_request_and_not_on_a_followed_redirect() {
+        let (base, heads) = serve_heads(|_| {
+            vec![
+                http_response("302 Found", "Location: /x\r\n", b""),
+                http_response("307 Temporary Redirect", "Location: /y\r\n", b""),
+                http_response("200 OK", "", b"final"),
+            ]
+        });
+        let options = FetchOptions {
+            bearer: Some(Secret::new("T0k.en_~+/=-9")),
+            ..opts()
+        };
+        let resp = UreqFetch.get(&base, &options).unwrap();
+        assert_eq!(resp.body, "final");
+        let heads: Vec<String> = heads.try_iter().collect();
+        assert_eq!(heads.len(), 3, "{heads:?}");
+        assert!(
+            heads[0].contains("\r\nauthorization: bearer t0k.en_~+/=-9\r\n"),
+            "{}",
+            heads[0]
+        );
+        for head in &heads[1..] {
+            assert!(!head.contains("authorization"), "{head}");
+            assert!(!head.contains("t0k.en"), "{head}");
+        }
+    }
+
+    #[test]
+    fn no_bearer_means_no_authorization_header() {
+        let (base, heads) = serve_heads(|_| vec![http_response("200 OK", "", b"ok")]);
+        UreqFetch.get(&base, &opts()).unwrap();
+        let heads: Vec<String> = heads.try_iter().collect();
+        assert_eq!(heads.len(), 1, "{heads:?}");
+        assert!(!heads[0].contains("authorization"), "{}", heads[0]);
+    }
+
+    #[test]
+    fn a_redirect_to_another_origin_with_a_bearer_is_refused_without_the_token() {
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        other.set_nonblocking(true).unwrap();
+        let target = format!("http://{}/x", other.local_addr().unwrap());
+        let (base, heads) = serve_heads(|_| {
+            vec![http_response(
+                "302 Found",
+                &format!("Location: {target}\r\n"),
+                b"",
+            )]
+        });
+        let options = FetchOptions {
+            bearer: Some(Secret::new("T0k3n")),
+            ..opts()
+        };
+        let err = UreqFetch.get(&base, &options).unwrap_err();
+        assert!(
+            matches!(&err, FetchError::Rejected(m) if m.contains("different host")),
+            "{err:?}"
+        );
+        assert!(!format!("{err:?}").contains("T0k3n"), "{err:?}");
+        assert_eq!(
+            other.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the other origin must not be contacted"
+        );
+        let heads: Vec<String> = heads.try_iter().collect();
+        assert!(
+            heads[0].contains("authorization: bearer t0k3n"),
+            "{heads:?}"
+        );
+    }
+
+    #[test]
+    fn a_bearer_that_cannot_be_a_header_value_is_rejected_without_showing_it() {
+        let (base, _heads) = serve_heads(|_| vec![http_response("200 OK", "", b"ok")]);
+        let options = FetchOptions {
+            bearer: Some(Secret::new("S3CR3T\r\nX-Injected: 1")),
+            ..opts()
+        };
+        let err = UreqFetch.get(&base, &options).unwrap_err();
+        assert!(matches!(&err, FetchError::Rejected(_)), "{err:?}");
+        for shown in [err.to_string(), format!("{err:?}")] {
+            assert!(!shown.contains("S3CR3T"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn the_debug_of_the_options_does_not_show_the_bearer() {
+        let options = FetchOptions {
+            bearer: Some(Secret::new("S3CR3T")),
+            ..opts()
+        };
+        for shown in [format!("{options:?}"), format!("{options:#?}")] {
+            assert!(shown.contains("***"), "{shown}");
+            assert!(!shown.contains("S3CR3T"), "{shown}");
+        }
+        assert!(options.clone().bearer.is_some());
     }
 
     #[test]
