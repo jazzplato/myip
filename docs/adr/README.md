@@ -19,3 +19,4 @@ Not needed for bug fixes, refactors or reversible tweaks.
 | 0001 | [Product scope and CLI contract for 0.1.0](0001-product-scope-and-cli-contract.md) | accepted |
 | 0002 | [Output formats, styled text and the CLI contract for 0.2.0](0002-output-formats-and-styled-text.md) | accepted |
 | 0003 | [Operator-based quorum for --verify](0003-operator-quorum.md) | accepted |
+| 0004 | [ipinfo.io token from the environment](0004-ipinfo-token-from-environment.md) | accepted |
