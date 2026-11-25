@@ -9,10 +9,10 @@ A release is built by [`release.yml`](../.github/workflows/release.yml) from a `
    git tag "v$VERSION" <commit-on-master> && git push origin "v$VERSION"
    ```
 3. Open the run (Actions -> Release). The `draft release` job uses the `release` environment: approve it if the environment has a required reviewer.
-4. Verify the draft **before publishing**:
+4. Verify the draft **before publishing** (`shasum` is on macOS and Linux with Perl):
    ```sh
    gh release download "v$VERSION" -R jazzplato/myip -D /tmp/myip-release && cd /tmp/myip-release
-   sha256sum --check SHA256SUMS            # shasum -a 256 -c SHA256SUMS on macOS
+   shasum -a 256 -c SHA256SUMS
    for f in myip-v*.tar.gz myip-v*.zip SHA256SUMS; do
      gh attestation verify "$f" -R jazzplato/myip \
        --signer-workflow jazzplato/myip/.github/workflows/release.yml \

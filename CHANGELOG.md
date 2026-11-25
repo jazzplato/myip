@@ -4,6 +4,10 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Changed
+
+- The commands in the README and `docs/` paste as is: no trailing `# comment` (an interactive zsh, the default shell on macOS, passes it to the command), and the verify block no longer names a release that does not exist. A test (`tests/docs.rs`) keeps it that way.
+
 ## [0.4.0] - 2026-11-25
 
 ### Changed
