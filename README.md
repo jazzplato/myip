@@ -5,11 +5,11 @@ A small command line tool that answers "where am I on the network, and what will
 
 ## Install
 
-Download the archive for your platform from the [latest release](https://github.com/jazzplato/myip/releases/latest) together with `SHA256SUMS`: Linux x86_64 and aarch64 (static musl), macOS x86_64 and aarch64, Windows x86_64. Check the archive before you run it (the file name below is an example; use the one you downloaded):
+Download the archive for your platform from the [latest release](https://github.com/jazzplato/myip/releases/latest) together with `SHA256SUMS`: Linux x86_64 and aarch64 (static musl), macOS x86_64 and aarch64, Windows x86_64. In the directory that holds them, check the archives before you run one. `shasum` ships with macOS and with Perl on Linux; where it is missing, `sha256sum --check --ignore-missing SHA256SUMS` does the same. The loop verifies the build attestation of every file named `myip-v*`:
 
 ```sh
-sha256sum --check --ignore-missing SHA256SUMS     # macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
-gh attestation verify myip-v0.1.0-x86_64-unknown-linux-musl.tar.gz -R jazzplato/myip
+shasum -a 256 -c --ignore-missing SHA256SUMS
+for f in myip-v*; do gh attestation verify "$f" -R jazzplato/myip || break; done
 ```
 
 The binaries are not notarized. If macOS refuses one that a browser downloaded, run `xattr -d com.apple.quarantine myip`; `gh release download` and `curl` do not set that flag. Or build from crates.io (needs Rust 1.85 or newer):
@@ -151,8 +151,10 @@ myip 8.8.8.8/org
 
 > To use an ipinfo.io access token
 
+`read -rs` prompts without echo, so the token is not recorded in your shell history:
+
 ```bash
-read -rs IPINFO_TOKEN && export IPINFO_TOKEN   # prompts without echo, so the token is not recorded in your shell history
+read -rs IPINFO_TOKEN && export IPINFO_TOKEN
 myip
 ```
 
@@ -205,8 +207,10 @@ A laptop has several network interfaces (Wi-Fi, Ethernet, VPN tunnels, Docker br
 
 Every value in `where` says how it is known: **declared** (handed to the process by an orchestrator: an environment variable or a file it wrote) or **observed** (measured here: the cgroup, a mount, a marker file, the interface list). What cannot be established is `unknown` (`null` in JSON), never a guess.
 
+Run this inside a Docker container:
+
 ```bash
-myip local   # run inside a Docker container
+myip local
 ```
 ```
 interfaces (observed)
@@ -367,11 +371,13 @@ The 0.1.0 scope and CLI contract are recorded in [ADR 0001](docs/adr/0001-produc
 
 The Rust toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it automatically. The minimum supported Rust version is declared as `rust-version` in `Cargo.toml`.
 
+`cargo deny check` is [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) (`cargo install cargo-deny --locked`).
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
-cargo deny check        # https://github.com/EmbarkStudios/cargo-deny
+cargo deny check
 ```
 
 No local C toolchain? Run the same commands in a container:

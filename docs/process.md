@@ -43,10 +43,10 @@ idea -> spec -> ready -> PR -> CI gates -> human merge -> weekly health report -
 `.github/**`, `deny.toml`, `rust-toolchain.toml`, `AGENTS.md` and `docs/adr/**` change only through a `type:process` issue. These are covered by [CODEOWNERS](../.github/CODEOWNERS).
 
 ## Settings as code
-Repository rules live in `.github/settings/`: the `master` and `v*` tag rulesets (JSON) and `apply.sh`, which also sets squash-only merges, a read-only default Actions token, Dependabot alerts (which also turn on the dependency graph that `dependency-review` needs), Dependabot security updates, secret scanning with push protection, private vulnerability reporting, and the `release` environment (maintainer as required reviewer). They are **not** applied automatically. After the CI workflow (which defines `ci-gate`) is on `master`, the maintainer runs:
+Repository rules live in `.github/settings/`: the `master` and `v*` tag rulesets (JSON) and `apply.sh`, which also sets squash-only merges, a read-only default Actions token, Dependabot alerts (which also turn on the dependency graph that `dependency-review` needs), Dependabot security updates, secret scanning with push protection, private vulnerability reporting, and the `release` environment (maintainer as required reviewer). They are **not** applied automatically. After the CI workflow (which defines `ci-gate`) is on `master`, the maintainer reviews the plan, then applies it (safe to re-run):
 ```sh
-.github/settings/apply.sh --dry-run   # review the plan
-.github/settings/apply.sh             # apply; safe to re-run
+.github/settings/apply.sh --dry-run
+.github/settings/apply.sh
 ```
 To undo a ruleset, delete it in Settings -> Rules or with `gh api -X DELETE repos/OWNER/REPO/rulesets/ID`.
 
