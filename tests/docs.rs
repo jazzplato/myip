@@ -26,9 +26,10 @@ fn is_shell_fence(info: &str) -> bool {
 }
 
 fn problem(line: &str) -> Option<&'static str> {
-    if line.starts_with("$ ") {
+    let command = line.trim_start();
+    if command.starts_with("$ ") {
         Some("starts with a `$ ` prompt")
-    } else if line.starts_with('#') || line.contains(" #") || line.contains("\t#") {
+    } else if command.starts_with('#') || line.contains(" #") || line.contains("\t#") {
         Some("has a `#` comment")
     } else {
         None
