@@ -301,7 +301,8 @@ In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read 
 
 | Colour | Used for |
 |--------|----------|
-| Bold | Block names (`[public]`, `[local]`, `[where]`, `[highlights]`), field names, interface names, address families in a disagreement report |
+| Bold | Block names (`[public]`, `[local]`, `[where]`, `[highlights]`, `interfaces`, `egress`, `evidence`, `kubernetes`), address families in a disagreement report |
+| Bold cyan | Field names (`environment`, `pod name`) and interface names (`en0`) |
 | Dim | Provenance (`(declared: env:POD_IP)`), explanations and footnotes |
 | Green | A verified answer, and the "no NAT" verdict |
 | Yellow | Something unknown, an unverified answer, a guess (`likely virtual`), a translated address (NAT) |

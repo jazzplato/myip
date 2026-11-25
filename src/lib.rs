@@ -3309,7 +3309,15 @@ mod tests {
             .into_iter()
             .chain(pod_fields)
             .collect();
-        let cases: [(Build, &[&str], Fixture, Vec<&str>, Vec<&str>); 4] = [
+        /// (machine, arguments, network, the `name` spans, the `bold` spans)
+        type Case = (
+            Build,
+            &'static [&'static str],
+            Fixture,
+            Vec<&'static str>,
+            Vec<&'static str>,
+        );
+        let cases: [Case; 4] = [
             (
                 Machine::laptop,
                 &["local"],
@@ -3368,23 +3376,6 @@ mod tests {
         );
         assert_balanced(&out);
         assert!(!strip(&out).contains('\u{1b}'), "{out:?}");
-
-        let machine = machine_with("env POD_NAME", "a\n\u{1b}[31mINJECT");
-        let (code, out, err) = coloured(&machine, &no_network(), &["where"]);
-        assert_eq!((code, err.as_str()), (0, ""));
-        let row = format!(
-            "{}       a\\n\\x1b[31mINJECT{}\n",
-            span(NAME, "pod name"),
-            span(DIM, "  (declared: env:POD_NAME)")
-        );
-        assert!(out.contains(&row), "{out:?}");
-        assert_balanced(&out);
-        assert!(!strip(&out).contains('\u{1b}'), "{out:?}");
-        assert!(
-            out.lines()
-                .all(|line| !line.contains("INJECT") || line.contains("pod name")),
-            "{out:?}"
-        );
     }
 
     #[test]

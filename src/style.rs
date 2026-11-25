@@ -69,13 +69,14 @@ pub fn enabled(choice: ColorChoice, terminal: &Terminal) -> bool {
 
 const RESET: &str = "\u{1b}[0m";
 const BOLD: &str = "\u{1b}[1m";
+const BOLD_CYAN: &str = "\u{1b}[1;36m";
 const DIM: &str = "\u{1b}[2m";
 const RED: &str = "\u{1b}[31m";
 const GREEN: &str = "\u{1b}[32m";
 const YELLOW: &str = "\u{1b}[33m";
 
 /// The only escape sequences this program ever writes.
-const CODES: [&str; 6] = [RESET, BOLD, DIM, RED, GREEN, YELLOW];
+const CODES: [&str; 7] = [RESET, BOLD, BOLD_CYAN, DIM, RED, GREEN, YELLOW];
 
 /// How text is written: plain, or with ANSI SGR codes around the spans that carry meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,14 +94,14 @@ impl Style {
         }
     }
 
-    /// Names of blocks, fields and interfaces.
+    /// Names of blocks and address families.
     pub fn bold(self, text: &str) -> String {
         self.span(BOLD, text)
     }
 
-    /// Interface names and field names.
+    /// Names of interfaces and fields: bold cyan in one sequence, as cargo writes its literals.
     pub fn name(self, text: &str) -> String {
-        self.span(BOLD, text)
+        self.span(BOLD_CYAN, text)
     }
 
     /// Provenance and explanations.
