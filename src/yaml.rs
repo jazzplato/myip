@@ -7,17 +7,27 @@
 //! same under YAML 1.1 and 1.2. Keys are bare only when they match `[a-z][a-z0-9_]*` and are
 //! not a word YAML 1.1 reads as a boolean or null. A key too long for an implicit entry is
 //! written in the explicit `? key` / `: value` form.
+//!
+//! On a terminal (ADR 0005) each key is one cyan span, quotes included and the colon outside,
+//! and each `null` is dim; the layout does not change, so without the codes the document is
+//! the plain one.
 
 use crate::json::{Json, write_quoted};
+use crate::style::Style;
 
 /// `value` as one YAML document in block style, ending with a newline.
 pub fn render(value: &Json) -> String {
+    render_styled(value, Style::Plain)
+}
+
+/// [`render`] with each key cyan and each `null` dim when `style` is `Ansi`.
+pub fn render_styled(value: &Json, style: Style) -> String {
     let mut out = String::new();
     match value {
-        Json::Object(fields) if !fields.is_empty() => mapping(&mut out, fields, 0, false),
-        Json::Array(items) if !items.is_empty() => sequence(&mut out, items, 0, false),
+        Json::Object(fields) if !fields.is_empty() => mapping(&mut out, fields, 0, false, style),
+        Json::Array(items) if !items.is_empty() => sequence(&mut out, items, 0, false, style),
         scalar => {
-            scalar_text(&mut out, scalar);
+            scalar_text(&mut out, scalar, style);
             out.push('\n');
         }
     }
@@ -31,33 +41,41 @@ const MAX_IMPLICIT_KEY: usize = 1000;
 
 /// One `key: value` entry per line at `indent`. With `inline_first` the caller has already
 /// written the first line's indentation (a `- ` marker), so the first entry continues it.
-fn mapping(out: &mut String, fields: &[(String, Json)], indent: usize, mut inline_first: bool) {
+fn mapping(
+    out: &mut String,
+    fields: &[(String, Json)],
+    indent: usize,
+    mut inline_first: bool,
+    style: Style,
+) {
     for (key, value) in fields {
         if !std::mem::take(&mut inline_first) {
             pad(out, indent);
         }
         let key = key_text(key);
-        if key.chars().count() > MAX_IMPLICIT_KEY {
+        // The form follows the plain key, so the colour cannot change the layout.
+        let explicit = key.chars().count() > MAX_IMPLICIT_KEY;
+        if explicit {
             out.push_str("? ");
-            out.push_str(&key);
+        }
+        out.push_str(&style.key(&key));
+        if explicit {
             out.push('\n');
             pad(out, indent);
-        } else {
-            out.push_str(&key);
         }
         out.push(':');
         match value {
             Json::Object(fields) if !fields.is_empty() => {
                 out.push('\n');
-                mapping(out, fields, indent + 2, false);
+                mapping(out, fields, indent + 2, false, style);
             }
             Json::Array(items) if !items.is_empty() => {
                 out.push('\n');
-                sequence(out, items, indent + 2, false);
+                sequence(out, items, indent + 2, false, style);
             }
             scalar => {
                 out.push(' ');
-                scalar_text(out, scalar);
+                scalar_text(out, scalar, style);
                 out.push('\n');
             }
         }
@@ -65,17 +83,21 @@ fn mapping(out: &mut String, fields: &[(String, Json)], indent: usize, mut inlin
 }
 
 /// One `- item` entry per line at `indent`; see [`mapping`] for `inline_first`.
-fn sequence(out: &mut String, items: &[Json], indent: usize, mut inline_first: bool) {
+fn sequence(out: &mut String, items: &[Json], indent: usize, mut inline_first: bool, style: Style) {
     for item in items {
         if !std::mem::take(&mut inline_first) {
             pad(out, indent);
         }
         out.push_str("- ");
         match item {
-            Json::Object(fields) if !fields.is_empty() => mapping(out, fields, indent + 2, true),
-            Json::Array(items) if !items.is_empty() => sequence(out, items, indent + 2, true),
+            Json::Object(fields) if !fields.is_empty() => {
+                mapping(out, fields, indent + 2, true, style);
+            }
+            Json::Array(items) if !items.is_empty() => {
+                sequence(out, items, indent + 2, true, style);
+            }
             scalar => {
-                scalar_text(out, scalar);
+                scalar_text(out, scalar, style);
                 out.push('\n');
             }
         }
@@ -87,9 +109,9 @@ fn pad(out: &mut String, indent: usize) {
 }
 
 /// A scalar or an empty collection, on one line and without the newline.
-fn scalar_text(out: &mut String, value: &Json) {
+fn scalar_text(out: &mut String, value: &Json, style: Style) {
     match value {
-        Json::Null => out.push_str("null"),
+        Json::Null => out.push_str(&style.dim("null")),
         Json::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
         Json::Int(value) => out.push_str(&value.to_string()),
         Json::Str(value) => write_quoted(out, value, true),
@@ -123,6 +145,7 @@ mod tests {
     use yaml_rust2::{Yaml, YamlLoader};
 
     use super::*;
+    use crate::style::testing::{assert_balanced, assert_only_document_codes, strip};
 
     fn tree(yaml: &Yaml) -> Json {
         match yaml {
@@ -471,5 +494,227 @@ nested:
         assert!(!out.starts_with("---") && !out.contains("\n..."));
         assert!(!out.contains('\t'));
         assert!(out.lines().all(|line| line == line.trim_end()));
+    }
+
+    const CYAN: &str = "\u{1b}[36m";
+    const DIM: &str = "\u{1b}[2m";
+    const RESET: &str = "\u{1b}[0m";
+
+    /// A key token as the styled document writes it, spelled out here so the expectations do
+    /// not use the code under test.
+    fn key(token: &str) -> String {
+        format!("{CYAN}{token}{RESET}")
+    }
+
+    fn null() -> String {
+        format!("{DIM}null{RESET}")
+    }
+
+    #[test]
+    fn a_styled_document_wraps_every_key_and_every_null_and_nothing_else() {
+        let want = [
+            format!("{}: 1", key("schema_version")),
+            format!("{}: \"eth0\"", key("name")),
+            format!("{}: true", key("virtual")),
+            format!("{}: {}", key("missing"), null()),
+            format!("{}: []", key("empty_list")),
+            format!("{}: {{}}", key("empty_object")),
+            format!("{}:", key("tags")),
+            "  - \"a\"".to_owned(),
+            "  - \"b\"".to_owned(),
+            format!("{}:", key("nested")),
+            format!("  {}:", key("list")),
+            format!("    - {}: 2", key("k")),
+            format!("      {}: \"x\"", key("j")),
+            "    - []".to_owned(),
+            "    - {}".to_owned(),
+            "    - - 1".to_owned(),
+            "      - - 2".to_owned(),
+            format!("    - {}:", key("items")),
+            "        - \"p\"".to_owned(),
+            "        - \"q\"".to_owned(),
+            format!("  {}: -3", key("\"no\"")),
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(render_styled(&doc(), Style::Ansi), want);
+        assert_eq!(render_styled(&doc(), Style::Plain), render(&doc()));
+    }
+
+    #[test]
+    fn a_quoted_key_is_one_span_with_its_quotes_and_the_colon_stays_outside() {
+        let tree = Json::object([
+            ("no", Json::Null),
+            ("a b", "null".into()),
+            ("", 1u32.into()),
+            ("Yes", Json::Array(vec![Json::Null, "null".into()])),
+        ]);
+        let want = format!(
+            "{}: {}\n{}: \"null\"\n{}: 1\n{}:\n  - {}\n  - \"null\"\n",
+            key("\"no\""),
+            null(),
+            key("\"a b\""),
+            key("\"\""),
+            key("\"Yes\""),
+            null(),
+        );
+        assert_eq!(render_styled(&tree, Style::Ansi), want);
+    }
+
+    #[test]
+    fn a_long_key_in_the_explicit_form_is_one_span_and_the_colon_line_is_plain() {
+        let quoted = "\u{e9}".repeat(1500);
+        let bare = "a".repeat(1001);
+        for (raw, token) in [
+            (quoted.clone(), format!("\"{quoted}\"")),
+            (bare.clone(), bare.clone()),
+        ] {
+            assert_eq!(
+                render(&Json::object([(raw.as_str(), Json::Null)])),
+                format!("? {token}\n: null\n")
+            );
+            let tree = Json::object([
+                ("first", Json::Null),
+                (raw.as_str(), Json::Null),
+                ("last", "v".into()),
+            ]);
+            let want = format!(
+                "{}: {}\n? {}\n: {}\n{}: \"v\"\n",
+                key("first"),
+                null(),
+                key(&token),
+                null(),
+                key("last"),
+            );
+            assert_eq!(render_styled(&tree, Style::Ansi), want);
+            let nested = Json::Array(vec![Json::object([(raw.as_str(), "v".into())])]);
+            assert_eq!(
+                render_styled(&nested, Style::Ansi),
+                format!("- ? {}\n  : \"v\"\n", key(&token))
+            );
+        }
+    }
+
+    #[test]
+    fn a_scalar_document_styles_only_a_null() {
+        assert_eq!(
+            render_styled(&Json::Null, Style::Ansi),
+            format!("{}\n", null())
+        );
+        for plain in [Json::from("null"), Json::Int(0), Json::Array(vec![])] {
+            assert_eq!(render_styled(&plain, Style::Ansi), render(&plain));
+        }
+    }
+
+    #[test]
+    fn a_hostile_key_or_value_adds_no_escape_byte_to_a_styled_document() {
+        let hostile = "a\u{1b}[31m\n\u{1b}[2J\u{1b}]0;x\u{7}b";
+        let tree = Json::object([(hostile, hostile.into()), ("n", Json::Null)]);
+        let out = render_styled(&tree, Style::Ansi);
+        assert!(out.contains("a\\u001b[31m\\n\\u001b[2J"), "{out:?}");
+        assert_only_document_codes(&out);
+        assert_balanced(&out);
+        // Two keys and one null, each with an opening code and a reset.
+        assert_eq!(out.matches('\u{1b}').count(), 6, "{out:?}");
+        assert_eq!(strip(&out), render(&tree));
+    }
+
+    /// A small deterministic generator, so a failure repeats and no dependency is needed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            usize::try_from(self.0 % n as u64).expect("fits")
+        }
+    }
+
+    fn generated_key(rng: &mut Rng, taken: &[(String, Json)]) -> String {
+        loop {
+            let key = match rng.below(6) {
+                0 => AWKWARD[rng.below(AWKWARD.len())].to_owned(),
+                1 => "a".repeat(990 + rng.below(30)),
+                2 => "\u{e9}\"".repeat(495 + rng.below(30)),
+                3 => format!("k{}", rng.below(50)),
+                4 => ["y", "n", "no", "null", "Yes", "a b", "x:y"][rng.below(7)].to_owned(),
+                _ => format!("{}_{}", ["id", "name", "ip"][rng.below(3)], rng.below(4)),
+            };
+            if taken.iter().all(|(name, _)| *name != key) {
+                return key;
+            }
+        }
+    }
+
+    fn generated_tree(rng: &mut Rng, depth: usize) -> Json {
+        let kinds = if depth == 0 { 5 } else { 7 };
+        match rng.below(kinds) {
+            0 => Json::Null,
+            1 => Json::Bool(rng.below(2) == 0),
+            2 => Json::Int(i64::try_from(rng.below(2000)).expect("fits") - 1000),
+            3 => Json::from(AWKWARD[rng.below(AWKWARD.len())]),
+            4 => [
+                Json::Array(vec![]),
+                Json::object(Vec::<(&str, Json)>::new()),
+            ][rng.below(2)]
+            .clone(),
+            5 => Json::Array(
+                (0..rng.below(4))
+                    .map(|_| generated_tree(rng, depth - 1))
+                    .collect(),
+            ),
+            _ => {
+                let mut fields = Vec::new();
+                for _ in 0..1 + rng.below(4) {
+                    let key = generated_key(rng, &fields);
+                    fields.push((key, generated_tree(rng, depth - 1)));
+                }
+                Json::Object(fields)
+            }
+        }
+    }
+
+    fn count(tree: &Json) -> (usize, usize) {
+        match tree {
+            Json::Null => (0, 1),
+            Json::Array(items) => items.iter().map(count).fold((0, 0), add),
+            Json::Object(fields) => fields
+                .iter()
+                .map(|(_, value)| add((1, 0), count(value)))
+                .fold((0, 0), add),
+            _ => (0, 0),
+        }
+    }
+
+    fn add(a: (usize, usize), b: (usize, usize)) -> (usize, usize) {
+        (a.0 + b.0, a.1 + b.1)
+    }
+
+    #[test]
+    fn stripping_the_codes_of_a_styled_document_gives_the_plain_one_for_any_tree() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let mut trees = vec![doc()];
+        trees.extend((0..400).map(|_| generated_tree(&mut rng, 4)));
+        for tree in trees {
+            let plain = render(&tree);
+            let styled = render_styled(&tree, Style::Ansi);
+            let (keys, nulls) = count(&tree);
+            assert_eq!(strip(&styled), plain, "{tree:?}");
+            assert_eq!(parsed(&strip(&styled)), tree);
+            assert_only_document_codes(&styled);
+            assert_balanced(&styled);
+            assert_eq!(styled.matches(CYAN).count(), keys, "{styled}");
+            assert_eq!(styled.matches(DIM).count(), nulls, "{styled}");
+            assert_eq!(styled.matches(RESET).count(), keys + nulls, "{styled}");
+            assert_eq!(render_styled(&tree, Style::Plain), plain);
+            // The same tree as a pretty JSON document: the same spans, and compact never styled.
+            let json = tree.render_styled(true, Style::Ansi);
+            assert_eq!(strip(&json), tree.render(true), "{tree:?}");
+            assert_only_document_codes(&json);
+            assert_eq!(json.matches(CYAN).count(), keys, "{json}");
+            assert_eq!(json.matches(DIM).count(), nulls, "{json}");
+            assert_eq!(tree.render_styled(false, Style::Ansi), tree.render(false));
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! Colour for the text reports of `local`, `where`, `all` and a `--verify` disagreement
-//! (ADR 0002). Colour is cosmetic: with the codes removed the text is the plain text, byte
-//! for byte, so every span here wraps words that stay.
+//! (ADR 0002), and for the keys and `null`s of `json-pretty` and `yaml` documents (ADR 0005).
+//! Colour is cosmetic: with the codes removed the output is the plain output, byte for byte,
+//! so every span here wraps words that stay.
 
 use std::io::{self, IsTerminal};
 
@@ -51,13 +52,35 @@ impl Terminal {
     }
 }
 
-/// Whether colour is on: the decision order of ADR 0002, first match wins.
+/// What a colour decision is for. It only matters to `CLICOLOR_FORCE` (ADR 0005).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// Help and the text reports.
+    Text,
+    /// A `json-pretty` or `yaml` document, which scripts may read through a pipe.
+    Document,
+}
+
+/// Whether colour is on for help and text: the decision order of ADR 0002, first match wins.
 pub fn enabled(choice: ColorChoice, terminal: &Terminal) -> bool {
+    decide(choice, terminal, Output::Text)
+}
+
+/// Whether colour is on for a `json-pretty` or `yaml` document: the order of [`enabled`],
+/// except that `CLICOLOR_FORCE` does not force it (ADR 0005). Many environments export that
+/// variable for the sake of `ls`, and it must not put escape bytes into `| jq` or `| yq`.
+/// Only `--color always` colours a document that is not on a terminal.
+pub fn enabled_document(choice: ColorChoice, terminal: &Terminal) -> bool {
+    decide(choice, terminal, Output::Document)
+}
+
+/// The one decision order; [`enabled`] and [`enabled_document`] differ only in `output`.
+fn decide(choice: ColorChoice, terminal: &Terminal, output: Output) -> bool {
     match choice {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
         ColorChoice::Auto if terminal.no_color => false,
-        ColorChoice::Auto if terminal.force => true,
+        ColorChoice::Auto if terminal.force && output == Output::Text => true,
         ColorChoice::Auto if terminal.clicolor_off || terminal.dumb => false,
         // myip does not switch the Windows console mode, so only a console that is known to
         // understand the codes gets them on its own.
@@ -74,9 +97,10 @@ const DIM: &str = "\u{1b}[2m";
 const RED: &str = "\u{1b}[31m";
 const GREEN: &str = "\u{1b}[32m";
 const YELLOW: &str = "\u{1b}[33m";
+const CYAN: &str = "\u{1b}[36m";
 
 /// The only escape sequences this program ever writes.
-const CODES: [&str; 7] = [RESET, BOLD, BOLD_CYAN, DIM, RED, GREEN, YELLOW];
+const CODES: [&str; 8] = [RESET, BOLD, BOLD_CYAN, DIM, RED, GREEN, YELLOW, CYAN];
 
 /// How text is written: plain, or with ANSI SGR codes around the spans that carry meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +118,15 @@ impl Style {
         }
     }
 
+    /// [`Style::choose`] for a `json-pretty` or `yaml` document; see [`enabled_document`].
+    pub fn choose_document(choice: ColorChoice, terminal: &Terminal) -> Self {
+        if enabled_document(choice, terminal) {
+            Self::Ansi
+        } else {
+            Self::Plain
+        }
+    }
+
     /// Names of blocks and address families.
     pub fn bold(self, text: &str) -> String {
         self.span(BOLD, text)
@@ -104,9 +137,14 @@ impl Style {
         self.span(BOLD_CYAN, text)
     }
 
-    /// Provenance and explanations.
+    /// Provenance and explanations, and the `null` of a document.
     pub fn dim(self, text: &str) -> String {
         self.span(DIM, text)
+    }
+
+    /// A key of a document: the whole token, quotes included.
+    pub fn key(self, text: &str) -> String {
+        self.span(CYAN, text)
     }
 
     /// A verified or agreeing answer.
@@ -163,7 +201,7 @@ impl Style {
 #[cfg(test)]
 pub(crate) mod testing {
     /// Every code this module writes, and nothing else.
-    const CODES: [&str; 7] = [
+    const CODES: [&str; 8] = [
         "\u{1b}[0m",
         "\u{1b}[1m",
         "\u{1b}[1;36m",
@@ -171,6 +209,7 @@ pub(crate) mod testing {
         "\u{1b}[31m",
         "\u{1b}[32m",
         "\u{1b}[33m",
+        "\u{1b}[36m",
     ];
 
     /// `text` without our SGR codes. Any other escape byte stays, so a test can see it.
@@ -178,6 +217,18 @@ pub(crate) mod testing {
         CODES
             .iter()
             .fold(text.to_owned(), |text, code| text.replace(code, ""))
+    }
+
+    /// A document holds no escape byte but the cyan of its keys, the dim of its `null`s and
+    /// their resets.
+    pub fn assert_only_document_codes(text: &str) {
+        let rest = ["\u{1b}[36m", "\u{1b}[2m", "\u{1b}[0m"]
+            .iter()
+            .fold(text.to_owned(), |text, code| text.replace(code, ""));
+        assert!(
+            !rest.contains('\u{1b}'),
+            "an escape byte that is not a key or null code in {text:?}"
+        );
     }
 
     /// Every line opens and closes its own spans: nothing stays coloured across a newline,
@@ -491,6 +542,272 @@ mod tests {
         assert!(!enabled(Auto, &Terminal::default()));
         assert!(!enabled(Never, &Terminal::default()));
         assert!(enabled(Always, &Terminal::default()));
+        assert!(!enabled_document(Auto, &Terminal::default()));
+        assert!(!enabled_document(Never, &Terminal::default()));
+        assert!(enabled_document(Always, &Terminal::default()));
+    }
+
+    /// (choice, environment, stdout is a terminal, windows, text, document, why)
+    type DocumentRow = (
+        ColorChoice,
+        &'static [(&'static str, &'static str)],
+        bool,
+        bool,
+        bool,
+        bool,
+        &'static str,
+    );
+
+    #[test]
+    fn a_document_follows_the_order_of_adr_0005_and_clicolor_force_does_not_force_it() {
+        let none: &'static [(&str, &str)] = &[];
+        let force: &'static [(&str, &str)] = &[("CLICOLOR_FORCE", "1")];
+        let table: &[DocumentRow] = &[
+            (
+                Always,
+                none,
+                false,
+                false,
+                true,
+                true,
+                "always colours a pipe",
+            ),
+            (
+                Always,
+                &[("NO_COLOR", "1")],
+                false,
+                false,
+                true,
+                true,
+                "--color always plus NO_COLOR: the flag wins",
+            ),
+            (
+                Always,
+                &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")],
+                false,
+                false,
+                true,
+                true,
+                "the flag beats both",
+            ),
+            (
+                Always,
+                &[("TERM", "dumb")],
+                false,
+                false,
+                true,
+                true,
+                "the flag beats TERM=dumb",
+            ),
+            (
+                Always,
+                &[("CLICOLOR", "0")],
+                true,
+                false,
+                true,
+                true,
+                "the flag beats CLICOLOR=0",
+            ),
+            (
+                Always,
+                none,
+                false,
+                true,
+                true,
+                true,
+                "always needs no console hint",
+            ),
+            (
+                Never,
+                none,
+                true,
+                false,
+                false,
+                false,
+                "never beats a terminal",
+            ),
+            (
+                Never,
+                force,
+                true,
+                false,
+                false,
+                false,
+                "never beats CLICOLOR_FORCE",
+            ),
+            (Auto, none, true, false, true, true, "a terminal"),
+            (Auto, none, false, false, false, false, "a pipe"),
+            (
+                Auto,
+                &[("NO_COLOR", "1")],
+                true,
+                false,
+                false,
+                false,
+                "NO_COLOR non-empty turns it off",
+            ),
+            (
+                Auto,
+                &[("NO_COLOR", "")],
+                true,
+                false,
+                true,
+                true,
+                "an empty NO_COLOR is not set",
+            ),
+            (
+                Auto,
+                &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")],
+                true,
+                false,
+                false,
+                false,
+                "NO_COLOR beats CLICOLOR_FORCE",
+            ),
+            (
+                Auto,
+                force,
+                false,
+                false,
+                true,
+                false,
+                "CLICOLOR_FORCE colours a text pipe and does not colour a document pipe",
+            ),
+            (
+                Auto,
+                &[("CLICOLOR_FORCE", "yes")],
+                false,
+                false,
+                true,
+                false,
+                "any non-empty value but 0 forces text only",
+            ),
+            (
+                Auto,
+                force,
+                true,
+                false,
+                true,
+                true,
+                "CLICOLOR_FORCE on a terminal: the terminal decides a document",
+            ),
+            (
+                Auto,
+                &[("CLICOLOR_FORCE", "1"), ("CLICOLOR", "0")],
+                true,
+                false,
+                true,
+                false,
+                "CLICOLOR=0 still applies to a document that CLICOLOR_FORCE would have forced",
+            ),
+            (
+                Auto,
+                &[("CLICOLOR_FORCE", "1"), ("TERM", "dumb")],
+                true,
+                false,
+                true,
+                false,
+                "TERM=dumb still applies to a document",
+            ),
+            (
+                Auto,
+                &[("CLICOLOR_FORCE", "0")],
+                true,
+                false,
+                true,
+                true,
+                "CLICOLOR_FORCE=0 changes nothing",
+            ),
+            (
+                Auto,
+                &[("CLICOLOR", "0")],
+                true,
+                false,
+                false,
+                false,
+                "CLICOLOR=0 turns it off",
+            ),
+            (
+                Auto,
+                &[("CLICOLOR", "1")],
+                false,
+                false,
+                false,
+                false,
+                "CLICOLOR=1 does not force",
+            ),
+            (
+                Auto,
+                &[("TERM", "dumb")],
+                true,
+                false,
+                false,
+                false,
+                "a dumb terminal",
+            ),
+            (
+                Auto,
+                &[("TERM", "xterm-256color")],
+                true,
+                false,
+                true,
+                true,
+                "a capable terminal",
+            ),
+            (
+                Auto,
+                none,
+                true,
+                true,
+                false,
+                false,
+                "a legacy Windows console",
+            ),
+            (
+                Auto,
+                &[("WT_SESSION", "x")],
+                true,
+                true,
+                true,
+                true,
+                "Windows Terminal",
+            ),
+            (
+                Auto,
+                &[("WT_SESSION", "x")],
+                false,
+                true,
+                false,
+                false,
+                "a pipe in Windows Terminal",
+            ),
+            (
+                Auto,
+                force,
+                false,
+                true,
+                true,
+                false,
+                "CLICOLOR_FORCE on Windows forces text only",
+            ),
+        ];
+        for (choice, vars, tty, windows, text, document, why) in table {
+            let terminal = terminal(vars, *tty, *windows);
+            let label = format!("{choice:?} {vars:?} tty={tty} windows={windows}: {why}");
+            assert_eq!(enabled(*choice, &terminal), *text, "text, {label}");
+            assert_eq!(
+                enabled_document(*choice, &terminal),
+                *document,
+                "document, {label}"
+            );
+            let style = |on: bool| if on { Style::Ansi } else { Style::Plain };
+            assert_eq!(Style::choose(*choice, &terminal), style(*text), "{label}");
+            assert_eq!(
+                Style::choose_document(*choice, &terminal),
+                style(*document),
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -502,6 +819,13 @@ mod tests {
         assert_eq!(Style::Ansi.good("x"), "\u{1b}[32mx\u{1b}[0m");
         assert_eq!(Style::Ansi.warn("x"), "\u{1b}[33mx\u{1b}[0m");
         assert_eq!(Style::Ansi.bad("x"), "\u{1b}[31mx\u{1b}[0m");
+    }
+
+    #[test]
+    fn a_key_is_cyan_when_styled_and_the_bare_words_when_plain() {
+        assert_eq!(Style::Ansi.key("\"x\""), "\u{1b}[36m\"x\"\u{1b}[0m");
+        assert_eq!(Style::Ansi.key(""), "");
+        assert_eq!(Style::Plain.key("\"x\""), "\"x\"");
     }
 
     #[test]
@@ -582,6 +906,20 @@ mod tests {
         assert_eq!(testing::strip(text), "axbc\n");
         testing::assert_balanced(text);
         assert_eq!(testing::strip("\u{1b}[2J"), "\u{1b}[2J");
+    }
+
+    #[test]
+    fn the_document_helper_accepts_the_key_and_null_codes_and_nothing_else() {
+        testing::assert_only_document_codes("\u{1b}[36m\"a\"\u{1b}[0m: \u{1b}[2mnull\u{1b}[0m");
+        assert!(
+            std::panic::catch_unwind(|| {
+                testing::assert_only_document_codes("\u{1b}[31mred\u{1b}[0m");
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| testing::assert_only_document_codes("a\u{1b}[2J")).is_err()
+        );
     }
 
     #[test]

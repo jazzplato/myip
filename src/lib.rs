@@ -62,12 +62,15 @@ pub struct Context<'a> {
 }
 
 impl Context<'_> {
-    /// How text on stdout is written. Documents are never styled, whatever `--color` says.
+    /// How stdout is written: text for people, or the keys and `null` of a `json-pretty` or
+    /// `yaml` document. Compact `json` is the machine line and is never styled.
     pub fn style(&self, options: &cli::Options) -> Style {
-        if options.format().is_document() {
-            Style::Plain
-        } else {
-            Style::choose(options.color, &self.terminal)
+        match options.format() {
+            cli::Format::Json => Style::Plain,
+            cli::Format::JsonPretty | cli::Format::Yaml => {
+                Style::choose_document(options.color, &self.terminal)
+            }
+            cli::Format::Text => Style::choose(options.color, &self.terminal),
         }
     }
 }
@@ -162,7 +165,7 @@ mod tests {
     use crate::http::{Family, FetchError, FetchOptions, ProxyMode, Response};
     use crate::ifaces::testing::{FakeInterfaces, iface};
     use crate::public::PROVIDERS;
-    use crate::style::testing::{assert_balanced, strip};
+    use crate::style::testing::{assert_balanced, assert_only_document_codes, strip};
 
     /// A global address, so the public lookup accepts it.
     const PUBLIC_IP: &str = "1.2.3.4";
@@ -3139,11 +3142,11 @@ mod tests {
             (terminal_with(true, &[("TERM", "dumb")]), &["where"], false),
             (tty(), &["--format", "json", "where"], false),
             (tty(), &["--json", "where"], false),
-            (tty(), &["--format", "yaml", "where"], false),
+            (tty(), &["--format", "yaml", "where"], true),
             (
                 tty(),
                 &["--color", "always", "--format", "json-pretty", "where"],
-                false,
+                true,
             ),
             (tty(), &["--color", "always", "--json", "where"], false),
         ];
@@ -3503,7 +3506,7 @@ mod tests {
     }
 
     #[test]
-    fn colour_never_reaches_the_headline_the_passthrough_a_failure_or_a_document() {
+    fn colour_never_reaches_the_headline_the_passthrough_a_failure_or_compact_json() {
         for (args, fixture) in [
             (&["public"][..], agree as Fixture),
             (&["public", "--verify"], agree),
@@ -3542,20 +3545,20 @@ mod tests {
         }
 
         for (args, code, fixture) in documents() {
-            for format in ["json", "json-pretty", "yaml"] {
-                let plain = laptop_run(&fixture(), &flagged(&["--format", format], args));
-                let styled = laptop_run(
-                    &fixture(),
-                    &flagged(&["--color", "always", "--format", format], args),
-                );
-                assert_eq!(plain.0, code, "{args:?}");
-                assert_eq!(
-                    (styled.0, steady(&styled.1), steady(&styled.2)),
-                    (plain.0, steady(&plain.1), steady(&plain.2)),
-                    "{format} {args:?}"
-                );
-                assert!(!styled.1.contains('\u{1b}'), "{format} {args:?}");
-            }
+            let plain = laptop_run(&fixture(), &flagged(&["--format", "json"], args));
+            let styled = laptop_run(
+                &fixture(),
+                &flagged(&["--color", "always", "--format", "json"], args),
+            );
+            assert_eq!(plain.0, code, "{args:?}");
+            assert_eq!(
+                (styled.0, steady(&styled.1), steady(&styled.2)),
+                (plain.0, steady(&plain.1), steady(&plain.2)),
+                "{args:?}"
+            );
+            assert!(!styled.1.contains('\u{1b}'), "{args:?}");
+            let flag = laptop_run(&fixture(), &flagged(&["--color", "always", "--json"], args));
+            assert_eq!(steady_run(flag), steady_run(styled), "{args:?}");
         }
     }
 
@@ -3842,6 +3845,204 @@ mod tests {
             coloured_runs > 800,
             "only {coloured_runs} runs were coloured"
         );
+    }
+
+    const CYAN: &str = "\u{1b}[36m";
+
+    /// How many keys and how many `null`s a document holds: the spans its colour must have.
+    fn keys_and_nulls(yaml: &yaml_rust2::Yaml) -> (usize, usize) {
+        use yaml_rust2::Yaml;
+        let add = |a: (usize, usize), b: (usize, usize)| (a.0 + b.0, a.1 + b.1);
+        match yaml {
+            Yaml::Null => (0, 1),
+            Yaml::Array(items) => items.iter().map(keys_and_nulls).fold((0, 0), add),
+            Yaml::Hash(map) => map
+                .values()
+                .map(|value| add((1, 0), keys_and_nulls(value)))
+                .fold((0, 0), add),
+            _ => (0, 0),
+        }
+    }
+
+    #[test]
+    fn a_coloured_document_is_the_plain_one_with_codes_added_and_nothing_else() {
+        // The last machine cannot list its interfaces, so `local` fails on it; the document is there anyway.
+        let machines: [(Build, bool); 4] = [
+            (Machine::quiet, false),
+            (Machine::laptop, false),
+            (Machine::pod, false),
+            (Machine::without_interface_access, true),
+        ];
+        let mut coloured_runs = 0;
+        for (machine, blind) in machines {
+            for (args, code, fixture) in documents() {
+                let code = if blind && args == ["local"] { 1 } else { code };
+                for format in ["json-pretty", "yaml"] {
+                    let plain = run_on(
+                        &machine().host(),
+                        &fixture(),
+                        &flagged(&["--color", "never", "--format", format], args),
+                    );
+                    let (styled_code, out, err) = run_on(
+                        &machine().host(),
+                        &fixture(),
+                        &flagged(&["--color", "always", "--format", format], args),
+                    );
+                    let label = format!("{format} {args:?} (exit {})", plain.0);
+                    assert_eq!(plain.0, code, "{label}");
+                    assert_eq!((styled_code, steady(&err)), (plain.0, steady(&plain.2)));
+                    assert!(!err.contains('\u{1b}'), "{label}: {err:?}");
+                    assert_eq!(steady(&strip(&out)), steady(&plain.1), "{label}");
+                    assert_eq!(read(&strip(&out)), read(&plain.1), "{label}");
+                    assert_only_document_codes(&out);
+                    assert_balanced(&out);
+                    let (keys, nulls) = keys_and_nulls(&read(&plain.1));
+                    assert!(keys > 0, "{label}");
+                    assert_eq!(out.matches(CYAN).count(), keys, "{label}\n{out}");
+                    assert_eq!(out.matches(DIM).count(), nulls, "{label}\n{out}");
+                    coloured_runs += 1;
+                }
+            }
+        }
+        assert_eq!(coloured_runs, 96);
+    }
+
+    #[test]
+    fn a_document_is_coloured_by_the_flag_or_a_terminal_and_clicolor_force_does_not_force_it() {
+        let cases: [(Terminal, &[&str], bool); 14] = [
+            (Terminal::default(), &[], false),
+            (tty(), &[], true),
+            (tty(), &["--color", "auto"], true),
+            (tty(), &["--color", "never"], false),
+            (Terminal::default(), &["--color", "always"], true),
+            (terminal_with(false, &[("CLICOLOR_FORCE", "1")]), &[], false),
+            (
+                terminal_with(false, &[("CLICOLOR_FORCE", "1")]),
+                &["--color", "always"],
+                true,
+            ),
+            (terminal_with(true, &[("CLICOLOR_FORCE", "1")]), &[], true),
+            (
+                terminal_with(true, &[("CLICOLOR_FORCE", "1"), ("CLICOLOR", "0")]),
+                &[],
+                false,
+            ),
+            (terminal_with(true, &[("NO_COLOR", "1")]), &[], false),
+            (
+                terminal_with(true, &[("NO_COLOR", "1")]),
+                &["--color", "always"],
+                true,
+            ),
+            (terminal_with(true, &[("CLICOLOR", "0")]), &[], false),
+            (terminal_with(true, &[("TERM", "dumb")]), &[], false),
+            (
+                terminal_with(true, &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")]),
+                &[],
+                false,
+            ),
+        ];
+        for format in ["json-pretty", "yaml"] {
+            for (terminal, flags, colour) in &cases {
+                let args = flagged(
+                    &["--format", format],
+                    &[flags.to_vec(), vec!["where"]].concat(),
+                );
+                let (code, out, err) = run_in(
+                    &Machine::pod().host(),
+                    &no_network(),
+                    terminal.clone(),
+                    &args,
+                );
+                assert_eq!(code, 0, "{args:?}: {err}");
+                assert_eq!(
+                    out.contains(CYAN),
+                    *colour,
+                    "{args:?} on {terminal:?}: {out:?}"
+                );
+                assert_eq!(out.contains('\u{1b}'), *colour, "{args:?} on {terminal:?}");
+                assert!(!err.contains('\u{1b}'), "{args:?}: {err:?}");
+            }
+        }
+        // The text of the same command is still forced by CLICOLOR_FORCE.
+        let (_, out, _) = run_in(
+            &Machine::pod().host(),
+            &no_network(),
+            terminal_with(false, &[("CLICOLOR_FORCE", "1")]),
+            &["where"],
+        );
+        assert!(out.contains('\u{1b}'), "{out:?}");
+    }
+
+    #[test]
+    fn compact_json_is_never_coloured_whatever_the_terminal_and_the_flag_say() {
+        for terminal in [
+            Terminal::default(),
+            tty(),
+            terminal_with(false, &[("CLICOLOR_FORCE", "1")]),
+            terminal_with(true, &[("CLICOLOR_FORCE", "1")]),
+        ] {
+            for spelled in [
+                &["--format", "json", "where"][..],
+                &["--json", "where"],
+                &["--color", "always", "--format", "json", "where"],
+                &["--color", "always", "--json", "where"],
+                &["--color", "always", "--json", "local"],
+                &["--color", "always", "--json", "all"],
+            ] {
+                let (code, out, err) =
+                    run_in(&Machine::pod().host(), &agree(), terminal.clone(), spelled);
+                assert_eq!(code, 0, "{spelled:?}: {err}");
+                assert!(!out.contains('\u{1b}'), "{spelled:?}: {out:?}");
+                assert!(out.starts_with('{') && out.ends_with("}\n"), "{out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_trace_next_to_a_coloured_document_stays_plain() {
+        for format in ["json-pretty", "yaml"] {
+            let (code, out, err) = coloured(
+                &Machine::pod(),
+                &split(),
+                &["-v", "--format", format, "all", "--verify"],
+            );
+            assert_eq!(code, 3);
+            assert!(out.contains(CYAN), "{format}: {out:?}");
+            assert!(err.contains("myip: "), "{format}: {err:?}");
+            assert!(!err.contains('\u{1b}'), "{format}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn hostile_text_stays_visible_and_unstyled_in_a_coloured_document() {
+        let commands: [&[&str]; 3] = [&["local"], &["where"], &["all"]];
+        let mut coloured_runs = 0;
+        for source in SOURCES {
+            for bad in HOSTILE {
+                let payload = format!("a{bad}INJECT");
+                for command in commands {
+                    for format in ["json-pretty", "yaml"] {
+                        let label = format!("{source} / {bad:?} / {command:?} / {format}");
+                        let plain = run_on(
+                            &machine_with(source, &payload).host(),
+                            &everyone_says(PUBLIC_IP),
+                            &flagged(&["--color", "never", "--format", format], command),
+                        );
+                        let (code, out, err) = run_on(
+                            &machine_with(source, &payload).host(),
+                            &everyone_says(PUBLIC_IP),
+                            &flagged(&["--color", "always", "--format", format], command),
+                        );
+                        assert_eq!((code, steady(&err)), (plain.0, steady(&plain.2)), "{label}");
+                        assert_eq!(steady(&strip(&out)), steady(&plain.1), "{label}");
+                        assert_only_document_codes(&out);
+                        assert_balanced(&out);
+                        coloured_runs += usize::from(out.contains(CYAN));
+                    }
+                }
+            }
+        }
+        assert_eq!(coloured_runs, SOURCES.len() * HOSTILE.len() * 6);
     }
 
     #[test]

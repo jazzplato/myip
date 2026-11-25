@@ -437,12 +437,173 @@ fn the_environment_steers_auto_and_the_flag_overrules_it() {
     assert!(!styled(&["where"], &[]));
 }
 
+/// The only escape sequences a document holds: cyan keys, dim `null`s and their resets.
+fn only_document_codes(text: &str) {
+    let rest = ["\u{1b}[36m", "\u{1b}[2m", "\u{1b}[0m"]
+        .iter()
+        .fold(text.to_owned(), |text, code| text.replace(code, ""));
+    assert!(!rest.contains('\u{1b}'), "{text:?}");
+}
+
+/// `text` without what varies between two runs of the same command through a proxy that
+/// hangs up: each measured latency and each error message, whose wording depends on how the
+/// platform reports a connection that was closed.
+fn without_noise(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let field = line.trim_start();
+            if line.contains("latency_ms") {
+                "latency_ms"
+            } else if field.starts_with("\"error\": \"") || field.starts_with("error: \"") {
+                "error"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `local`, `where` and `all`; `all` goes through a proxy that hangs up, so it never leaves
+/// the machine and still prints its document.
+fn document_commands() -> Vec<(Vec<String>, bool)> {
+    let proxy = hangup_proxy();
+    let all = ["--proxy", &proxy, "--timeout", "2", "all"].map(str::to_owned);
+    vec![
+        (vec!["local".to_owned()], false),
+        (vec!["where".to_owned()], false),
+        (all.to_vec(), true),
+    ]
+}
+
+fn args_of<'a>(flags: &[&'a str], command: &'a [String]) -> Vec<&'a str> {
+    flags
+        .iter()
+        .copied()
+        .chain(command.iter().map(String::as_str))
+        .collect()
+}
+
 #[test]
-fn colour_never_reaches_a_document_a_trace_or_a_usage_error() {
+fn a_pretty_document_with_always_adds_only_key_and_null_codes() {
+    for (command, measured) in document_commands() {
+        for format in ["json-pretty", "yaml"] {
+            let label = format!("{format} {command:?}");
+            let plain = myip_with(
+                &args_of(&["--color", "never", "--format", format], &command),
+                &[],
+            );
+            let always = myip_with(
+                &args_of(&["--color", "always", "--format", format], &command),
+                &[],
+            );
+            assert!(matches!(always.status.code(), Some(0 | 1)), "{label}");
+            assert_eq!(always.status, plain.status, "{label}");
+            let styled = text(&always.stdout);
+            assert!(styled.contains("\u{1b}[36m"), "{label}: {styled:?}");
+            only_document_codes(&styled);
+            let (unstyled, want) = (without_codes(&styled), text(&plain.stdout));
+            if measured {
+                assert_eq!(without_noise(&unstyled), without_noise(&want), "{label}");
+            } else {
+                assert_eq!(unstyled, want, "{label}");
+                assert_eq!(
+                    parsed(unstyled.as_bytes()),
+                    parsed(&plain.stdout),
+                    "{label}"
+                );
+            }
+            assert!(!text(&always.stderr).contains('\u{1b}'), "{label}");
+        }
+    }
+}
+
+#[test]
+fn compact_json_with_always_has_no_escape_byte_at_all() {
+    for (command, _) in document_commands() {
+        for flags in [
+            &["--color", "always", "--format", "json"][..],
+            &["--color", "always", "--json"],
+            &["--json", "--color", "always"],
+        ] {
+            let out = myip_with(&args_of(flags, &command), &[("CLICOLOR_FORCE", "1")]);
+            assert!(
+                matches!(out.status.code(), Some(0 | 1)),
+                "{flags:?} {command:?}"
+            );
+            assert!(!out.stdout.contains(&0x1b), "{flags:?} {command:?}");
+            assert!(!out.stderr.contains(&0x1b), "{flags:?} {command:?}");
+            assert!(out.stdout.starts_with(b"{"), "{flags:?} {command:?}");
+        }
+    }
+}
+
+#[test]
+fn clicolor_force_colours_the_text_and_not_a_document() {
+    for (command, measured) in document_commands() {
+        for format in ["json-pretty", "yaml", "json"] {
+            let args = args_of(&["--format", format], &command);
+            let out = myip_with(&args, &[("CLICOLOR_FORCE", "1")]);
+            assert!(matches!(out.status.code(), Some(0 | 1)), "{args:?}");
+            assert!(!out.stdout.contains(&0x1b), "{args:?}");
+            assert!(!out.stderr.contains(&0x1b), "{args:?}");
+            let plain = myip_with(&args, &[]);
+            assert_eq!(out.status, plain.status, "{args:?}");
+            if measured {
+                let (got, want) = (text(&out.stdout), text(&plain.stdout));
+                assert_eq!(without_noise(&got), without_noise(&want), "{args:?}");
+            } else {
+                assert_eq!(out.stdout, plain.stdout, "{args:?}");
+            }
+        }
+    }
+    let forced = myip_with(&["where"], &[("CLICOLOR_FORCE", "1")]);
+    assert!(text(&forced.stdout).contains('\u{1b}'));
+}
+
+type Case = (
+    &'static [&'static str],
+    &'static [(&'static str, &'static str)],
+);
+
+#[test]
+fn without_colour_every_format_is_byte_for_byte_what_it_was() {
+    let cases: [Case; 8] = [
+        (&["--color", "never"], &[]),
+        (&["--color", "auto"], &[]),
+        (&["--color=never"], &[("CLICOLOR_FORCE", "1")]),
+        (&[], &[("NO_COLOR", "1")]),
+        (&[], &[("CLICOLOR", "0")]),
+        (&[], &[("TERM", "dumb")]),
+        (&[], &[("CLICOLOR_FORCE", "0")]),
+        (&[], &[]),
+    ];
+    for command in ["local", "where"] {
+        for format in ["text", "json", "json-pretty", "yaml"] {
+            let plain = myip_with(&["--format", format, command], &[]);
+            assert!(
+                matches!(plain.status.code(), Some(0 | 1)),
+                "{format} {command}"
+            );
+            assert!(!plain.stdout.contains(&0x1b), "{format} {command}");
+            for (flags, env) in cases {
+                let args = [flags, &["--format", format, command]].concat();
+                let out = myip_with(&args, env);
+                assert_eq!(out.status, plain.status, "{args:?} {env:?}");
+                assert_eq!(out.stdout, plain.stdout, "{args:?} {env:?}");
+                assert_eq!(out.stderr, plain.stderr, "{args:?} {env:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn colour_never_reaches_compact_json_a_trace_or_a_usage_error() {
     for args in [
         &["--color", "always", "--json", "where"][..],
-        &["--color", "always", "--format", "yaml", "where"],
-        &["--color", "always", "--format", "json-pretty", "local"],
+        &["--color", "always", "--format", "json", "where"],
+        &["--color", "always", "--json", "local"],
+        &["--color", "always", "--format", "json", "local"],
     ] {
         let out = myip_with(args, &[("CLICOLOR_FORCE", "1")]);
         assert!(!text(&out.stdout).contains('\u{1b}'), "{args:?}");
@@ -451,6 +612,12 @@ fn colour_never_reaches_a_document_a_trace_or_a_usage_error() {
     }
     let out = myip_with(&["-v", "--color", "always", "where"], &[]);
     assert!(text(&out.stdout).contains('\u{1b}'));
+    assert!(!text(&out.stderr).contains('\u{1b}'));
+    let out = myip_with(
+        &["-v", "--color", "always", "--format", "yaml", "where"],
+        &[],
+    );
+    assert!(text(&out.stdout).contains("\u{1b}[36m"));
     assert!(!text(&out.stderr).contains('\u{1b}'));
 
     for args in [
