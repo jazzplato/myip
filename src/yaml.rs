@@ -708,6 +708,13 @@ nested:
             assert_eq!(styled.matches(DIM).count(), nulls, "{styled}");
             assert_eq!(styled.matches(RESET).count(), keys + nulls, "{styled}");
             assert_eq!(render_styled(&tree, Style::Plain), plain);
+            // The same tree as a pretty JSON document: the same spans, and compact never styled.
+            let json = tree.render_styled(true, Style::Ansi);
+            assert_eq!(strip(&json), tree.render(true), "{tree:?}");
+            assert_only_document_codes(&json);
+            assert_eq!(json.matches(CYAN).count(), keys, "{json}");
+            assert_eq!(json.matches(DIM).count(), nulls, "{json}");
+            assert_eq!(tree.render_styled(false, Style::Ansi), tree.render(false));
         }
     }
 }
