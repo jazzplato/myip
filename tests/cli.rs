@@ -334,14 +334,17 @@ fn myip_with(args: &[&str], env: &[(&str, &str)]) -> Output {
     command.output().expect("spawn myip")
 }
 
-/// Removes the colour codes of ADR 0002 (`ESC [ digits m`) and nothing else.
+/// Removes the colour codes of ADR 0002 (`ESC [ digits and semicolons m`) and nothing else.
 fn without_codes(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(at) = rest.find("\u{1b}[") {
         out.push_str(&rest[..at]);
         let tail = &rest[at + 2..];
-        let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let digits = tail.len()
+            - tail
+                .trim_start_matches(|c: char| c.is_ascii_digit() || c == ';')
+                .len();
         match tail[digits..].strip_prefix('m') {
             Some(after) => rest = after,
             None => {
@@ -370,10 +373,43 @@ fn a_pipe_gets_plain_text_and_always_adds_only_codes() {
     assert!(always.stderr.is_empty());
     let styled = text(&always.stdout);
     assert!(
-        styled.starts_with("\u{1b}[1menvironment\u{1b}[0m"),
+        styled.starts_with("\u{1b}[1;36menvironment\u{1b}[0m"),
         "{styled:?}"
     );
     assert_eq!(without_codes(&styled), plain);
+}
+
+#[test]
+fn every_way_of_turning_colour_off_prints_the_same_bytes_for_text_and_documents() {
+    for args in [
+        &["where"][..],
+        &["--format", "json", "where"],
+        &["--format", "json-pretty", "where"],
+        &["--format", "yaml", "where"],
+    ] {
+        let never = myip_with(&[&["--color", "never"][..], args].concat(), &[]);
+        assert_eq!(never.status.code(), Some(0), "{args:?}");
+        assert!(!text(&never.stdout).contains('\u{1b}'), "{args:?}");
+        for (spelled, env) in [
+            (args.to_vec(), &[][..]),
+            (
+                [&["--color", "auto"][..], args].concat(),
+                &[("CLICOLOR", "0")][..],
+            ),
+            (
+                args.to_vec(),
+                &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")][..],
+            ),
+            (args.to_vec(), &[("TERM", "dumb")][..]),
+        ] {
+            let out = myip_with(&spelled, env);
+            assert_eq!(
+                (out.status.code(), &out.stdout, &out.stderr),
+                (never.status.code(), &never.stdout, &never.stderr),
+                "{spelled:?} {env:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -456,7 +492,7 @@ fn a_real_terminal_gets_colour_by_default_and_not_with_no_color() {
         text(&out.stdout)
     };
     let on = run(&[]);
-    assert!(on.contains("\u{1b}[1menvironment\u{1b}[0m"), "{on:?}");
+    assert!(on.contains("\u{1b}[1;36menvironment\u{1b}[0m"), "{on:?}");
     let off = run(&[("NO_COLOR", "1")]);
     assert!(off.starts_with("environment"), "{off:?}");
     assert!(!off.contains('\u{1b}'), "{off:?}");

@@ -474,7 +474,7 @@ fn render_interfaces(out: &mut String, list: &[InterfaceInfo], style: Style) {
         .max()
         .unwrap_or(0);
     for interface in list {
-        out.push_str(&format!("  {}", style.bold(&shown_name(&interface.name))));
+        out.push_str(&format!("  {}", style.name(&shown_name(&interface.name))));
         if interface.likely_virtual {
             out.push(' ');
             out.push_str(&style.warn("(likely virtual)"));

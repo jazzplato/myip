@@ -774,10 +774,10 @@ impl Location {
     }
 }
 
-/// A row: the label in bold, padded to the value column outside the span.
+/// A row: the label in bold cyan, padded to the value column outside the span.
 fn row(out: &mut String, style: Style, label: &str, value: String) {
     let pad = " ".repeat(15usize.saturating_sub(label.chars().count()));
-    out.push_str(&format!("{}{pad}{value}\n", style.bold(label)));
+    out.push_str(&format!("{}{pad}{value}\n", style.name(label)));
 }
 
 fn short_id(text: &str) -> String {
@@ -824,6 +824,7 @@ mod tests {
     use crate::env::{ALLOWED_PATHS, ALLOWED_VARS, Access, RecordingEnv};
     use crate::fact::{Basis, Value};
     use crate::sanitize::testing::{FORGERY, assert_forgery_proof};
+    use crate::style::testing::{assert_balanced, strip};
 
     const CGROUP: &str = "/proc/self/cgroup";
     const MOUNTINFO: &str = "/proc/self/mountinfo";
@@ -2092,6 +2093,26 @@ mod tests {
         assert_forgery_proof("location text", |free_text| {
             pod_holding(free_text).render_text()
         });
+    }
+
+    #[test]
+    fn a_field_value_with_an_escape_and_a_newline_is_escaped_before_the_label_is_styled() {
+        let free_text = "a\u{1b}[1;36m\u{1b}[31m\nINJECT";
+        let location = pod_holding(free_text);
+        let styled = location.render(Style::Ansi);
+        let escaped = crate::sanitize::escape(free_text);
+        assert_eq!(escaped, "a\\x1b[1;36m\\x1b[31m\\nINJECT");
+        let row = format!(
+            "\u{1b}[1;36mpod name\u{1b}[0m       {escaped}\u{1b}[2m  (declared: env:POD_NAME)\u{1b}[0m\n"
+        );
+        assert!(styled.contains(&row), "{styled:?}");
+        assert_eq!(strip(&styled), location.render_text());
+        assert!(!strip(&styled).contains('\u{1b}'), "{styled:?}");
+        assert_balanced(&styled);
+        assert!(
+            styled.lines().all(|line| !line.starts_with("INJECT")),
+            "{styled:?}"
+        );
     }
 
     #[test]
