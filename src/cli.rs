@@ -2,7 +2,8 @@
 
 use std::ffi::OsStr;
 
-use clap::builder::TypedValueParser;
+use clap::builder::styling::{AnsiColor, Effects, Style};
+use clap::builder::{Styles, TypedValueParser};
 use clap::error::ErrorKind;
 use clap::{Arg, Args, Command as ClapCommand, Parser, Subcommand, ValueEnum};
 
@@ -16,11 +17,27 @@ Exit codes:
   2  usage error
   3  --verify ran but providers disagreed";
 
+/// The palette of `cargo --help` (ADR 0005). Only the headings, `Usage:`, literals and
+/// placeholders ever reach a person: errors are written without style, so the error, valid
+/// and invalid styles are set to cargo's but are never shown.
+const fn styles() -> Styles {
+    const HEADER: Style = AnsiColor::Green.on_default().effects(Effects::BOLD);
+    const LITERAL: Style = AnsiColor::Cyan.on_default().effects(Effects::BOLD);
+    Styles::styled()
+        .header(HEADER)
+        .usage(HEADER)
+        .literal(LITERAL)
+        .placeholder(AnsiColor::Cyan.on_default())
+        .error(AnsiColor::Red.on_default().effects(Effects::BOLD))
+        .valid(LITERAL)
+        .invalid(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
+}
+
 /// Where am I on the network, and what will others see?
 ///
 /// Without a subcommand, prints what ipinfo.io returns for FIELD (default: json).
 #[derive(Parser, Debug)]
-#[command(name = "myip", version = VERSION.as_str(), after_help = EXIT_CODES)]
+#[command(name = "myip", version = VERSION.as_str(), after_help = EXIT_CODES, styles = styles())]
 #[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(flatten)]
@@ -54,8 +71,8 @@ impl Format {
     }
 }
 
-/// When the text of `local`, `where`, `all` and a `--verify` disagreement carries colour. The
-/// contract is ADR 0002.
+/// When `--help` and the text of `local`, `where`, `all` and a `--verify` disagreement carry
+/// colour. The contract is ADR 0002, amended by ADR 0005.
 #[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ColorChoice {
     /// Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
@@ -65,6 +82,30 @@ pub enum ColorChoice {
     Always,
     /// Never
     Never,
+}
+
+/// The `--color` choice that `--help` has to honour: clap stops at `--help` before a later
+/// `--color` can be parsed, so the arguments are read here. The last `--color VALUE` or
+/// `--color=VALUE` before a bare `--` whose value is `auto`, `always` or `never` wins; with
+/// none, `auto`. A value clap would reject is skipped, as it never reaches the help.
+pub fn prescan_color(args: &[String]) -> ColorChoice {
+    let mut choice = ColorChoice::Auto;
+    let mut args = args
+        .iter()
+        .map(String::as_str)
+        .take_while(|arg| *arg != "--")
+        .peekable();
+    while let Some(arg) = args.next() {
+        let value = match arg.strip_prefix("--color=") {
+            Some(value) => Some(value),
+            None if arg == "--color" => args.peek().copied(),
+            None => None,
+        };
+        if let Some(parsed) = value.and_then(|value| ColorChoice::from_str(value, false).ok()) {
+            choice = parsed;
+        }
+    }
+    choice
 }
 
 #[derive(Args, Debug, Clone)]
@@ -77,7 +118,7 @@ pub struct Options {
     #[arg(long, value_name = "FORMAT", global = true, conflicts_with = "json")]
     pub format: Option<Format>,
 
-    /// Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+    /// Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr)
     #[arg(
         long,
         value_name = "WHEN",
@@ -298,5 +339,67 @@ impl TypedValueParser for ProxyParser {
                 "invalid value for '--proxy <none|env|URL>': expected `none`, `env` or an http://HOST:PORT URL",
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan(args: &[&str]) -> ColorChoice {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        prescan_color(&args)
+    }
+
+    #[test]
+    fn prescan_reads_the_color_flag_in_every_position() {
+        use ColorChoice::{Always, Auto, Never};
+        let table: &[(&[&str], ColorChoice)] = &[
+            (&[], Auto),
+            (&["--help"], Auto),
+            (&["--color", "always", "--help"], Always),
+            (&["--color=never", "--help"], Never),
+            (&["--color=auto", "--help"], Auto),
+            (&["--help", "--color", "never"], Never),
+            (&["--help", "--color=always"], Always),
+            (&["public", "--help", "--color", "always"], Always),
+            (&["public", "--color=always", "--help"], Always),
+            (&["--color", "always", "public", "--help"], Always),
+            (&["-v", "-4", "--color", "never", "where", "--help"], Never),
+            // The last valid spelling wins, before or after the command.
+            (
+                &["--color", "always", "where", "--color", "never", "-h"],
+                Never,
+            ),
+            (&["--color", "never", "--color", "always"], Always),
+            (&["--color=never", "--color", "always"], Always),
+            (&["--color", "always", "--color", "auto"], Auto),
+            // An invalid spelling counts for nothing: it is skipped, or `auto` when alone.
+            (&["--color", "always", "--color", "rainbow"], Always),
+            (&["--color", "rainbow", "--color=never"], Never),
+            (&["--color", "rainbow", "--help"], Auto),
+            (&["--color=", "--help"], Auto),
+            (&["--color", "", "--help"], Auto),
+            (&["--color", "ALWAYS", "--help"], Auto),
+            (&["--color=always=never", "--help"], Auto),
+            // A bare `--` ends the options: what follows is a FIELD, not a flag.
+            (&["--", "--color", "always"], Auto),
+            (&["--color", "always", "--", "--color", "never"], Always),
+            // A flag with no value, and flags that are not `--color`.
+            (&["--help", "--color"], Auto),
+        ];
+        for (args, want) in table {
+            assert_eq!(scan(args), *want, "{args:?}");
+        }
+        for args in [
+            &["--colour", "always", "--help"][..],
+            &["--colorful=always", "--help"],
+            &["--format", "always", "--help"],
+            &["-C", "always", "--help"],
+            &["always", "--help"],
+        ] {
+            assert_eq!(scan(args), ColorChoice::Auto, "{args:?}");
+        }
+        assert_eq!(scan(&["--color", "always", "--color"]), ColorChoice::Always);
     }
 }
