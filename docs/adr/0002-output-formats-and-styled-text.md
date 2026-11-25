@@ -3,6 +3,7 @@
 - Status: accepted
 - Date: 2026-11-22
 - Issue: #46
+- Amended by: [0005](0005-colour-by-default.md) (colour on help, names and `json-pretty`/`yaml`; clap's `color` feature)
 
 ## Context
 0.1.x has one machine format (`--json`, one compact line) and one human format (plain text that is explicitly not stable). Two requests need more: people want to read and diff a document (pretty JSON), Kubernetes and CI users want YAML, and the multi-line text of `local`, `where` and `all` is hard to scan (#40). Each is a new flag, and a flag is part of the output contract of [ADR 0001](0001-product-scope-and-cli-contract.md); a colour mistake is also a way to leak escape bytes into logs, pipes and bug reports. The contract must therefore say, before any code, what the new flags may and may not do.
