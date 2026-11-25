@@ -9,7 +9,7 @@ Download the archive for your platform from the [latest release](https://github.
 
 ```sh
 shasum -a 256 -c --ignore-missing SHA256SUMS
-for f in myip-v*; do gh attestation verify "$f" -R jazzplato/myip || break; done
+(for f in myip-v*; do [ -f "$f" ] || continue; gh attestation verify "$f" -R jazzplato/myip || exit "$?"; done)
 ```
 
 The binaries are not notarized. If macOS refuses one that a browser downloaded, run `xattr -d com.apple.quarantine myip`; `gh release download` and `curl` do not set that flag. Or build from crates.io (needs Rust 1.85 or newer):

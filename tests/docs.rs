@@ -1,8 +1,9 @@
 //! Documentation contract: a command in a fenced shell block runs when pasted as is.
 //!
 //! macOS's default shell is zsh, and an interactive zsh does not treat `#` as a comment, so
-//! `myip local   # in a container` passes the comment to `myip` as arguments. Explain a command
-//! in the prose above the block instead. Reads files only; no network.
+//! `myip local   # in a container` passes the comment to `myip` as arguments. A comment on a
+//! line of its own is the same hazard. Explain a command in the prose above the block
+//! instead. Reads files only; no network.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,8 +28,8 @@ fn is_shell_fence(info: &str) -> bool {
 fn problem(line: &str) -> Option<&'static str> {
     if line.starts_with("$ ") {
         Some("starts with a `$ ` prompt")
-    } else if line.contains(" #") || line.contains("\t#") {
-        Some("has a trailing `#` comment")
+    } else if line.starts_with('#') || line.contains(" #") || line.contains("\t#") {
+        Some("has a `#` comment")
     } else {
         None
     }
