@@ -4,6 +4,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
 ### Changed
 
 - With colour on (`--color always`, or `auto` on a terminal), the field names of `myip where` and `myip all` and the interface names of `myip local` and `myip all` are now bold cyan (one `ESC[1;36m` sequence, as cargo writes its literals) instead of plain bold, so they stand out from the values ([ADR 0005](docs/adr/0005-colour-by-default.md)). Block names, address families, provenance and the green, yellow and red verdicts keep their colours. With the codes removed the text is still exactly what `--color never` prints, and `--color never`, `NO_COLOR`, a pipe and compact JSON are byte for byte what 0.3.0 printed.
@@ -114,7 +116,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 - Initial version: prints the body of `https://ipinfo.io/<FIELD>`.
 
-[Unreleased]: https://github.com/jazzplato/myip/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jazzplato/myip/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jazzplato/myip/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jazzplato/myip/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/jazzplato/myip/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/jazzplato/myip/compare/v0.1.1...v0.2.0
