@@ -174,7 +174,7 @@ pub fn run(options: &Options, verify: bool, ctx: &mut Context<'_>) -> u8 {
 
 fn emit(report: &PublicReport, options: &Options, ctx: &mut Context<'_>) -> u8 {
     let code = report.code();
-    let document = output::document(&report.to_json(), options.format());
+    let document = output::document(&report.to_json(), options.format(), ctx.style(options));
     let is_document = document.is_some();
     let written = if let Some(document) = document {
         ctx.out.write_all(document.as_bytes())

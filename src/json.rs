@@ -2,6 +2,7 @@
 //! Output only: nothing in `myip` parses JSON, so a full serializer would be dead weight.
 
 use crate::sanitize;
+use crate::style::Style;
 
 /// A JSON value whose object keys keep insertion order, so `schema_version` stays first.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +27,11 @@ impl Json {
         let mut out = String::new();
         self.write(&mut out, pretty, 0);
         out
+    }
+
+    /// [`Json::render`] with the keys and `null` styled for a document on a terminal.
+    pub fn render_styled(&self, pretty: bool, _style: Style) -> String {
+        self.render(pretty)
     }
 
     fn write(&self, out: &mut String, pretty: bool, depth: usize) {
@@ -157,6 +163,7 @@ impl<T: Into<Json>> From<Vec<T>> for Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::testing::{assert_balanced, assert_only_document_codes, strip};
 
     fn doc() -> Json {
         Json::object([
@@ -279,5 +286,93 @@ mod tests {
         let value = Json::Array(vec![Json::object([("a", 1u32.into())]), Json::Null]);
         assert_eq!(value.render(false), r#"[{"a":1},null]"#);
         assert_eq!(value.render(true), "[\n  {\n    \"a\": 1\n  },\n  null\n]");
+    }
+
+    const CYAN: &str = "\u{1b}[36m";
+    const DIM: &str = "\u{1b}[2m";
+    const RESET: &str = "\u{1b}[0m";
+
+    /// A key token as the styled document writes it, spelled out here so the expectations do
+    /// not use the code under test.
+    fn key(token: &str) -> String {
+        format!("{CYAN}{token}{RESET}")
+    }
+
+    fn null() -> String {
+        format!("{DIM}null{RESET}")
+    }
+
+    #[test]
+    fn a_styled_document_wraps_every_key_and_every_null_and_nothing_else() {
+        let long = "k".repeat(1500);
+        let tree = Json::object([
+            ("schema_version", 1u32.into()),
+            ("name", "null".into()),
+            ("missing", Json::Null),
+            (
+                "a \"key\"",
+                Json::object([(
+                    "list",
+                    Json::Array(vec![
+                        Json::object([("inner", Json::Null), ("text", "x".into())]),
+                        Json::Null,
+                    ]),
+                )]),
+            ),
+            ("empty", Json::Array(vec![])),
+            (long.as_str(), Json::Null),
+        ]);
+        let want = [
+            "{".to_owned(),
+            format!("  {}: 1,", key("\"schema_version\"")),
+            format!("  {}: \"null\",", key("\"name\"")),
+            format!("  {}: {},", key("\"missing\""), null()),
+            format!("  {}: {{", key(r#""a \"key\"""#)),
+            format!("    {}: [", key("\"list\"")),
+            "      {".to_owned(),
+            format!("        {}: {},", key("\"inner\""), null()),
+            format!("        {}: \"x\"", key("\"text\"")),
+            "      },".to_owned(),
+            format!("      {}", null()),
+            "    ]".to_owned(),
+            "  },".to_owned(),
+            format!("  {}: [],", key("\"empty\"")),
+            format!("  {}: {}", key(&format!("\"{long}\"")), null()),
+            "}".to_owned(),
+        ]
+        .join("\n");
+        assert_eq!(tree.render_styled(true, Style::Ansi), want);
+        assert_eq!(tree.render_styled(true, Style::Plain), tree.render(true));
+    }
+
+    #[test]
+    fn a_scalar_document_styles_only_a_null() {
+        assert_eq!(Json::Null.render_styled(true, Style::Ansi), null());
+        for plain in [Json::from("null"), Json::Int(0), Json::Bool(true)] {
+            assert_eq!(plain.render_styled(true, Style::Ansi), plain.render(true));
+        }
+    }
+
+    #[test]
+    fn compact_json_is_never_styled() {
+        for style in [Style::Plain, Style::Ansi] {
+            assert_eq!(doc().render_styled(false, style), doc().render(false));
+        }
+    }
+
+    #[test]
+    fn a_hostile_key_or_value_adds_no_escape_byte_to_a_styled_document() {
+        let hostile = "a\u{1b}[31m\n\u{1b}[2J\u{1b}]0;x\u{7}b";
+        let tree = Json::object([(hostile, hostile.into()), ("n", Json::Null)]);
+        let out = tree.render_styled(true, Style::Ansi);
+        assert!(
+            out.contains("a\\u001b[31m\\n\\u001b[2J\\u001b]0;x\\u0007b"),
+            "{out:?}"
+        );
+        assert_only_document_codes(&out);
+        assert_balanced(&out);
+        // Two keys and one null, each with an opening code and a reset.
+        assert_eq!(out.matches('\u{1b}').count(), 6, "{out:?}");
+        assert_eq!(strip(&out), tree.render(true));
     }
 }

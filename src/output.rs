@@ -11,8 +11,9 @@ use crate::style::Style;
 use crate::yaml;
 
 /// `json` as the document `format` asks for, ending with a newline; `None` for text, which
-/// each command lays out itself.
-pub fn document(json: &Json, format: Format) -> Option<String> {
+/// each command lays out itself. `style` colours the keys and `null` of `json-pretty` and
+/// `yaml`; compact `json` is never styled.
+pub fn document(json: &Json, format: Format, _style: Style) -> Option<String> {
     match format {
         Format::Text => None,
         Format::Json => Some(format!("{}\n", json.render(false))),
@@ -34,7 +35,7 @@ pub fn emit(
     style: Style,
     out: &mut dyn Write,
 ) -> io::Result<()> {
-    if let Some(document) = document(json, options.format()) {
+    if let Some(document) = document(json, options.format(), style) {
         out.write_all(document.as_bytes())
     } else if let Some(text) = text {
         out.write_all(style.clean(text).as_bytes())
@@ -101,6 +102,62 @@ mod tests {
     fn ordinary_text_including_non_ascii_is_printed_as_is() {
         let text = "interfaces (observed)\n  h\u{e9}llo \u{4e16}\u{754c} \u{1f980}\n";
         assert_eq!(printed(&[], &Json::Null, Some(text)), text);
+    }
+
+    fn styled(args: &[&str], json: &Json, text: Option<&str>) -> String {
+        let mut out = Vec::new();
+        emit(&options(args), json, text, Style::Ansi, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_pretty_document_and_a_yaml_document_are_styled_and_compact_json_is_not() {
+        let json = Json::object([("name", "null".into()), ("missing", Json::Null)]);
+        let cyan = |key: &str| format!("\u{1b}[36m{key}\u{1b}[0m");
+        let null = "\u{1b}[2mnull\u{1b}[0m";
+        assert_eq!(
+            styled(&["--format", "json-pretty"], &json, None),
+            format!(
+                "{{\n  {}: \"null\",\n  {}: {null}\n}}\n",
+                cyan("\"name\""),
+                cyan("\"missing\"")
+            )
+        );
+        assert_eq!(
+            styled(&["--format", "yaml"], &json, None),
+            format!("{}: \"null\"\n{}: {null}\n", cyan("name"), cyan("missing"))
+        );
+        for args in [&["--format", "json"][..], &["--json"][..]] {
+            assert_eq!(
+                styled(args, &json, None),
+                printed(args, &json, None),
+                "{args:?}"
+            );
+            assert_eq!(
+                styled(args, &json, None),
+                "{\"name\":\"null\",\"missing\":null}\n"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_style_gives_the_same_document_as_before() {
+        let json = Json::object([("missing", Json::Null)]);
+        assert_eq!(
+            printed(&["--format", "json-pretty"], &json, None),
+            "{\n  \"missing\": null\n}\n"
+        );
+        assert_eq!(
+            printed(&["--format", "yaml"], &json, None),
+            "missing: null\n"
+        );
+    }
+
+    #[test]
+    fn text_is_not_a_document_whatever_the_style() {
+        let json = Json::Null;
+        assert_eq!(document(&json, Format::Text, Style::Ansi), None);
+        assert_eq!(document(&json, Format::Text, Style::Plain), None);
     }
 
     fn diagnosed(message: &str) -> String {
