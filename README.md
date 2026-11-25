@@ -272,7 +272,7 @@ The variable names are a convention `myip` reads, not something Kubernetes sets 
 | `json-pretty` | The same document, indented | The document, not the whitespace |
 | `yaml` | The same document as YAML | The document, not the whitespace |
 
-All three document formats carry exactly the same keys and values. Parse the output (`jq`, `yq`, a YAML library) rather than matching its text. Failures keep their exit code, and the document still goes to stdout.
+All three document formats carry exactly the same keys and values. Parse the output (`jq`, `yq`, a YAML library) rather than matching its text. Failures keep their exit code, and the document still goes to stdout. On a terminal, `json-pretty` and `yaml` also colour their keys and their `null`s (see [Colour](#colour)); a pipe, a file and `$(...)` get no colour unless you ask for it with `--color always`, and compact `json` is never coloured.
 
 ```bash
 myip --format yaml public
@@ -297,13 +297,14 @@ In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read 
 
 ### Colour
 
-`--color auto|always|never` (default `auto`) colours `--help` and the text of `local`, `where`, `all` and the `--verify` disagreement report. Colour only adds codes around words that are printed anyway: with the codes removed the text is exactly what `--color never` prints, so nothing is said by colour alone.
+`--color auto|always|never` (default `auto`) colours `--help`, the text of `local`, `where`, `all` and the `--verify` disagreement report, and the keys and `null`s of the `json-pretty` and `yaml` documents. Colour only adds codes around words that are printed anyway: with the codes removed the output is exactly what `--color never` prints, byte for byte, so nothing is said by colour alone.
 
 | Colour | Used for |
 |--------|----------|
 | Bold | Block names (`[public]`, `[local]`, `[where]`, `[highlights]`, `interfaces`, `egress`, `evidence`, `kubernetes`), address families in a disagreement report |
 | Bold cyan | Field names (`environment`, `pod name`) and interface names (`en0`) |
-| Dim | Provenance (`(declared: env:POD_IP)`), explanations and footnotes |
+| Dim | Provenance (`(declared: env:POD_IP)`), explanations and footnotes; the `null` of a `json-pretty` or `yaml` document |
+| Cyan | The keys of a `json-pretty` or `yaml` document, quotes included and the colon left out |
 | Green | A verified answer, and the "no NAT" verdict |
 | Yellow | Something unknown, an unverified answer, a guess (`likely virtual`), a translated address (NAT) |
 | Red | A failure (`unavailable`), no answer, and the answer that differs in a disagreement |
@@ -311,12 +312,12 @@ In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read 
 `auto` colours only when stdout is a terminal, decided in this order (the first match wins):
 
 1. `NO_COLOR` set to anything non-empty: no colour ([no-color.org](https://no-color.org)).
-2. `CLICOLOR_FORCE` set to anything non-empty but `0`: colour, even into a pipe or a file.
+2. `CLICOLOR_FORCE` set to anything non-empty but `0`: colour the text, even into a pipe or a file. It does not colour a `json-pretty` or `yaml` document: many environments export it for `ls`, and a document is read by `jq` and `yq`. A document skips this step, and only `--color always` forces one.
 3. `CLICOLOR=0`: no colour.
 4. `TERM=dumb`: no colour.
 5. Otherwise colour exactly when stdout is a terminal. On Windows that also needs a console known to understand the codes (`WT_SESSION`, `ANSICON`, `ConEmuANSI=ON` or a `TERM`), because `myip` does not switch the console mode.
 
-`--color always` and `--color never` skip all of this and win over the environment; `always` also colours on a Windows console that `auto` would leave plain. The `public` headline (the bare address), the ipinfo.io lookup, every JSON and YAML document, `--version`, `-v` traces and stderr (so also every usage error) are never coloured, so `myip public` in `$(...)` and pipes always get the plain text. A `--color` given after the command replaces one given before it.
+`--color always` and `--color never` skip all of this and win over the environment; `always` also colours on a Windows console that `auto` would leave plain. The `public` headline (the bare address), the ipinfo.io lookup, compact `json` (`--json`), `--version`, `-v` traces and stderr (so also every usage error) are never coloured, so `myip public` in `$(...)` and pipes always get the plain text. Only the keys and the `null`s of a coloured document carry codes (cyan `ESC[36m`, dim `ESC[2m`, each closed by `ESC[0m`); a value, even the string `"null"`, never does, and a coloured document is for reading on a terminal, not for a parser. Remove the codes to get the plain document, byte for byte. A `--color` given after the command replaces one given before it.
 
 `--help`, `-h` and `myip COMMAND --help` use the palette of `cargo --help`: the headings and `Usage:` in bold green, command and option names in bold cyan, placeholders such as `<WHEN>` in cyan. They follow the same rules as the text reports, so `myip --help` on a terminal is coloured, `myip --help | less` is not, and `CLICOLOR_FORCE=1 myip --help | less -R` is. The parser stops at `--help`, so for help `--color` is read from the arguments directly: the last `--color VALUE` or `--color=VALUE` before a bare `--` whose value is `auto`, `always` or `never` wins, wherever it stands. `myip --color never --help` and `myip --help --color never` are both plain, and `myip public --help --color always` is coloured. The words of the help do not depend on colour.
 
@@ -329,7 +330,7 @@ In the YAML, every string is double-quoted (so `"no"` or `"1.10"` is never read 
 | `--proxy none\|env\|URL` | `none` (default) ignores proxy environment variables; `env` honors `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`; or give an `http://HOST:PORT` URL |
 | `--json` | With `public`, `local`, `where` and `all`: one line of JSON (see above); the same as `--format json`. For the ipinfo.io lookup it changes nothing, the ipinfo.io body is already passed through unchanged |
 | `--format <FORMAT>` | With `public`, `local`, `where` and `all`: `text` (default), `json`, `json-pretty` or `yaml` (see [Output formats](#output-formats)). Not with `--json`, and not with the ipinfo.io lookup |
-| `--color <WHEN>` | With `--help`, `local`, `where`, `all` and a `--verify` disagreement report: `auto` (default; a terminal, `NO_COLOR`, `CLICOLOR` and `CLICOLOR_FORCE` apply), `always` or `never` (see [Colour](#colour)). Never colours a document, the `public` headline, the ipinfo.io lookup, `--version`, `-v` or stderr |
+| `--color <WHEN>` | With `--help`, `local`, `where`, `all`, a `--verify` disagreement report and the `json-pretty` and `yaml` documents: `auto` (default; a terminal, `NO_COLOR` and `CLICOLOR` apply, and `CLICOLOR_FORCE` forces text and help but not a document), `always` or `never` (see [Colour](#colour)). Never colours compact `json`, the `public` headline, the ipinfo.io lookup, `--version`, `-v` or stderr |
 | `-v`, `--verbose` | Log requests to stderr; with `local`, `where` and `all`, also log what was read |
 | `--verify` | Only after `public` or `all`: ask all providers and cross-check them |
 Credentials in a proxy URL are never printed. They are visible to other local users on the command line, so prefer `--proxy env`.

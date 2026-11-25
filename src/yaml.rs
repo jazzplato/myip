@@ -7,27 +7,31 @@
 //! same under YAML 1.1 and 1.2. Keys are bare only when they match `[a-z][a-z0-9_]*` and are
 //! not a word YAML 1.1 reads as a boolean or null. A key too long for an implicit entry is
 //! written in the explicit `? key` / `: value` form.
+//!
+//! On a terminal (ADR 0005) each key is one cyan span, quotes included and the colon outside,
+//! and each `null` is dim; the layout does not change, so without the codes the document is
+//! the plain one.
 
 use crate::json::{Json, write_quoted};
 use crate::style::Style;
 
 /// `value` as one YAML document in block style, ending with a newline.
 pub fn render(value: &Json) -> String {
+    render_styled(value, Style::Plain)
+}
+
+/// [`render`] with each key cyan and each `null` dim when `style` is `Ansi`.
+pub fn render_styled(value: &Json, style: Style) -> String {
     let mut out = String::new();
     match value {
-        Json::Object(fields) if !fields.is_empty() => mapping(&mut out, fields, 0, false),
-        Json::Array(items) if !items.is_empty() => sequence(&mut out, items, 0, false),
+        Json::Object(fields) if !fields.is_empty() => mapping(&mut out, fields, 0, false, style),
+        Json::Array(items) if !items.is_empty() => sequence(&mut out, items, 0, false, style),
         scalar => {
-            scalar_text(&mut out, scalar);
+            scalar_text(&mut out, scalar, style);
             out.push('\n');
         }
     }
     out
-}
-
-/// [`render`] with the keys and `null` styled for a document on a terminal.
-pub fn render_styled(value: &Json, _style: Style) -> String {
-    render(value)
 }
 
 /// YAML reads a `key: value` entry only when the key is at most 1024 characters. A longer one
@@ -37,33 +41,41 @@ const MAX_IMPLICIT_KEY: usize = 1000;
 
 /// One `key: value` entry per line at `indent`. With `inline_first` the caller has already
 /// written the first line's indentation (a `- ` marker), so the first entry continues it.
-fn mapping(out: &mut String, fields: &[(String, Json)], indent: usize, mut inline_first: bool) {
+fn mapping(
+    out: &mut String,
+    fields: &[(String, Json)],
+    indent: usize,
+    mut inline_first: bool,
+    style: Style,
+) {
     for (key, value) in fields {
         if !std::mem::take(&mut inline_first) {
             pad(out, indent);
         }
         let key = key_text(key);
-        if key.chars().count() > MAX_IMPLICIT_KEY {
+        // The form follows the plain key, so the colour cannot change the layout.
+        let explicit = key.chars().count() > MAX_IMPLICIT_KEY;
+        if explicit {
             out.push_str("? ");
-            out.push_str(&key);
+        }
+        out.push_str(&style.key(&key));
+        if explicit {
             out.push('\n');
             pad(out, indent);
-        } else {
-            out.push_str(&key);
         }
         out.push(':');
         match value {
             Json::Object(fields) if !fields.is_empty() => {
                 out.push('\n');
-                mapping(out, fields, indent + 2, false);
+                mapping(out, fields, indent + 2, false, style);
             }
             Json::Array(items) if !items.is_empty() => {
                 out.push('\n');
-                sequence(out, items, indent + 2, false);
+                sequence(out, items, indent + 2, false, style);
             }
             scalar => {
                 out.push(' ');
-                scalar_text(out, scalar);
+                scalar_text(out, scalar, style);
                 out.push('\n');
             }
         }
@@ -71,17 +83,21 @@ fn mapping(out: &mut String, fields: &[(String, Json)], indent: usize, mut inlin
 }
 
 /// One `- item` entry per line at `indent`; see [`mapping`] for `inline_first`.
-fn sequence(out: &mut String, items: &[Json], indent: usize, mut inline_first: bool) {
+fn sequence(out: &mut String, items: &[Json], indent: usize, mut inline_first: bool, style: Style) {
     for item in items {
         if !std::mem::take(&mut inline_first) {
             pad(out, indent);
         }
         out.push_str("- ");
         match item {
-            Json::Object(fields) if !fields.is_empty() => mapping(out, fields, indent + 2, true),
-            Json::Array(items) if !items.is_empty() => sequence(out, items, indent + 2, true),
+            Json::Object(fields) if !fields.is_empty() => {
+                mapping(out, fields, indent + 2, true, style);
+            }
+            Json::Array(items) if !items.is_empty() => {
+                sequence(out, items, indent + 2, true, style);
+            }
             scalar => {
-                scalar_text(out, scalar);
+                scalar_text(out, scalar, style);
                 out.push('\n');
             }
         }
@@ -93,9 +109,9 @@ fn pad(out: &mut String, indent: usize) {
 }
 
 /// A scalar or an empty collection, on one line and without the newline.
-fn scalar_text(out: &mut String, value: &Json) {
+fn scalar_text(out: &mut String, value: &Json, style: Style) {
     match value {
-        Json::Null => out.push_str("null"),
+        Json::Null => out.push_str(&style.dim("null")),
         Json::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
         Json::Int(value) => out.push_str(&value.to_string()),
         Json::Str(value) => write_quoted(out, value, true),

@@ -71,11 +71,12 @@ impl Format {
     }
 }
 
-/// When `--help` and the text of `local`, `where`, `all` and a `--verify` disagreement carry
-/// colour. The contract is ADR 0002, amended by ADR 0005.
+/// When `--help`, the text of `local`, `where`, `all` and a `--verify` disagreement, and the
+/// keys and `null` of a `json-pretty` or `yaml` document carry colour. The contract is
+/// ADR 0002, amended by ADR 0005.
 #[derive(ValueEnum, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ColorChoice {
-    /// Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
+    /// Only when stdout is a terminal that supports it (NO_COLOR and CLICOLOR apply; CLICOLOR_FORCE forces help and text, not a document)
     #[default]
     Auto,
     /// Whatever stdout is
@@ -118,7 +119,7 @@ pub struct Options {
     #[arg(long, value_name = "FORMAT", global = true, conflicts_with = "json")]
     pub format: Option<Format>,
 
-    /// Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr)
+    /// Colour for --help, the text of local, where, all and a provider disagreement, and the keys and null of json-pretty and yaml (never compact json or stderr)
     #[arg(
         long,
         value_name = "WHEN",

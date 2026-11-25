@@ -506,7 +506,11 @@ fn a_pretty_document_with_always_adds_only_key_and_null_codes() {
                 assert_eq!(without_noise(&unstyled), without_noise(&want), "{label}");
             } else {
                 assert_eq!(unstyled, want, "{label}");
-                assert_eq!(parsed(&always.stdout), parsed(&plain.stdout), "{label}");
+                assert_eq!(
+                    parsed(unstyled.as_bytes()),
+                    parsed(&plain.stdout),
+                    "{label}"
+                );
             }
             assert!(!text(&always.stderr).contains('\u{1b}'), "{label}");
         }

@@ -1,6 +1,7 @@
 //! Colour for the text reports of `local`, `where`, `all` and a `--verify` disagreement
-//! (ADR 0002). Colour is cosmetic: with the codes removed the text is the plain text, byte
-//! for byte, so every span here wraps words that stay.
+//! (ADR 0002), and for the keys and `null`s of `json-pretty` and `yaml` documents (ADR 0005).
+//! Colour is cosmetic: with the codes removed the output is the plain output, byte for byte,
+//! so every span here wraps words that stay.
 
 use std::io::{self, IsTerminal};
 
@@ -51,13 +52,35 @@ impl Terminal {
     }
 }
 
-/// Whether colour is on: the decision order of ADR 0002, first match wins.
+/// What a colour decision is for. It only matters to `CLICOLOR_FORCE` (ADR 0005).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Output {
+    /// Help and the text reports.
+    Text,
+    /// A `json-pretty` or `yaml` document, which scripts may read through a pipe.
+    Document,
+}
+
+/// Whether colour is on for help and text: the decision order of ADR 0002, first match wins.
 pub fn enabled(choice: ColorChoice, terminal: &Terminal) -> bool {
+    decide(choice, terminal, Output::Text)
+}
+
+/// Whether colour is on for a `json-pretty` or `yaml` document: the order of [`enabled`],
+/// except that `CLICOLOR_FORCE` does not force it (ADR 0005). Many environments export that
+/// variable for the sake of `ls`, and it must not put escape bytes into `| jq` or `| yq`.
+/// Only `--color always` colours a document that is not on a terminal.
+pub fn enabled_document(choice: ColorChoice, terminal: &Terminal) -> bool {
+    decide(choice, terminal, Output::Document)
+}
+
+/// The one decision order; [`enabled`] and [`enabled_document`] differ only in `output`.
+fn decide(choice: ColorChoice, terminal: &Terminal, output: Output) -> bool {
     match choice {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
         ColorChoice::Auto if terminal.no_color => false,
-        ColorChoice::Auto if terminal.force => true,
+        ColorChoice::Auto if terminal.force && output == Output::Text => true,
         ColorChoice::Auto if terminal.clicolor_off || terminal.dumb => false,
         // myip does not switch the Windows console mode, so only a console that is known to
         // understand the codes gets them on its own.
@@ -65,11 +88,6 @@ pub fn enabled(choice: ColorChoice, terminal: &Terminal) -> bool {
             terminal.stdout_is_terminal && (!terminal.windows || terminal.ansi_console)
         }
     }
-}
-
-/// Like [`enabled`], for a `json-pretty` or `yaml` document (ADR 0005).
-pub fn enabled_document(choice: ColorChoice, terminal: &Terminal) -> bool {
-    enabled(choice, terminal)
 }
 
 const RESET: &str = "\u{1b}[0m";
@@ -100,9 +118,13 @@ impl Style {
         }
     }
 
-    /// [`Style::choose`] for a `json-pretty` or `yaml` document.
+    /// [`Style::choose`] for a `json-pretty` or `yaml` document; see [`enabled_document`].
     pub fn choose_document(choice: ColorChoice, terminal: &Terminal) -> Self {
-        Self::choose(choice, terminal)
+        if enabled_document(choice, terminal) {
+            Self::Ansi
+        } else {
+            Self::Plain
+        }
     }
 
     /// Names of blocks and address families.
@@ -115,14 +137,14 @@ impl Style {
         self.span(BOLD_CYAN, text)
     }
 
-    /// Provenance and explanations.
+    /// Provenance and explanations, and the `null` of a document.
     pub fn dim(self, text: &str) -> String {
         self.span(DIM, text)
     }
 
-    /// A key of a document.
+    /// A key of a document: the whole token, quotes included.
     pub fn key(self, text: &str) -> String {
-        text.to_owned()
+        self.span(CYAN, text)
     }
 
     /// A verified or agreeing answer.

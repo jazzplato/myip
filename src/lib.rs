@@ -62,12 +62,15 @@ pub struct Context<'a> {
 }
 
 impl Context<'_> {
-    /// How text on stdout is written. Documents are never styled, whatever `--color` says.
+    /// How stdout is written: text for people, or the keys and `null` of a `json-pretty` or
+    /// `yaml` document. Compact `json` is the machine line and is never styled.
     pub fn style(&self, options: &cli::Options) -> Style {
-        if options.format().is_document() {
-            Style::Plain
-        } else {
-            Style::choose(options.color, &self.terminal)
+        match options.format() {
+            cli::Format::Json => Style::Plain,
+            cli::Format::JsonPretty | cli::Format::Yaml => {
+                Style::choose_document(options.color, &self.terminal)
+            }
+            cli::Format::Text => Style::choose(options.color, &self.terminal),
         }
     }
 }
@@ -3863,15 +3866,17 @@ mod tests {
 
     #[test]
     fn a_coloured_document_is_the_plain_one_with_codes_added_and_nothing_else() {
-        let machines: [Build; 4] = [
-            Machine::quiet,
-            Machine::laptop,
-            Machine::pod,
-            Machine::without_interface_access,
+        // The last machine cannot list its interfaces, so `local` fails on it; the document is there anyway.
+        let machines: [(Build, bool); 4] = [
+            (Machine::quiet, false),
+            (Machine::laptop, false),
+            (Machine::pod, false),
+            (Machine::without_interface_access, true),
         ];
         let mut coloured_runs = 0;
-        for machine in machines {
+        for (machine, blind) in machines {
             for (args, code, fixture) in documents() {
+                let code = if blind && args == ["local"] { 1 } else { code };
                 for format in ["json-pretty", "yaml"] {
                     let plain = run_on(
                         &machine().host(),

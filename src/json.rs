@@ -24,24 +24,26 @@ impl Json {
     /// `pretty` indents with two spaces and puts one element per line; otherwise the
     /// output is one line with no spaces. Neither form ends with a newline.
     pub fn render(&self, pretty: bool) -> String {
+        self.render_styled(pretty, Style::Plain)
+    }
+
+    /// [`Json::render`] with each key cyan and each `null` dim when `style` is `Ansi`, for a
+    /// pretty document on a terminal. Compact output is the machine line and is never styled.
+    pub fn render_styled(&self, pretty: bool, style: Style) -> String {
+        let style = if pretty { style } else { Style::Plain };
         let mut out = String::new();
-        self.write(&mut out, pretty, 0);
+        self.write(&mut out, pretty, 0, style);
         out
     }
 
-    /// [`Json::render`] with the keys and `null` styled for a document on a terminal.
-    pub fn render_styled(&self, pretty: bool, _style: Style) -> String {
-        self.render(pretty)
-    }
-
-    fn write(&self, out: &mut String, pretty: bool, depth: usize) {
+    fn write(&self, out: &mut String, pretty: bool, depth: usize, style: Style) {
         match self {
-            Self::Null => out.push_str("null"),
+            Self::Null => out.push_str(&style.dim("null")),
             Self::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
             Self::Int(value) => out.push_str(&value.to_string()),
             Self::Str(value) => write_quoted(out, value, false),
             Self::Array(items) => write_seq(out, pretty, depth, ('[', ']'), items, |out, item| {
-                item.write(out, pretty, depth + 1);
+                item.write(out, pretty, depth + 1, style);
             }),
             Self::Object(fields) => {
                 write_seq(
@@ -51,12 +53,14 @@ impl Json {
                     ('{', '}'),
                     fields,
                     |out, (key, value)| {
-                        write_quoted(out, key, false);
+                        let mut token = String::new();
+                        write_quoted(&mut token, key, false);
+                        out.push_str(&style.key(&token));
                         out.push(':');
                         if pretty {
                             out.push(' ');
                         }
-                        value.write(out, pretty, depth + 1);
+                        value.write(out, pretty, depth + 1, style);
                     },
                 );
             }

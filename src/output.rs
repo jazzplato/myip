@@ -13,12 +13,12 @@ use crate::yaml;
 /// `json` as the document `format` asks for, ending with a newline; `None` for text, which
 /// each command lays out itself. `style` colours the keys and `null` of `json-pretty` and
 /// `yaml`; compact `json` is never styled.
-pub fn document(json: &Json, format: Format, _style: Style) -> Option<String> {
+pub fn document(json: &Json, format: Format, style: Style) -> Option<String> {
     match format {
         Format::Text => None,
         Format::Json => Some(format!("{}\n", json.render(false))),
-        Format::JsonPretty => Some(format!("{}\n", json.render(true))),
-        Format::Yaml => Some(yaml::render(json)),
+        Format::JsonPretty => Some(format!("{}\n", json.render_styled(true, style))),
+        Format::Yaml => Some(yaml::render_styled(json, style)),
     }
 }
 
