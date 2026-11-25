@@ -20,3 +20,4 @@ Not needed for bug fixes, refactors or reversible tweaks.
 | 0002 | [Output formats, styled text and the CLI contract for 0.2.0](0002-output-formats-and-styled-text.md) | accepted |
 | 0003 | [Operator-based quorum for --verify](0003-operator-quorum.md) | accepted |
 | 0004 | [ipinfo.io token from the environment](0004-ipinfo-token-from-environment.md) | accepted |
+| 0005 | [Colour by default: help, names and pretty documents](0005-colour-by-default.md) | accepted |
