@@ -446,15 +446,16 @@ fn only_document_codes(text: &str) {
 }
 
 /// `text` without what varies between two runs of the same command through a proxy that
-/// hangs up: each measured latency and each transport error, which one of two failure
-/// kinds the kernel reports.
+/// hangs up: each measured latency and each error message, whose wording depends on how the
+/// platform reports a connection that was closed.
 fn without_noise(text: &str) -> String {
     text.lines()
         .map(|line| {
+            let field = line.trim_start();
             if line.contains("latency_ms") {
                 "latency_ms"
-            } else if line.contains("\"io: ") {
-                "io"
+            } else if field.starts_with("\"error\": \"") || field.starts_with("error: \"") {
+                "error"
             } else {
                 line
             }
