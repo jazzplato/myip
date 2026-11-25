@@ -2962,6 +2962,7 @@ mod tests {
     // ---- --color (ADR 0002) ----
 
     const BOLD: &str = "\u{1b}[1m";
+    const NAME: &str = "\u{1b}[1;36m";
     const DIM: &str = "\u{1b}[2m";
     const GREEN: &str = "\u{1b}[32m";
     const YELLOW: &str = "\u{1b}[33m";
@@ -3166,19 +3167,19 @@ mod tests {
         assert!(
             out.contains(&format!(
                 "\n  {} {}\n",
-                span(BOLD, "lo"),
+                span(NAME, "lo"),
                 span(YELLOW, "(likely virtual)")
             )),
             "{out:?}"
         );
         assert!(
-            out.contains(&format!("\n  {}\n", span(BOLD, "en0"))),
+            out.contains(&format!("\n  {}\n", span(NAME, "en0"))),
             "{out:?}"
         );
         assert!(
             out.contains(&format!(
                 "\n  {} {}\n",
-                span(BOLD, "utun3"),
+                span(NAME, "utun3"),
                 span(YELLOW, "(likely virtual)")
             )),
             "{out:?}"
@@ -3227,7 +3228,7 @@ mod tests {
             out,
             format!(
                 "{}    host (no container or Kubernetes signals found)\n{}\n",
-                span(BOLD, "environment"),
+                span(NAME, "environment"),
                 span(DIM, declared)
             )
         );
@@ -3236,26 +3237,26 @@ mod tests {
         assert_eq!(code, 0);
         assert_balanced(&out);
         let lines = [
-            format!("{}    kubernetes (a pod)\n", span(BOLD, "environment")),
+            format!("{}    kubernetes (a pod)\n", span(NAME, "environment")),
             format!(
                 "{}       web-0{}\n",
-                span(BOLD, "pod name"),
+                span(NAME, "pod name"),
                 span(DIM, "  (declared: env:POD_NAME)")
             ),
             format!(
                 "{}         10.244.1.7{}\n",
-                span(BOLD, "pod ip"),
+                span(NAME, "pod ip"),
                 span(DIM, "  (declared: env:POD_IP)")
             ),
             format!(
                 "{}        {}{}\n",
-                span(BOLD, "pod ips"),
+                span(NAME, "pod ips"),
                 span(YELLOW, "unknown"),
                 span(DIM, " (expose POD_IPS with the Downward API)")
             ),
             format!(
                 "{}   {}\n",
-                span(BOLD, "service port"),
+                span(NAME, "service port"),
                 span(YELLOW, "unknown")
             ),
             format!("{}\n", span(DIM, declared)),
@@ -3278,6 +3279,112 @@ mod tests {
                 "{line:?}"
             );
         }
+    }
+
+    /// The text of every span that `code` opens, in order.
+    fn spans_of<'a>(out: &'a str, code: &str) -> Vec<&'a str> {
+        out.split(code)
+            .skip(1)
+            .map(|rest| rest.split_once(RESET).map_or(rest, |(text, _)| text))
+            .collect()
+    }
+
+    #[test]
+    fn only_interface_and_field_names_are_bold_cyan_and_block_names_stay_bold() {
+        let pod_fields = [
+            "environment",
+            "namespace",
+            "pod name",
+            "pod ip",
+            "pod ips",
+            "node name",
+            "host ip",
+            "host network",
+            "service host",
+            "service port",
+            "cluster dns",
+            "cluster domain",
+        ];
+        let pod_all_names: Vec<&str> = ["lo", "en0", "utun3"]
+            .into_iter()
+            .chain(pod_fields)
+            .collect();
+        let cases: [(Build, &[&str], Fixture, Vec<&str>, Vec<&str>); 4] = [
+            (
+                Machine::laptop,
+                &["local"],
+                agree,
+                vec!["lo", "en0", "utun3"],
+                vec!["interfaces", "egress"],
+            ),
+            (
+                Machine::laptop,
+                &["where"],
+                agree,
+                vec!["environment"],
+                vec![],
+            ),
+            (
+                Machine::pod,
+                &["all"],
+                agree,
+                pod_all_names,
+                vec![
+                    "[public]",
+                    "[local]",
+                    "interfaces",
+                    "egress",
+                    "[where]",
+                    "evidence",
+                    "[highlights]",
+                    "kubernetes",
+                ],
+            ),
+            (
+                Machine::quiet,
+                &["public", "--verify"],
+                split,
+                vec![],
+                vec!["ipv4"],
+            ),
+        ];
+        for (machine, args, fixture, names, bold) in cases {
+            let (_, out, _) = coloured(&machine(), &fixture(), args);
+            assert_eq!(spans_of(&out, NAME), names, "{args:?}: {out:?}");
+            assert_eq!(spans_of(&out, BOLD), bold, "{args:?}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_name_is_escaped_before_it_is_styled() {
+        let hostile = format!("{NAME}\u{1b}[31m{RESET}");
+        let machine = machine_with("interface name", &hostile);
+        let (code, out, err) = coloured(&machine, &no_network(), &["local"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let shown = "en\\x1b[1;36m\\x1b[31m\\x1b[0m";
+        assert!(
+            out.contains(&format!("\n  {}", span(NAME, shown))),
+            "{out:?}"
+        );
+        assert_balanced(&out);
+        assert!(!strip(&out).contains('\u{1b}'), "{out:?}");
+
+        let machine = machine_with("env POD_NAME", "a\n\u{1b}[31mINJECT");
+        let (code, out, err) = coloured(&machine, &no_network(), &["where"]);
+        assert_eq!((code, err.as_str()), (0, ""));
+        let row = format!(
+            "{}       a\\n\\x1b[31mINJECT{}\n",
+            span(NAME, "pod name"),
+            span(DIM, "  (declared: env:POD_NAME)")
+        );
+        assert!(out.contains(&row), "{out:?}");
+        assert_balanced(&out);
+        assert!(!strip(&out).contains('\u{1b}'), "{out:?}");
+        assert!(
+            out.lines()
+                .all(|line| !line.contains("INJECT") || line.contains("pod name")),
+            "{out:?}"
+        );
     }
 
     #[test]

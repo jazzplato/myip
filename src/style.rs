@@ -98,6 +98,11 @@ impl Style {
         self.span(BOLD, text)
     }
 
+    /// Interface names and field names.
+    pub fn name(self, text: &str) -> String {
+        self.span(BOLD, text)
+    }
+
     /// Provenance and explanations.
     pub fn dim(self, text: &str) -> String {
         self.span(DIM, text)
@@ -157,9 +162,10 @@ impl Style {
 #[cfg(test)]
 pub(crate) mod testing {
     /// Every code this module writes, and nothing else.
-    const CODES: [&str; 6] = [
+    const CODES: [&str; 7] = [
         "\u{1b}[0m",
         "\u{1b}[1m",
+        "\u{1b}[1;36m",
         "\u{1b}[2m",
         "\u{1b}[31m",
         "\u{1b}[32m",
@@ -489,6 +495,8 @@ mod tests {
     #[test]
     fn a_span_is_a_code_the_words_and_a_reset() {
         assert_eq!(Style::Ansi.bold("x"), "\u{1b}[1mx\u{1b}[0m");
+        assert_eq!(Style::Ansi.name("x"), "\u{1b}[1;36mx\u{1b}[0m");
+        assert_eq!(Style::Ansi.name("x").matches('\u{1b}').count(), 2);
         assert_eq!(Style::Ansi.dim("x"), "\u{1b}[2mx\u{1b}[0m");
         assert_eq!(Style::Ansi.good("x"), "\u{1b}[32mx\u{1b}[0m");
         assert_eq!(Style::Ansi.warn("x"), "\u{1b}[33mx\u{1b}[0m");
@@ -500,6 +508,7 @@ mod tests {
         for style in [Style::Plain, Style::Ansi] {
             for span in [
                 Style::bold,
+                Style::name,
                 Style::dim,
                 Style::good,
                 Style::warn,
@@ -510,6 +519,7 @@ mod tests {
         }
         for span in [
             Style::bold,
+            Style::name,
             Style::dim,
             Style::good,
             Style::warn,
@@ -522,8 +532,9 @@ mod tests {
     #[test]
     fn clean_lets_our_own_codes_through_and_shows_everything_else() {
         let ours = format!(
-            "{} and {}\n",
-            Style::Ansi.bold("name"),
+            "{} {} and {}\n",
+            Style::Ansi.bold("block"),
+            Style::Ansi.name("name"),
             Style::Ansi.bad("no")
         );
         assert_eq!(Style::Ansi.clean(&ours), ours);
@@ -531,6 +542,7 @@ mod tests {
             "\u{1b}[2J",
             "\u{1b}[31",
             "\u{1b}[0;31m",
+            "\u{1b}[1;36",
             "\u{1b}[1;1H",
             "\u{1b}]0;title\u{7}",
             "\u{1b}",
@@ -565,8 +577,8 @@ mod tests {
 
     #[test]
     fn the_test_helpers_see_what_they_claim_to() {
-        let text = "\u{1b}[1ma\u{1b}[0mx\u{1b}[2mb\u{1b}[0m\n";
-        assert_eq!(testing::strip(text), "axb\n");
+        let text = "\u{1b}[1ma\u{1b}[0mx\u{1b}[2mb\u{1b}[0m\u{1b}[1;36mc\u{1b}[0m\n";
+        assert_eq!(testing::strip(text), "axbc\n");
         testing::assert_balanced(text);
         assert_eq!(testing::strip("\u{1b}[2J"), "\u{1b}[2J");
     }
