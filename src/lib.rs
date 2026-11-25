@@ -3645,6 +3645,159 @@ mod tests {
         }
     }
 
+    /// Every help text there is: the long and the short form of the command and of each
+    /// subcommand.
+    const HELPS: [&[&str]; 10] = [
+        &["--help"],
+        &["-h"],
+        &["public", "--help"],
+        &["public", "-h"],
+        &["local", "--help"],
+        &["local", "-h"],
+        &["where", "--help"],
+        &["where", "-h"],
+        &["all", "--help"],
+        &["all", "-h"],
+    ];
+
+    /// `text` without any SGR sequence (`ESC [ digits m`), whichever colour it sets, and
+    /// nothing else.
+    fn without_sgr(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(at) = rest.find("\u{1b}[") {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at + 2..];
+            let digits = tail.len() - tail.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            match tail[digits..].strip_prefix('m') {
+                Some(after) => rest = after,
+                None => {
+                    out.push_str("\u{1b}[");
+                    rest = tail;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn help_is_coloured_like_cargo_on_a_terminal_and_strips_to_the_plain_help() {
+        for args in HELPS {
+            let (code, plain, err) = exec(&no_network(), args);
+            assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+            assert!(!plain.contains('\u{1b}'), "{args:?}");
+
+            let (code, styled, err) = run_in(&Machine::quiet().host(), &no_network(), tty(), args);
+            assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+            // Bold green headings, bold cyan literals, plain cyan placeholders, nothing else.
+            for want in [
+                "\u{1b}[1m\u{1b}[32mUsage:\u{1b}[0m",
+                "\u{1b}[1m\u{1b}[32mOptions:\u{1b}[0m",
+                "\u{1b}[1m\u{1b}[36m-h\u{1b}[0m",
+                "\u{1b}[36m<WHEN>\u{1b}[0m",
+            ] {
+                assert!(styled.contains(want), "{args:?} lacks {want:?}\n{styled}");
+            }
+            let stripped = without_sgr(&styled);
+            assert_eq!(stripped, plain, "{args:?}");
+            let codes: std::collections::BTreeSet<_> = styled
+                .split('\u{1b}')
+                .skip(1)
+                .map(|tail| tail.split('m').next().unwrap_or_default())
+                .collect();
+            assert!(
+                codes.iter().all(|c| ["[0", "[1", "[32", "[36"].contains(c)),
+                "{args:?}: {codes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_colour_follows_the_decision_of_adr_0002_and_the_flag_in_any_position() {
+        let cases: [(Terminal, &[&str], bool); 17] = [
+            (Terminal::default(), &["--help"], false),
+            (tty(), &["--help"], true),
+            (tty(), &["-h"], true),
+            (tty(), &["where", "--help"], true),
+            (tty(), &["--color", "auto", "--help"], true),
+            (tty(), &["--color", "never", "--help"], false),
+            (tty(), &["--help", "--color", "never"], false),
+            (tty(), &["where", "--help", "--color=never"], false),
+            (tty(), &["--color=never", "public", "--help"], false),
+            (Terminal::default(), &["--color", "always", "--help"], true),
+            (Terminal::default(), &["--help", "--color", "always"], true),
+            (
+                Terminal::default(),
+                &["public", "--help", "--color=always"],
+                true,
+            ),
+            (
+                terminal_with(true, &[("NO_COLOR", "1")]),
+                &["--help"],
+                false,
+            ),
+            (
+                terminal_with(true, &[("NO_COLOR", "1")]),
+                &["--color", "always", "-h"],
+                true,
+            ),
+            (
+                terminal_with(false, &[("CLICOLOR_FORCE", "1")]),
+                &["--help"],
+                true,
+            ),
+            (
+                terminal_with(true, &[("CLICOLOR", "0")]),
+                &["--help"],
+                false,
+            ),
+            (
+                terminal_with(true, &[("TERM", "dumb")]),
+                &["local", "--help"],
+                false,
+            ),
+        ];
+        for (terminal, args, want) in cases {
+            let (code, out, err) = run_in(
+                &Machine::quiet().host(),
+                &no_network(),
+                terminal.clone(),
+                args,
+            );
+            assert_eq!((code, err.as_str()), (0, ""), "{terminal:?} {args:?}");
+            assert_eq!(out.contains('\u{1b}'), want, "{terminal:?} {args:?}");
+        }
+    }
+
+    #[test]
+    fn the_version_and_usage_errors_stay_plain_even_on_a_terminal_that_asks_for_colour() {
+        let (code, out, err) = run_in(
+            &Machine::quiet().host(),
+            &no_network(),
+            tty(),
+            &["--version", "--color", "always"],
+        );
+        assert_eq!((code, err.as_str()), (0, ""));
+        assert!(
+            out.starts_with("myip ") && !out.contains('\u{1b}'),
+            "{out:?}"
+        );
+
+        for args in [
+            &["--bogus", "--color", "always"][..],
+            &["where", "--bogus", "--color=always"],
+            &["--color", "rainbow", "--help"],
+            &["--color", "always", "--format", "toml"],
+        ] {
+            let (code, out, err) = run_in(&Machine::quiet().host(), &no_network(), tty(), args);
+            assert_eq!(code, 2, "{args:?}");
+            assert_eq!(out, "", "{args:?}");
+            assert!(err.starts_with("error: "), "{args:?}: {err:?}");
+            assert!(!err.contains('\u{1b}'), "{args:?}: {err:?}");
+        }
+    }
+
     #[test]
     fn hostile_text_stays_visible_and_unstyled_in_colour_too() {
         let commands: [&[&str]; 4] = [&["local"], &["where"], &["all"], &["all", "--verify"]];

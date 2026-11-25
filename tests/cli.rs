@@ -470,32 +470,204 @@ fn colour_never_reaches_a_document_a_trace_or_a_usage_error() {
 }
 
 /// The one place a real terminal is involved: `script` gives the child a pseudo-terminal.
+/// `command` is what the shell runs after the path of the binary, and the output is
+/// everything the child wrote to its terminal.
+#[cfg(target_os = "linux")]
+fn on_a_terminal(command: &str, env: &[(&str, &str)]) -> String {
+    let quoted = format!(
+        "'{}' {command}",
+        env!("CARGO_BIN_EXE_myip").replace('\'', "'\\''")
+    );
+    let mut script = Command::new("script");
+    script.env_remove("IPINFO_TOKEN");
+    script.args(["-qec", &quoted, "/dev/null"]);
+    for var in COLOUR_VARS {
+        script.env_remove(var);
+    }
+    script.env("TERM", "xterm").envs(env.iter().copied());
+    let out = script
+        .output()
+        .expect("`script` (util-linux) is needed for the pseudo-terminal test");
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    text(&out.stdout)
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_real_terminal_gets_colour_by_default_and_not_with_no_color() {
-    let run = |env: &[(&str, &str)]| {
-        let quoted = format!(
-            "'{}' where",
-            env!("CARGO_BIN_EXE_myip").replace('\'', "'\\''")
-        );
-        let mut command = Command::new("script");
-        command.env_remove("IPINFO_TOKEN");
-        command.args(["-qec", &quoted, "/dev/null"]);
-        for var in COLOUR_VARS {
-            command.env_remove(var);
-        }
-        command.env("TERM", "xterm").envs(env.iter().copied());
-        let out = command
-            .output()
-            .expect("`script` (util-linux) is needed for the pseudo-terminal test");
-        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-        text(&out.stdout)
-    };
-    let on = run(&[]);
+    let on = on_a_terminal("where", &[]);
     assert!(on.contains("\u{1b}[1;36menvironment\u{1b}[0m"), "{on:?}");
-    let off = run(&[("NO_COLOR", "1")]);
+    let off = on_a_terminal("where", &[("NO_COLOR", "1")]);
     assert!(off.starts_with("environment"), "{off:?}");
     assert!(!off.contains('\u{1b}'), "{off:?}");
-    let dumb = run(&[("TERM", "dumb")]);
+    let dumb = on_a_terminal("where", &[("TERM", "dumb")]);
     assert!(!dumb.contains('\u{1b}'), "{dumb:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_real_terminal_gets_a_coloured_help_by_default_and_not_with_no_color() {
+    let on = on_a_terminal("--help", &[]);
+    assert!(on.contains(USAGE_HEADING), "{on:?}");
+    let sub = on_a_terminal("local --help", &[]);
+    assert!(sub.contains(USAGE_HEADING), "{sub:?}");
+    for (env, args) in [
+        (&[("NO_COLOR", "1")][..], "--help"),
+        (&[("TERM", "dumb")], "--help"),
+        (&[("CLICOLOR", "0")], "--help"),
+        (&[], "--color never --help"),
+        (&[], "--help --color never"),
+    ] {
+        let off = on_a_terminal(args, env);
+        assert!(off.contains("Usage: myip"), "{off:?}");
+        assert!(!off.contains('\u{1b}'), "{args} {env:?}: {off:?}");
+    }
+}
+
+/// `Usage:` as `--help` writes it when coloured: bold, then green, then reset.
+const USAGE_HEADING: &str = "\u{1b}[1m\u{1b}[32mUsage:\u{1b}[0m";
+
+/// The help of every form, as 0.3.0 printed it but for the `--color` line (ADR 0005 says
+/// that help is covered now), as `(arguments, text)`.
+fn help_golden() -> Vec<(Vec<String>, String)> {
+    let golden = include_str!("golden/help.txt").replace("\r\n", "\n");
+    let mut sections: Vec<(Vec<String>, String)> = Vec::new();
+    for line in golden.split_inclusive('\n') {
+        match line.strip_prefix("=== ") {
+            Some(args) => sections.push((
+                args.trim_end().split(' ').map(str::to_owned).collect(),
+                String::new(),
+            )),
+            None => sections
+                .last_mut()
+                .expect("the golden starts with a header")
+                .1
+                .push_str(line),
+        }
+    }
+    sections
+}
+
+#[test]
+fn help_is_coloured_like_cargo_when_asked_for() {
+    for args in [
+        &["--color", "always", "--help"][..],
+        &["local", "--color", "always", "--help"],
+        &["--help", "--color", "always"],
+        &["public", "--help", "--color=always"],
+    ] {
+        let out = myip_with(args, &[]);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stderr.is_empty(), "{args:?}");
+        let stdout = text(&out.stdout);
+        assert!(stdout.contains(USAGE_HEADING), "{args:?}: {stdout:?}");
+        assert!(
+            stdout.contains("\u{1b}[1m\u{1b}[36m--json\u{1b}[0m"),
+            "{args:?}: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("\u{1b}[36m<FORMAT>\u{1b}[0m"),
+            "{args:?}: {stdout:?}"
+        );
+    }
+}
+
+#[test]
+fn help_without_its_codes_is_the_plain_help_of_0_3_0_in_every_form() {
+    let golden = help_golden();
+    assert_eq!(golden.len(), 10, "the long and short help of five commands");
+    for (args, want) in golden {
+        let run = |color: &str| {
+            let mut full = vec!["--color", color];
+            full.extend(args.iter().map(String::as_str));
+            myip_with(&full, &[])
+        };
+        let (never, always) = (run("never"), run("always"));
+        for out in [&never, &always] {
+            assert_eq!(out.status.code(), Some(0), "{args:?}");
+            assert!(out.stderr.is_empty(), "{args:?}");
+        }
+        let (never, always) = (text(&never.stdout), text(&always.stdout));
+        assert_eq!(never, want, "{args:?}");
+        assert!(always.contains('\u{1b}'), "{args:?} has no colour");
+        assert_eq!(without_codes(&always), never, "{args:?}");
+    }
+}
+
+#[test]
+fn help_is_plain_in_a_pipe_and_whenever_colour_is_off() {
+    let cases: [(&[&str], &[(&str, &str)]); 12] = [
+        (&["--help"], &[]),
+        (&["-h"], &[]),
+        (&["public", "--help"], &[]),
+        (&["--color", "never", "--help"], &[]),
+        (&["--help", "--color", "never"], &[]),
+        (&["--color=never", "local", "--help"], &[]),
+        (&["local", "--help", "--color", "never"], &[]),
+        (&["--color", "auto", "--help"], &[("NO_COLOR", "1")]),
+        (&["--help"], &[("NO_COLOR", "1"), ("CLICOLOR_FORCE", "1")]),
+        (&["--help"], &[("CLICOLOR", "0")]),
+        (&["--help"], &[("CLICOLOR_FORCE", "0")]),
+        (
+            &["--color", "never", "all", "--help"],
+            &[("CLICOLOR_FORCE", "1")],
+        ),
+    ];
+    let golden = help_golden();
+    for (args, env) in cases {
+        let out = myip_with(args, env);
+        assert_eq!(out.status.code(), Some(0), "{args:?} {env:?}");
+        assert!(out.stderr.is_empty(), "{args:?} {env:?}");
+        assert!(
+            !out.stdout.contains(&0x1b),
+            "{args:?} {env:?}: {}",
+            text(&out.stdout)
+        );
+        let words: Vec<String> = args
+            .iter()
+            .filter(|arg| !arg.starts_with("--color") && !["never", "auto"].contains(arg))
+            .map(|arg| (*arg).to_owned())
+            .collect();
+        let (_, want) = golden
+            .iter()
+            .find(|(golden_args, _)| *golden_args == words)
+            .unwrap_or_else(|| panic!("no golden for {words:?}"));
+        assert_eq!(text(&out.stdout), *want, "{args:?} {env:?}");
+    }
+}
+
+#[test]
+fn clicolor_force_colours_help_in_a_pipe_like_the_text_reports() {
+    for args in [&["--help"][..], &["-h"], &["all", "--help"]] {
+        let out = myip_with(args, &[("CLICOLOR_FORCE", "1")]);
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+        assert!(out.stderr.is_empty(), "{args:?}");
+        assert!(text(&out.stdout).contains(USAGE_HEADING), "{args:?}");
+    }
+    // The flag still wins over the environment, and NO_COLOR over CLICOLOR_FORCE.
+    let out = myip_with(&["--color", "always", "--help"], &[("NO_COLOR", "1")]);
+    assert!(text(&out.stdout).contains(USAGE_HEADING));
+}
+
+#[test]
+fn the_version_and_usage_errors_are_never_coloured() {
+    for env in [&[][..], &[("CLICOLOR_FORCE", "1")]] {
+        let out = myip_with(&["--version", "--color", "always"], env);
+        assert_eq!(out.status.code(), Some(0), "{env:?}");
+        assert!(out.stderr.is_empty(), "{env:?}");
+        assert!(!out.stdout.contains(&0x1b), "{env:?}");
+        assert!(text(&out.stdout).starts_with("myip "), "{env:?}");
+
+        for args in [
+            &["--bogus", "--color", "always"][..],
+            &["where", "--bogus", "--color=always"],
+            &["--color", "rainbow", "--help"],
+        ] {
+            let out = myip_with(args, env);
+            assert_eq!(out.status.code(), Some(2), "{args:?} {env:?}");
+            assert!(out.stdout.is_empty(), "{args:?} {env:?}");
+            assert!(!out.stderr.contains(&0x1b), "{args:?} {env:?}");
+            assert!(text(&out.stderr).starts_with("error: "), "{args:?} {env:?}");
+        }
+    }
 }

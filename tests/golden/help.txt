@@ -1,0 +1,378 @@
+=== --help
+Where am I on the network, and what will others see?
+
+Without a subcommand, prints what ipinfo.io returns for FIELD (default: json).
+
+Usage: myip [OPTIONS] [FIELD] [COMMAND]
+
+Commands:
+  public  Print your public IP address, as seen by independent providers
+  local   Interfaces with their scope, and the address used to reach the internet
+  where   Whether this process runs on a host, in a container or in a Kubernetes pod
+  all     Public address, local interfaces and location together, with NAT and pod highlights
+
+Arguments:
+  [FIELD]
+          ipinfo.io path to print, e.g. ip, city, 8.8.8.8/org, json?token=TOKEN
+
+Options:
+      --json
+          Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+
+      --format <FORMAT>
+          How public, local, where and all write their result (not with FIELD)
+
+          Possible values:
+          - text:        For people; the layout is not a stable interface
+          - json:        One compact JSON line; its bytes are stable (schema_version 1)
+          - json-pretty: The same document, indented; stable to parse, not byte for byte
+          - yaml:        The same document as YAML; stable to parse, not byte for byte
+
+      --color <WHEN>
+          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+
+          Possible values:
+          - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
+          - always: Whatever stdout is
+          - never:  Never
+          
+          [default: auto]
+
+  -4
+          Use IPv4 only
+
+  -6
+          Use IPv6 only
+
+      --timeout <SECS>
+          Give up on a request after this many seconds
+          
+          [default: 10]
+
+      --proxy <none|env|URL>
+          Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL
+          
+          [default: none]
+
+  -v, --verbose
+          Log requests and responses to stderr
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Exit codes:
+  0  success
+  1  no answer could be obtained (network, provider or HTTP error)
+  2  usage error
+  3  --verify ran but providers disagreed
+=== -h
+Where am I on the network, and what will others see?
+
+Usage: myip [OPTIONS] [FIELD] [COMMAND]
+
+Commands:
+  public  Print your public IP address, as seen by independent providers
+  local   Interfaces with their scope, and the address used to reach the internet
+  where   Whether this process runs on a host, in a container or in a Kubernetes pod
+  all     Public address, local interfaces and location together, with NAT and pod highlights
+
+Arguments:
+  [FIELD]  ipinfo.io path to print, e.g. ip, city, 8.8.8.8/org, json?token=TOKEN
+
+Options:
+      --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+      --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
+      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+  -4                          Use IPv4 only
+  -6                          Use IPv6 only
+      --timeout <SECS>        Give up on a request after this many seconds [default: 10]
+      --proxy <none|env|URL>  Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL [default: none]
+  -v, --verbose               Log requests and responses to stderr
+  -h, --help                  Print help (see more with '--help')
+  -V, --version               Print version
+
+Exit codes:
+  0  success
+  1  no answer could be obtained (network, provider or HTTP error)
+  2  usage error
+  3  --verify ran but providers disagreed
+=== public --help
+Print your public IP address, as seen by independent providers
+
+Asks cloudflare (one.one.one.one), ipify (api64.ipify.org), checkip.amazonaws.com, icanhazip.com, ident.me and ipinfo.io in that order and prints the first valid answer. With --verify it asks all of them at once and compares the answers per address family. The providers see your public address; that is the point.
+
+With a FIELD (`myip public city`) it is the same as `myip city`: ipinfo.io answers alone and the answer is not verified.
+
+Usage: myip public [OPTIONS] [FIELD]
+
+Arguments:
+  [FIELD]
+          ipinfo.io path to print, e.g. city, region, country: the same as `myip FIELD`, answered by ipinfo.io alone and not verified
+
+Options:
+      --json
+          Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+
+      --verify
+          Ask every provider and require agreeing answers from at least two independent operators per family; exit 3 if they differ
+
+      --format <FORMAT>
+          How public, local, where and all write their result (not with FIELD)
+
+          Possible values:
+          - text:        For people; the layout is not a stable interface
+          - json:        One compact JSON line; its bytes are stable (schema_version 1)
+          - json-pretty: The same document, indented; stable to parse, not byte for byte
+          - yaml:        The same document as YAML; stable to parse, not byte for byte
+
+      --color <WHEN>
+          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+
+          Possible values:
+          - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
+          - always: Whatever stdout is
+          - never:  Never
+          
+          [default: auto]
+
+  -4
+          Use IPv4 only
+
+  -6
+          Use IPv6 only
+
+      --timeout <SECS>
+          Give up on a request after this many seconds
+          
+          [default: 10]
+
+      --proxy <none|env|URL>
+          Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL
+          
+          [default: none]
+
+  -v, --verbose
+          Log requests and responses to stderr
+
+  -h, --help
+          Print help (see a summary with '-h')
+=== public -h
+Print your public IP address, as seen by independent providers
+
+Usage: myip public [OPTIONS] [FIELD]
+
+Arguments:
+  [FIELD]  ipinfo.io path to print, e.g. city, region, country: the same as `myip FIELD`, answered by ipinfo.io alone and not verified
+
+Options:
+      --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+      --verify                Ask every provider and require agreeing answers from at least two independent operators per family; exit 3 if they differ
+      --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
+      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+  -4                          Use IPv4 only
+  -6                          Use IPv6 only
+      --timeout <SECS>        Give up on a request after this many seconds [default: 10]
+      --proxy <none|env|URL>  Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL [default: none]
+  -v, --verbose               Log requests and responses to stderr
+  -h, --help                  Print help (see more with '--help')
+=== local --help
+Interfaces with their scope, and the address used to reach the internet
+
+Usage: myip local [OPTIONS]
+
+Options:
+      --json
+          Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+
+      --format <FORMAT>
+          How public, local, where and all write their result (not with FIELD)
+
+          Possible values:
+          - text:        For people; the layout is not a stable interface
+          - json:        One compact JSON line; its bytes are stable (schema_version 1)
+          - json-pretty: The same document, indented; stable to parse, not byte for byte
+          - yaml:        The same document as YAML; stable to parse, not byte for byte
+
+      --color <WHEN>
+          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+
+          Possible values:
+          - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
+          - always: Whatever stdout is
+          - never:  Never
+          
+          [default: auto]
+
+  -4
+          Use IPv4 only
+
+  -6
+          Use IPv6 only
+
+      --timeout <SECS>
+          Give up on a request after this many seconds
+          
+          [default: 10]
+
+      --proxy <none|env|URL>
+          Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL
+          
+          [default: none]
+
+  -v, --verbose
+          Log requests and responses to stderr
+
+  -h, --help
+          Print help (see a summary with '-h')
+=== local -h
+Interfaces with their scope, and the address used to reach the internet
+
+Usage: myip local [OPTIONS]
+
+Options:
+      --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+      --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
+      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+  -4                          Use IPv4 only
+  -6                          Use IPv6 only
+      --timeout <SECS>        Give up on a request after this many seconds [default: 10]
+      --proxy <none|env|URL>  Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL [default: none]
+  -v, --verbose               Log requests and responses to stderr
+  -h, --help                  Print help (see more with '--help')
+=== where --help
+Whether this process runs on a host, in a container or in a Kubernetes pod
+
+Usage: myip where [OPTIONS]
+
+Options:
+      --json
+          Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+
+      --format <FORMAT>
+          How public, local, where and all write their result (not with FIELD)
+
+          Possible values:
+          - text:        For people; the layout is not a stable interface
+          - json:        One compact JSON line; its bytes are stable (schema_version 1)
+          - json-pretty: The same document, indented; stable to parse, not byte for byte
+          - yaml:        The same document as YAML; stable to parse, not byte for byte
+
+      --color <WHEN>
+          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+
+          Possible values:
+          - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
+          - always: Whatever stdout is
+          - never:  Never
+          
+          [default: auto]
+
+  -4
+          Use IPv4 only
+
+  -6
+          Use IPv6 only
+
+      --timeout <SECS>
+          Give up on a request after this many seconds
+          
+          [default: 10]
+
+      --proxy <none|env|URL>
+          Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL
+          
+          [default: none]
+
+  -v, --verbose
+          Log requests and responses to stderr
+
+  -h, --help
+          Print help (see a summary with '-h')
+=== where -h
+Whether this process runs on a host, in a container or in a Kubernetes pod
+
+Usage: myip where [OPTIONS]
+
+Options:
+      --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+      --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
+      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+  -4                          Use IPv4 only
+  -6                          Use IPv6 only
+      --timeout <SECS>        Give up on a request after this many seconds [default: 10]
+      --proxy <none|env|URL>  Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL [default: none]
+  -v, --verbose               Log requests and responses to stderr
+  -h, --help                  Print help (see more with '--help')
+=== all --help
+Public address, local interfaces and location together, with NAT and pod highlights
+
+The public address comes from the same providers as `myip public`. A section that cannot be produced is reported in place and the exit code stays 0; only a --verify disagreement exits 3.
+
+Usage: myip all [OPTIONS]
+
+Options:
+      --json
+          Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+
+      --verify
+          Ask every provider for the public address and require agreeing answers from at least two independent operators per family; exit 3 if they differ
+
+      --format <FORMAT>
+          How public, local, where and all write their result (not with FIELD)
+
+          Possible values:
+          - text:        For people; the layout is not a stable interface
+          - json:        One compact JSON line; its bytes are stable (schema_version 1)
+          - json-pretty: The same document, indented; stable to parse, not byte for byte
+          - yaml:        The same document as YAML; stable to parse, not byte for byte
+
+      --color <WHEN>
+          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+
+          Possible values:
+          - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
+          - always: Whatever stdout is
+          - never:  Never
+          
+          [default: auto]
+
+  -4
+          Use IPv4 only
+
+  -6
+          Use IPv6 only
+
+      --timeout <SECS>
+          Give up on a request after this many seconds
+          
+          [default: 10]
+
+      --proxy <none|env|URL>
+          Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL
+          
+          [default: none]
+
+  -v, --verbose
+          Log requests and responses to stderr
+
+  -h, --help
+          Print help (see a summary with '-h')
+=== all -h
+Public address, local interfaces and location together, with NAT and pod highlights
+
+Usage: myip all [OPTIONS]
+
+Options:
+      --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
+      --verify                Ask every provider for the public address and require agreeing answers from at least two independent operators per family; exit 3 if they differ
+      --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
+      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+  -4                          Use IPv4 only
+  -6                          Use IPv6 only
+      --timeout <SECS>        Give up on a request after this many seconds [default: 10]
+      --proxy <none|env|URL>  Proxy for outgoing requests: none (default), env (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY) or an http:// URL [default: none]
+  -v, --verbose               Log requests and responses to stderr
+  -h, --help                  Print help (see more with '--help')

@@ -67,6 +67,14 @@ pub enum ColorChoice {
     Never,
 }
 
+/// The `--color` choice that `--help` has to honour: clap stops at `--help` before a later
+/// `--color` can be parsed, so the arguments are read here. The last `--color VALUE` or
+/// `--color=VALUE` before a bare `--` whose value is `auto`, `always` or `never` wins; with
+/// none, `auto`.
+pub fn prescan_color(_args: &[String]) -> ColorChoice {
+    ColorChoice::Auto
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct Options {
     /// Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
@@ -298,5 +306,67 @@ impl TypedValueParser for ProxyParser {
                 "invalid value for '--proxy <none|env|URL>': expected `none`, `env` or an http://HOST:PORT URL",
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan(args: &[&str]) -> ColorChoice {
+        let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        prescan_color(&args)
+    }
+
+    #[test]
+    fn prescan_reads_the_color_flag_in_every_position() {
+        use ColorChoice::{Always, Auto, Never};
+        let table: &[(&[&str], ColorChoice)] = &[
+            (&[], Auto),
+            (&["--help"], Auto),
+            (&["--color", "always", "--help"], Always),
+            (&["--color=never", "--help"], Never),
+            (&["--color=auto", "--help"], Auto),
+            (&["--help", "--color", "never"], Never),
+            (&["--help", "--color=always"], Always),
+            (&["public", "--help", "--color", "always"], Always),
+            (&["public", "--color=always", "--help"], Always),
+            (&["--color", "always", "public", "--help"], Always),
+            (&["-v", "-4", "--color", "never", "where", "--help"], Never),
+            // The last valid spelling wins, before or after the command.
+            (
+                &["--color", "always", "where", "--color", "never", "-h"],
+                Never,
+            ),
+            (&["--color", "never", "--color", "always"], Always),
+            (&["--color=never", "--color", "always"], Always),
+            (&["--color", "always", "--color", "auto"], Auto),
+            // An invalid spelling counts for nothing: it is skipped, or `auto` when alone.
+            (&["--color", "always", "--color", "rainbow"], Always),
+            (&["--color", "rainbow", "--color=never"], Never),
+            (&["--color", "rainbow", "--help"], Auto),
+            (&["--color=", "--help"], Auto),
+            (&["--color", "", "--help"], Auto),
+            (&["--color", "ALWAYS", "--help"], Auto),
+            (&["--color=always=never", "--help"], Auto),
+            // A bare `--` ends the options: what follows is a FIELD, not a flag.
+            (&["--", "--color", "always"], Auto),
+            (&["--color", "always", "--", "--color", "never"], Always),
+            // A flag with no value, and flags that are not `--color`.
+            (&["--help", "--color"], Auto),
+        ];
+        for (args, want) in table {
+            assert_eq!(scan(args), *want, "{args:?}");
+        }
+        for args in [
+            &["--colour", "always", "--help"][..],
+            &["--colorful=always", "--help"],
+            &["--format", "always", "--help"],
+            &["-C", "always", "--help"],
+            &["always", "--help"],
+        ] {
+            assert_eq!(scan(args), ColorChoice::Auto, "{args:?}");
+        }
+        assert_eq!(scan(&["--color", "always", "--color"]), ColorChoice::Always);
     }
 }
