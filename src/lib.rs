@@ -25,7 +25,7 @@ use std::ffi::OsString;
 use std::io::Write;
 
 use clap::Parser;
-
+use clap::error::ErrorKind;
 use cli::{Cli, Command};
 use egress::{EgressProbe, UdpProbe};
 use env::{Env, SystemEnv};
@@ -79,10 +79,17 @@ pub fn run(args: &[String], ctx: &mut Context<'_>) -> u8 {
             Ok(cli) => cli,
             Err(e) => {
                 // `--help` and `--version` arrive here too; clap says which stream they belong on.
-                let rendered = redact::redact_arg_queries(
-                    &redact::redact_userinfo(&e.render().to_string()),
-                    args,
-                );
+                // Only `--help` can be coloured, and only when `style::enabled` says so: the
+                // rendered text without style is the form for everything else.
+                let rendered = e.render();
+                let text = if e.kind() == ErrorKind::DisplayHelp
+                    && style::enabled(cli::prescan_color(args), &ctx.terminal)
+                {
+                    rendered.ansi().to_string()
+                } else {
+                    rendered.to_string()
+                };
+                let rendered = redact::redact_arg_queries(&redact::redact_userinfo(&text), args);
                 let sink = if e.use_stderr() {
                     &mut ctx.err
                 } else {
@@ -3553,7 +3560,7 @@ mod tests {
     }
 
     #[test]
-    fn stderr_and_help_are_never_coloured() {
+    fn stderr_the_version_and_usage_errors_are_never_coloured() {
         for args in [
             &["-v", "all"][..],
             &["-v", "local"],
@@ -3576,9 +3583,7 @@ mod tests {
             assert!(out.contains('\u{1b}'), "{args:?} must still colour stdout");
         }
         for args in [
-            &["--color", "always", "--help"][..],
-            &["--color", "always", "where", "--help"],
-            &["--color", "always", "--version"],
+            &["--color", "always", "--version"][..],
             &["--color", "always", "--format", "toml"],
         ] {
             let (_, out, err) = exec(&no_network(), args);

@@ -29,7 +29,7 @@ Options:
           - yaml:        The same document as YAML; stable to parse, not byte for byte
 
       --color <WHEN>
-          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr)
 
           Possible values:
           - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
@@ -85,7 +85,7 @@ Arguments:
 Options:
       --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
       --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
-      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+      --color <WHEN>          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
   -4                          Use IPv4 only
   -6                          Use IPv6 only
       --timeout <SECS>        Give up on a request after this many seconds [default: 10]
@@ -129,7 +129,7 @@ Options:
           - yaml:        The same document as YAML; stable to parse, not byte for byte
 
       --color <WHEN>
-          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr)
 
           Possible values:
           - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
@@ -171,7 +171,7 @@ Options:
       --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
       --verify                Ask every provider and require agreeing answers from at least two independent operators per family; exit 3 if they differ
       --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
-      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+      --color <WHEN>          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
   -4                          Use IPv4 only
   -6                          Use IPv6 only
       --timeout <SECS>        Give up on a request after this many seconds [default: 10]
@@ -197,7 +197,7 @@ Options:
           - yaml:        The same document as YAML; stable to parse, not byte for byte
 
       --color <WHEN>
-          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr)
 
           Possible values:
           - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
@@ -235,7 +235,7 @@ Usage: myip local [OPTIONS]
 Options:
       --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
       --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
-      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+      --color <WHEN>          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
   -4                          Use IPv4 only
   -6                          Use IPv6 only
       --timeout <SECS>        Give up on a request after this many seconds [default: 10]
@@ -261,7 +261,7 @@ Options:
           - yaml:        The same document as YAML; stable to parse, not byte for byte
 
       --color <WHEN>
-          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr)
 
           Possible values:
           - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
@@ -299,7 +299,7 @@ Usage: myip where [OPTIONS]
 Options:
       --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
       --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
-      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+      --color <WHEN>          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
   -4                          Use IPv4 only
   -6                          Use IPv6 only
       --timeout <SECS>        Give up on a request after this many seconds [default: 10]
@@ -330,7 +330,7 @@ Options:
           - yaml:        The same document as YAML; stable to parse, not byte for byte
 
       --color <WHEN>
-          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr)
+          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr)
 
           Possible values:
           - auto:   Only when stdout is a terminal that supports it (NO_COLOR, CLICOLOR and CLICOLOR_FORCE apply)
@@ -369,7 +369,7 @@ Options:
       --json                  Same as --format json; with FIELD the ipinfo.io body is passed through unchanged
       --verify                Ask every provider for the public address and require agreeing answers from at least two independent operators per family; exit 3 if they differ
       --format <FORMAT>       How public, local, where and all write their result (not with FIELD) [possible values: text, json, json-pretty, yaml]
-      --color <WHEN>          Colour for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
+      --color <WHEN>          Colour for --help and for the text of local, where, all and a provider disagreement (never for documents or stderr) [default: auto] [possible values: auto, always, never]
   -4                          Use IPv4 only
   -6                          Use IPv6 only
       --timeout <SECS>        Give up on a request after this many seconds [default: 10]

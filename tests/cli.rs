@@ -596,7 +596,8 @@ fn help_without_its_codes_is_the_plain_help_of_0_3_0_in_every_form() {
 
 #[test]
 fn help_is_plain_in_a_pipe_and_whenever_colour_is_off() {
-    let cases: [(&[&str], &[(&str, &str)]); 12] = [
+    type Env<'a> = &'a [(&'a str, &'a str)];
+    let cases: [(&[&str], Env); 12] = [
         (&["--help"], &[]),
         (&["-h"], &[]),
         (&["public", "--help"], &[]),
